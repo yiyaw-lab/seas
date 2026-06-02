@@ -41,7 +41,13 @@ def fail(message):
     sys.exit(1)
 
 
-def main():
+def send_message(text):
+    """Send `text` to the configured Telegram chat.
+
+    Reads TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from the environment (.env is
+    loaded above). Exits via fail() on missing creds or delivery errors.
+    Importable by other senders (e.g. argo_project.py).
+    """
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -60,15 +66,8 @@ def main():
             + ". Set them before running (see docs/TELEGRAM_SETUP.md)."
         )
 
-    if not MESSAGE_PATH.exists():
-        fail(
-            f"Message file not found: {MESSAGE_PATH.relative_to(ROOT)}. "
-            "Run `python src/seas_demo.py` first."
-        )
-
-    text = MESSAGE_PATH.read_text().strip()
-    if not text:
-        fail(f"Message file is empty: {MESSAGE_PATH.relative_to(ROOT)}.")
+    if not text or not text.strip():
+        fail("Refusing to send an empty message.")
 
     payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
 
@@ -79,7 +78,7 @@ def main():
         method="POST",
     )
 
-    print("📨 Sending SEAS weekly message to Telegram...")
+    print("📨 Sending message to Telegram...")
 
     # Verify TLS against certifi's CA bundle when available (some Python builds,
     # notably macOS framework Python, ship without trusted roots). Falls back to
@@ -106,6 +105,20 @@ def main():
         fail(f"Telegram API rejected the request: {body}")
 
     print("✅ Message delivered to Telegram.")
+
+
+def main():
+    if not MESSAGE_PATH.exists():
+        fail(
+            f"Message file not found: {MESSAGE_PATH.relative_to(ROOT)}. "
+            "Run `python src/seas_demo.py` first."
+        )
+
+    text = MESSAGE_PATH.read_text().strip()
+    if not text:
+        fail(f"Message file is empty: {MESSAGE_PATH.relative_to(ROOT)}.")
+
+    send_message(text)
 
 
 if __name__ == "__main__":
