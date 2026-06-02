@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 
 with open("data/signals.json", "r") as f:
     signals = json.load(f)
@@ -14,13 +15,26 @@ print("\n🌊 SEAS Weekly Run\n")
 subprocess.run(["python", "src/week.py"])
 
 if unscored:
-    print("\n⚠️ Some signals still need scoring.")
-    print("Next command:")
-    print("python src/auto_score.py")
-else:
-    print("\n✅ All signals scored.")
-    print("\nGenerating ranked opportunities...\n")
-    subprocess.run(["python", "src/opportunities.py"], check=True)
+    print("\n❌ SEAS BLOCKED")
+    print("Unscored signals detected:\n")
 
-    print("\nGenerating experiment recommendation...\n")
-    subprocess.run(["python", "src/main.py"], check=True)
+    for signal in unscored:
+        print(f"- {signal['title']}")
+
+    sys.exit(1)
+
+print("\n✅ All signals scored.")
+
+print("\nGenerating ranked opportunities...\n")
+subprocess.run(
+    ["python", "src/opportunities.py"],
+    check=True
+)
+
+print("\nGenerating experiment recommendation...\n")
+subprocess.run(
+    ["python", "src/main.py"],
+    check=True
+)
+
+print("\n✅ SEAS completed successfully.")
