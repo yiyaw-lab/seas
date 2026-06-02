@@ -128,7 +128,13 @@ def generate_project(prompt):
             text = observe.generate_observations(prompt, model)
             return (text, model), None
         except Exception as exc:
-            errors.append(f"{model}: {exc}")
+            # Include type + underlying cause; the SDK's "Connection error"
+            # otherwise hides the real reason (SSL / DNS / proxy / timeout).
+            detail = f"{type(exc).__name__}: {exc}"
+            cause = getattr(exc, "__cause__", None)
+            if cause is not None:
+                detail += f"  <- {type(cause).__name__}: {cause}"
+            errors.append(f"{model}: {detail}")
     return None, errors
 
 
