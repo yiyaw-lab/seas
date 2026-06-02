@@ -1,4 +1,4 @@
-name: SEAS Friday Telegram
+name: Argo V2 Friday Telegram
 
 on:
   schedule:
@@ -20,11 +20,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate weekly project message
-        run: python src/seas_demo.py
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Send message to Telegram
+      - name: Generate fresh Argo V2 project and send to Telegram
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ARGO_MODEL: ${{ vars.ARGO_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/send_telegram.py
+        run: python src/argo_project.py
