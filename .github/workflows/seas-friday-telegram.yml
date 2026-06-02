@@ -1,0 +1,30 @@
+name: SEAS Friday Telegram
+
+on:
+  schedule:
+    # 08:00 America/Los_Angeles. GitHub cron is UTC and has no DST awareness,
+    # so this fires at 15:00 UTC (PST, winter). During PDT it lands at 08:00.
+    - cron: "0 15 * * 5"
+  workflow_dispatch:
+
+jobs:
+  send-telegram:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate weekly project message
+        run: python src/seas_demo.py
+
+      - name: Send message to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/send_telegram.py
