@@ -2,3 +2,6 @@
 python-dotenv   # load OPENAI_API_KEY / ANTHROPIC_API_KEY / ARGO_MODEL from .env
 openai          # gpt-* / o* models
 anthropic       # claude-* models (provider supported by argo_observe.py)
+
+# Telegram delivery (src/send_telegram.py)
+certifi         # CA bundle for TLS verification (macOS framework Python lacks roots)
