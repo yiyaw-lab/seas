@@ -2,7 +2,8 @@
 Send the SEAS weekly project message to Telegram.
 
 Reads demo/weekly_project_message.md and delivers it via the Telegram Bot API
-sendMessage method. Credentials come from the environment:
+sendMessage method. Credentials come from a .env file (via python-dotenv) or
+the environment:
 
     TELEGRAM_BOT_TOKEN   bot token from BotFather
     TELEGRAM_CHAT_ID     chat id to send to
@@ -13,6 +14,7 @@ not modify any existing file. Run with:  python src/send_telegram.py
 
 import json
 import os
+import ssl
 import sys
 import urllib.request
 import urllib.error
@@ -20,6 +22,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MESSAGE_PATH = ROOT / "demo" / "weekly_project_message.md"
+
+# Load .env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) if python-dotenv is
+# installed; otherwise fall back to the real environment. Never hard-depends
+# on dotenv.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
 
 API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -69,8 +81,20 @@ def main():
 
     print("📨 Sending SEAS weekly message to Telegram...")
 
+    # Verify TLS against certifi's CA bundle when available (some Python builds,
+    # notably macOS framework Python, ship without trusted roots). Falls back to
+    # the system default context — verification stays ON either way.
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        import certifi
+
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ssl_context = ssl.create_default_context()
+
+    try:
+        with urllib.request.urlopen(
+            request, timeout=30, context=ssl_context
+        ) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
