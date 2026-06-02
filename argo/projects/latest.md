@@ -4,18 +4,18 @@
 
 I've been watching something.
 
-Everyone is focused on creating individual AI agents, but they are walking past how the organization of these agents can influence cognitive processes. If organizational structures determine the type of thinking an AI system performs, new cognitive operations can be cultivated by reconfiguring agent collaboration frameworks.
+Everyone is focused on AI's role in complex optimizations and scraping all kinds of web data. But few are considering how these tools can enhance public health research. AI-driven optimization has applications beyond tech — it's a crucial area for medical diagnosis.
 
 This week's bet:
-Cognitive Ops Framework
+Augmented Health Diagnosis Framework
 
-Build a prototype framework that allows developers to experiment with different organizational structures for AI agents, testing how these arrangements influence task outcomes.
+Build an AI framework that combines scraping medical databases with optimal transport-based algorithms to identify rare disease markers efficiently.
 
 Artifact:
-Prototype tool and documentation
+A GitHub repository for medical research teams to improve diagnosis accuracy.
 
 Effort:
-A week
+A weekend
 
 Potential upside:
-Understanding and implementing agent organizational structures could unlock new cognitive capabilities, transforming AI systems from isolated thinkers to collaborative theorists.
+Unlock new potential in healthcare by improving diagnosis rates for rare diseases using advanced AI techniques.

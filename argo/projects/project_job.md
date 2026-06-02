@@ -43,101 +43,17 @@ Rules:
 
 ## Frontier signals
 
-1. Claude Code Subagents
-   Source: Anthropic
-   Category: Agent Architecture
-   Summary: Specialized subagents collaborating on tasks
+1. Optimal Transport-based Permutation-Invariant Bayesian Optimization of Offshore Wind Farm Layouts
+   Source: arXiv cs.AI
+   Category: arXiv cs.AI
+   Summary: arXiv:2606.00009v1 Announce Type: new Abstract: Bayesian Optimization (BO) is widely and successfully adopted for solving optimization problems having an expensive-to-evaluate, black-box, and non-convex objective function. However, the vanilla BO algorithm is not able to exploit possible symmetries characterizing the target problem. An intuitive case is given by optimal location problems, whose de
 
-2. Agent Evaluation Harnesses
-   Source: Frontier AI Builders
-   Category: Evaluation Infrastructure
-   Summary: Structured evaluation harnesses are becoming essential for measuring whether agents actually perform reliably instead of merely appearing capable.
+2. D4Vinci/Scrapling
+   Source: GitHub Trending
+   Category: GitHub Trending
+   Summary: 🕷️ An adaptive Web Scraping framework that handles everything from a single request to a full-scale crawl! Effortless Web Scraping for the Modern Web العربيه | Español | Português (Brasil) | Français | Deutsch | 简体中文 | 日本語 | Русский | 한국어 Selection methods · Fetchers · Spiders · Proxy Rotation · CLI · MCP Scrapling is an adaptive Web Scraping framework that handles everything from a single request
 
-3. MCP Ecosystem Growth
-   Source: Model Context Protocol (MCP) Ecosystem
-   Category: AI Infrastructure
-   Summary: The Model Context Protocol is rapidly becoming a standard way for AI agents to access tools, data sources, and external systems through a common interface. Growth in MCP integrations suggests increasing interoperability across agent ecosystems and developer tools.
-
----
-
-## Context — Finding F-001 (cross-signal pattern)
-
-# F-001: Agent Organizational Structures May Function as Cognitive Operators
-
-Date:
-2026-06-02
-
-Source Experiments:
-
-- SEAS-001 Agent Organization Lab
-- SEAS-002 MCP Organization Lab
-
-Finding
-
-Agent organizational structures may systematically influence the type of thinking produced.
-
-Observed Pattern
-
-Signal
-↓
-Determines topic domain
-
-Organizational Structure
-↓
-Determines cognitive operation
-
-Evidence
-
-Researcher
-
-Claude Code Subagents
-→ Organizational Scaling Laws
-
-MCP Ecosystem Growth
-→ Capability Modularity
-→ Capability Graphs
-→ Capability Marketplaces
-
-Common Pattern
-
-- pattern recognition
-- abstraction
-- theory generation
-- unanswered questions
-
-Interpretation
-
-The Researcher organizational structure appears to consistently produce Theory Thinking across different frontier signals.
-
-Tentative Cognitive Operations Map
-
-Single Agent
-→ Benchmark Thinking
-
-Researcher
-→ Theory Thinking
-
-Critic
-→ Assumption-Challenging Thinking
-
-Researcher + Critic
-→ Meta-Theory Thinking
-
-Confidence
-
-Low
-
-Reason
-
-Only two signals tested.
-
-Next Tests
-
-- Additional frontier signals
-- Debate Team
-- Manager + Specialists
-- Repeated trials
-
-Status
-
-Tentative Finding
+3. Boston Children’s uses AI to unlock new diagnoses
+   Source: OpenAI News
+   Category: OpenAI News
+   Summary: Boston Children’s Hospital uses OpenAI technology to improve patient care, reduce operational burden, and help diagnose more than 40 rare disease cases.
