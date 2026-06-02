@@ -32,19 +32,26 @@ SIGNALS_PATH = ROOT / "data" / "signals.json"
 NUM_SIGNALS = 6
 # Pull this many recent items per feed before selecting across feeds.
 PER_FEED = 8
-# How many of the most-recent items to sample from (rotation breaks the
-# single-theme rut: each run picks a different subset of the fresh pool).
-RECENT_POOL = 18
 
-# Curated frontier feeds. Add/remove sources here — this is the control surface
-# for what Argo "watches". Each: (label/category, url).
+# Curated frontier feeds — the control surface for what Argo "watches".
+# Balanced across three lenses so insights don't collapse to one theme:
+#   research (arXiv), what builders ship/star (GitHub), and company releases.
+# Each: (label/category, url).
+# Note: Anthropic publishes no working public RSS as of 2026-06; add here if it
+# ever does, e.g. ("Anthropic News", "https://www.anthropic.com/news/rss.xml").
 FEEDS = [
-    ("arXiv cs.AI", "http://export.arxiv.org/rss/cs.AI"),
-    ("arXiv cs.LG", "http://export.arxiv.org/rss/cs.LG"),
-    ("arXiv cs.CL", "http://export.arxiv.org/rss/cs.CL"),
-    ("Hacker News (front)", "https://hnrss.org/frontpage"),
-    ("Google AI Blog", "https://blog.google/technology/ai/rss/"),
+    # Research
+    ("arXiv cs.AI", "https://export.arxiv.org/rss/cs.AI"),
+    ("arXiv cs.LG", "https://export.arxiv.org/rss/cs.LG"),
+    ("arXiv cs.CL", "https://export.arxiv.org/rss/cs.CL"),
+    # GitHub trending (no official RSS; mshibanami is the standard mirror)
+    ("GitHub Trending", "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml"),
+    ("GitHub Trending (Python)", "https://mshibanami.github.io/GitHubTrendingRSS/daily/python.xml"),
+    # Company changelogs / releases
+    ("OpenAI News", "https://openai.com/news/rss.xml"),
     ("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
+    ("GitHub Changelog", "https://github.blog/changelog/feed/"),
+    ("Google AI Blog", "https://blog.google/technology/ai/rss/"),
 ]
 
 USER_AGENT = "argo-fetch-signals/1.0 (+https://github.com/yiyaw-lab/seas)"
@@ -137,6 +144,16 @@ def fetch_feed(label, url):
     return items[:PER_FEED]
 
 
+def lens_of(source):
+    """Map a feed's source label to one of three lenses for balanced selection."""
+    s = source.lower()
+    if s.startswith("arxiv"):
+        return "research"
+    if "github trending" in s:
+        return "github"
+    return "company"  # OpenAI / HF / GitHub Changelog / Google AI
+
+
 def to_signal(item):
     return {
         "title": item["title"],
@@ -168,9 +185,7 @@ def main():
               "unchanged.")
         sys.exit(1)
 
-    # De-dup by title, take the freshest RECENT_POOL, then randomly sample
-    # NUM_SIGNALS so each run sees a different cross-section (breaks the
-    # single-theme rut).
+    # De-dup by title.
     seen = set()
     deduped = []
     for item in pool:
@@ -179,8 +194,23 @@ def main():
             seen.add(key)
             deduped.append(item)
 
-    recent = deduped[:RECENT_POOL]
-    chosen = random.sample(recent, min(NUM_SIGNALS, len(recent)))
+    # Stratify by lens so the high-volume academic feed can't dominate the pick.
+    # Round-robin across lenses, sampling within each, until we have NUM_SIGNALS.
+    # This is what keeps the selection balanced (fetching balanced isn't enough).
+    buckets = {"research": [], "github": [], "company": []}
+    for item in deduped:
+        buckets[lens_of(item["source"])].append(item)
+
+    for items in buckets.values():
+        random.shuffle(items)
+
+    chosen = []
+    order = ["research", "github", "company"]
+    while len(chosen) < NUM_SIGNALS and any(buckets[l] for l in order):
+        for lens in order:
+            if buckets[lens] and len(chosen) < NUM_SIGNALS:
+                chosen.append(buckets[lens].pop())
+
     signals = [to_signal(i) for i in chosen]
 
     SIGNALS_PATH.write_text(json.dumps(signals, indent=2) + "\n")
