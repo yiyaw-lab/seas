@@ -3,8 +3,11 @@ from datetime import datetime
 from score import score_signal, qualifies
 from experiment import generate_experiment
 
+def format_list(items):
+    return "\n".join([f"- {item}" for item in items])
+
 def main():
-    print("🌊 SEAS v0.3\n")
+    print("🌊 SEAS v0.4\n")
 
     with open("data/signals.json", "r") as f:
         signals = json.load(f)
@@ -13,21 +16,13 @@ def main():
 
     for signal in signals:
         weighted_score = score_signal(signal)
-
         signal["weighted_score"] = weighted_score
         signal["qualifies"] = qualifies(signal, weighted_score)
-
         scored_signals.append(signal)
 
-    scored_signals.sort(
-        key=lambda x: x["weighted_score"],
-        reverse=True
-    )
+    scored_signals.sort(key=lambda x: x["weighted_score"], reverse=True)
 
-    winner = next(
-        (s for s in scored_signals if s["qualifies"]),
-        None
-    )
+    winner = next((s for s in scored_signals if s["qualifies"]), None)
 
     if winner is None:
         print("No signal cleared the threshold.")
@@ -41,30 +36,68 @@ def main():
 
     print("🧪 Recommended Experiment")
     print(f"Title: {experiment['title']}")
+    print(f"Capability: {experiment['capability']}")
+    print(f"Artifact: {experiment['artifact']}")
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    output = f"""# SEAS Run
-
-Date: {today}
+    output = f"""# SEAS Run — {today}
 
 ## Selected Opportunity
 
-{winner['title']}
+**{winner['title']}**
 
 Score: {winner['weighted_score']}
 
-## Recommended Experiment
+## Experiment Card
 
-Title: {experiment['title']}
+### Title
 
-Capability: {experiment['capability']}
+{experiment['title']}
 
-Artifact: {experiment['artifact']}
+### Source Signal
 
-Completion Condition:
+{experiment['source_signal']}
+
+### Capability Created
+
+{experiment['capability']}
+
+### Why Now
+
+{experiment['why_now']}
+
+### Time Scope
+
+{experiment['time_scope']}
+
+### Artifact
+
+{experiment['artifact']}
+
+### Completion Condition
 
 {experiment['completion']}
+
+### Build Steps
+
+{format_list(experiment['build_steps'])}
+
+### Failure Risks
+
+{format_list(experiment['failure_risks'])}
+
+### Fallback Plan
+
+{experiment['fallback_plan']}
+
+### Reflection Prompt
+
+{experiment['reflection_prompt']}
+
+### Possible Public Output
+
+{experiment['possible_public_output']}
 """
 
     filename = f"runs/{today}-experiment.md"

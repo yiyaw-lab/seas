@@ -12,5 +12,19 @@
       "accessibility": 4,
       "novelty": 4
     }
+  },
+  {
+    "title": "Agent Evaluation Harnesses",
+    "source": "Frontier AI Builders",
+    "category": "Evaluation Infrastructure",
+    "summary": "Builders are increasingly creating structured evals to test whether agent workflows actually perform reliably instead of just appearing impressive",
+    "possible_capability_unlocked": "Agent Evaluation Design",
+    "scores": {
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 5,
+      "accessibility": 4,
+      "novelty": 4
+    }
   }
 ]

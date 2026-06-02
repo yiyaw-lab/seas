@@ -45,3 +45,12 @@ Return ONLY valid JSON:
   "novelty": X,
   "reasoning": "one short paragraph"
 }
+
+
+Signal to score:
+
+Title: Agent Evaluation Harnesses
+Source: Frontier AI Builders
+Category: Evaluation Infrastructure
+Summary: Builders are increasingly creating structured evals to test whether agent workflows actually perform reliably instead of just appearing impressive
+Capability Unlocked: Agent Evaluation Design
