@@ -24,6 +24,7 @@ Run with:  python src/argo_project.py            (generate + send)
            python src/argo_project.py --no-send   (generate only, print)
 """
 
+import json
 import os
 import sys
 from datetime import datetime
@@ -34,7 +35,29 @@ import send_telegram
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "argo" / "projects"
+# Structured project log — one entry per generated project, so each can be rated
+# later (see argo_rate.py). Lives in data/ alongside argo_bets.json.
+PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
 TODAY = datetime.now().strftime("%Y-%m-%d")
+
+
+def log_project(project_text, model):
+    """Append a project entry and return its id. Rating attaches to this later."""
+    log = []
+    if PROJECTS_LOG.exists():
+        log = json.loads(PROJECTS_LOG.read_text())
+
+    project_id = f"P-{len(log) + 1:03d}"
+    log.append({
+        "id": project_id,
+        "date": TODAY,
+        "model": model,
+        "text": project_text,
+        "energy": None,   # filled by argo_rate.py when you reply on Telegram
+        "rated_at": None,
+    })
+    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
+    return project_id
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +202,12 @@ def main():
     latest_path.write_text(stamped)
     dated_path.write_text(stamped)
 
+    project_id = log_project(project_text, model)
+
     print(f"Generated project with: {model}")
     print(f"Wrote: {latest_path.relative_to(ROOT)}")
     print(f"Wrote: {dated_path.relative_to(ROOT)}")
+    print(f"Logged: {PROJECTS_LOG.relative_to(ROOT)} ({project_id})")
     print("\n--- Project ---\n")
     print(project_text)
     print()
@@ -190,7 +216,9 @@ def main():
         print("(--no-send: not sending to Telegram)\n")
         return
 
-    send_telegram.send_message(project_text)
+    # Invite a rating reply; argo_rate.py reads it back from Telegram.
+    message = project_text + "\n\n— Reply 1-10: how much do you want to build this?"
+    send_telegram.send_message(message)
     print()
 
 

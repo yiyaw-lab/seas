@@ -5,3 +5,6 @@ __pycache__/
 
 # Transient runtime data: refreshed each run by src/fetch_signals.py
 data/signals.json
+
+# Transient Telegram bot read-offset (argo_rate.py)
+argo/telegram_offset.json
