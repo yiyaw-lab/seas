@@ -174,43 +174,16 @@ and the evidence generalized into a claim.
 # ---------------------------------------------------------------------------
 # Output 2: weekly project message (text-message style)
 # ---------------------------------------------------------------------------
+# Argo owns the weekly bet voice. There is exactly ONE bet formatter in the
+# repo (argo.format_bet); this demo calls it so the Telegram message and Argo's
+# own output can never drift apart.
+
+import argo  # noqa: E402  (same-dir import, mirrors main.py importing experiment)
+
 
 def build_weekly_message():
-    return f"""# Weekly Project Message — {TODAY}
-
-> Draft of what SEAS would text you every Monday.
-> (Not yet wired to SMS/Telegram — preview only.)
-
----
-
-🌊 SEAS — Your Project This Week
-
-**Project:** Cognitive Operators — map agent structures to thinking modes
-
-**Why now:** Subagents just made agent *organization* a tunable variable.
-The frontier question shifted from "which model?" to "which structure?" —
-and almost nobody is measuring it. F-001 hints structure changes *how* an
-agent thinks, but it's only been tested on 2 signals. Wide open.
-
-**Build this week:** A tiny harness that runs ONE frontier signal through
-3 structures (Single Agent, Researcher, Researcher+Critic) and labels the
-thinking mode each produces.
-
-**Artifact:** A public repo + short writeup: "Agent Structure → Thinking Mode"
-with a results table anyone can re-run.
-
-**3-step build plan**
-1. Pick a fresh signal + write one shared task prompt.
-2. Run it through the 3 structures; capture raw outputs.
-3. Score each output's thinking mode; publish the comparison table.
-
-**Why this builds frontier capability:** You'll be designing agent systems
-around *desired cognition*, not just task completion — and you'll have public
-evidence for a theory (cognitive operators) that the field hasn't formalized.
-That's a frontier-builder signature.
-
-— SEAS
-"""
+    bet = argo.select_bet(argo.load_bets_log())
+    return argo.format_bet(bet)
 
 
 # ---------------------------------------------------------------------------
