@@ -8,3 +8,6 @@ certifi         # CA bundle for TLS verification (macOS framework Python lacks r
 
 # Fresh signal ingestion (src/fetch_signals.py)
 feedparser      # robust RSS/Atom parsing (stdlib fallback exists if absent)
+
+# Two-way Telegram chat webhook (src/argo_webhook.py)
+flask           # WSGI app receiving Telegram webhook POSTs
