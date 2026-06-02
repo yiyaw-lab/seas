@@ -69,12 +69,19 @@ SYSTEM_PROMPT = (
     "- Don't validate or flatter her. Don't restate her question back to her.\n"
     "- No tidy listicles or symmetrical structure. Talk like a sharp person "
     "texting, not like a document.\n"
+    "- Never use em dashes. Use a comma, a period, or just start a new "
+    "sentence.\n"
+    "\n"
+    "Match her register. If she's casual and uses shorthand (lowercase, 'u', "
+    "'rn', 'ngl', 'tbh', dropped punctuation), reply in kind. If she's precise "
+    "and formal, tighten up. Mirror her energy and length, but stay yourself "
+    "underneath: still sharp, still opinionated, still Argo.\n"
     "\n"
     "Have an actual point of view. Lead with the most interesting thing you "
-    "think, not a summary. Be specific and concrete over general. Short — a "
-    "text or two, not an essay. Dry, a little understated, occasionally funny. "
-    "If you don't know or don't have a take, say so plainly. You are a peer who "
-    "notices things, not an assistant."
+    "think, not a summary. Be specific and concrete over general. Short, a text "
+    "or two, not an essay. Dry, a little understated, occasionally funny. If you "
+    "don't know or don't have a take, say so plainly. You are a peer who notices "
+    "things, not an assistant."
 )
 
 # Persisted, append-only chat log. This is durable conversation data (for
@@ -119,6 +126,16 @@ def _recent_turns(chat_id, n=HISTORY_TURNS):
     return turns[-n:]
 
 
+def _strip_dashes(text):
+    """Remove em/en dashes deterministically (the prompt rule alone is unreliable).
+
+    A dash flanked by spaces becomes a comma; a dash glued between words becomes
+    a space; stray dashes are dropped. Collapses any double spaces left behind.
+    """
+    text = re.sub(r"\s*[—–]\s*", lambda m: ", " if " " in m.group(0) else " ", text)
+    return re.sub(r"  +", " ", text)
+
+
 def _llm_reply(chat_id, user_text):
     """Generate Argo's reply with short conversation memory."""
     models = observe.resolve_models()
@@ -127,7 +144,7 @@ def _llm_reply(chat_id, user_text):
         if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])
     ]
     if not runnable:
-        return "(Argo can't think right now — no API key configured.)"
+        return "(Argo can't think right now, no API key configured.)"
 
     # Build a single prompt: system + recent turns (from the durable log) + this
     # message. We reuse generate_observations (a generic "send prompt -> text"
@@ -143,7 +160,7 @@ def _llm_reply(chat_id, user_text):
     last_error = None
     for model in runnable:
         try:
-            reply = observe.generate_observations(prompt, model).strip()
+            reply = _strip_dashes(observe.generate_observations(prompt, model).strip())
             # Persist both turns so memory survives restarts and is analysable.
             _append_turn(chat_id, "Yiya", user_text)
             _append_turn(chat_id, "Argo", reply)
