@@ -17,7 +17,7 @@
     "title": "Agent Evaluation Harnesses",
     "source": "Frontier AI Builders",
     "category": "Evaluation Infrastructure",
-    "summary": "Builders are increasingly creating structured evals to test whether agent workflows actually perform reliably instead of just appearing impressive",
+    "summary": "Structured evaluation harnesses are becoming essential for measuring whether agents actually perform reliably instead of merely appearing capable.",
     "possible_capability_unlocked": "Agent Evaluation Design",
     "scores": {
       "durability": 5,
@@ -29,16 +29,16 @@
   },
   {
     "title": "MCP Ecosystem Growth",
-    "source": "",
-    "category": "",
-    "summary": "",
-    "possible_capability_unlocked": "",
+    "source": "Model Context Protocol (MCP) Ecosystem",
+    "category": "AI Infrastructure",
+    "summary": "The Model Context Protocol is rapidly becoming a standard way for AI agents to access tools, data sources, and external systems through a common interface. Growth in MCP integrations suggests increasing interoperability across agent ecosystems and developer tools.",
+    "possible_capability_unlocked": "Tool Interoperability and Agent Integration Design",
     "scores": {
-      "durability": 0,
-      "leverage": 0,
-      "alignment": 0,
-      "accessibility": 0,
-      "novelty": 0
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 4,
+      "accessibility": 3,
+      "novelty": 4
     }
   }
 ]

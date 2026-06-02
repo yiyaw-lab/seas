@@ -1,0 +1,44 @@
+[
+  {
+    "title": "Claude Code Subagents",
+    "category": "Agent Architecture",
+    "capability": "Agent Orchestration",
+    "weighted_score": 4.8,
+    "qualifies": true,
+    "scores": {
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 5,
+      "accessibility": 4,
+      "novelty": 4
+    }
+  },
+  {
+    "title": "Agent Evaluation Harnesses",
+    "category": "Evaluation Infrastructure",
+    "capability": "Agent Evaluation Design",
+    "weighted_score": 4.8,
+    "qualifies": true,
+    "scores": {
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 5,
+      "accessibility": 4,
+      "novelty": 4
+    }
+  },
+  {
+    "title": "MCP Ecosystem Growth",
+    "category": "AI Infrastructure",
+    "capability": "Tool Interoperability and Agent Integration Design",
+    "weighted_score": 4.5,
+    "qualifies": true,
+    "scores": {
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 4,
+      "accessibility": 3,
+      "novelty": 4
+    }
+  }
+]
