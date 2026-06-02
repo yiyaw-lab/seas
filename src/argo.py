@@ -7,9 +7,13 @@ See ARGO_ARCHITECTURE.md.
 
 V1 scope (deliberately minimal — run manually for 3-5 weeks before adding more):
   - pick ONE Bet from a curated frontier pool
-  - print it in the weekly format, including an Energy Prediction
+  - print it in the weekly format (the Bet only — no scored forecast shown)
   - ask Yiya for her actual Energy Score (1-10)
-  - store {bet, energy_prediction, energy_actual, date} in data/argo_bets.json
+  - store {bet, energy_prediction, energy_actual, energy_delta, date}
+    in data/argo_bets.json
+
+Energy Prediction is INTERNAL: stored for later analysis but never displayed,
+so it cannot anchor Yiya's reported energy.
 
 NOT in V1: Telegram read-side, /another, /built, state machine, SEAS plumbing.
 Standalone: imports nothing from seas.py / seas_demo.py and is not invoked by them.
@@ -131,16 +135,13 @@ Build This Week:
 
 Artifact:
 {bet['artifact']}
-
-Energy Prediction:
-{bet['energy_prediction']}/10
 """
 
 
 def ask_energy():
     """Prompt for the actual Energy Score. Returns int 1-10, or None if skipped
     (non-interactive / blank input)."""
-    prompt = "\nHow much do you want to build this? (1-10, blank to skip): "
+    prompt = "\nHow much do you want to build this? (1-10) "
     try:
         raw = input(prompt).strip()
     except EOFError:
@@ -173,27 +174,28 @@ def main():
 
     energy_actual = ask_energy()
 
+    # energy_prediction and energy_delta are internal only — stored for later
+    # analysis, never shown to the user, to avoid anchoring her actual energy.
+    energy_delta = (
+        energy_actual - bet["energy_prediction"]
+        if energy_actual is not None
+        else None
+    )
+
     entry = {
         "id": bet["id"],
         "date": TODAY,
         "bet": bet["bet"],
         "confidence": bet["confidence"],
         "potential_upside": bet["potential_upside"],
-        "energy_prediction": bet["energy_prediction"],
+        "energy_prediction": bet["energy_prediction"],  # internal
         "energy_actual": energy_actual,
+        "energy_delta": energy_delta,  # internal
     }
     log.append(entry)
     save_bets_log(log)
 
     print(f"\nRecorded bet {bet['id']} for {TODAY}.")
-    if energy_actual is not None:
-        delta = energy_actual - bet["energy_prediction"]
-        sign = "+" if delta >= 0 else ""
-        print(
-            f"Energy: predicted {bet['energy_prediction']}/10, "
-            f"actual {energy_actual}/10 ({sign}{delta})."
-        )
-    print(f"Log: {BETS_PATH.relative_to(ROOT)}")
     print("\n✅ Argo weekly bet complete.\n")
 
 
