@@ -200,7 +200,10 @@ SYSTEM_PROMPT = (
 def _call_openai(job, model):
     from openai import OpenAI  # lazy: no-key path needs no SDK
 
-    client = OpenAI()  # reads OPENAI_API_KEY from the environment
+    # Strip the key: a stray newline/space (common when pasting into a CI secret)
+    # makes an illegal Authorization header value and surfaces as a confusing
+    # "Connection error".
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"].strip())
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -215,7 +218,9 @@ def _call_openai(job, model):
 def _call_anthropic(job, model):
     import anthropic  # lazy: no-key path needs no SDK
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+    # Strip the key (see _call_openai) to avoid illegal-header errors from a
+    # trailing newline/space in the env value.
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
     response = client.messages.create(
         model=model,
         max_tokens=1024,
