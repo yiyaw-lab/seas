@@ -23,6 +23,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Fetch fresh frontier signals
+        run: python src/fetch_signals.py
+
       - name: Generate fresh Argo V2 project and send to Telegram
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
