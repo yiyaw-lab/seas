@@ -8,3 +8,6 @@ data/signals.json
 
 # Transient Telegram bot read-offset (argo_rate.py)
 argo/telegram_offset.json
+
+# Local chat memory log (durable copy lives on the Railway volume)
+data/argo_chat.json

@@ -2,8 +2,13 @@
 Argo — two-way Telegram chat (webhook server).
 
 Telegram pushes each message you send the bot to this server's /webhook
-endpoint; Argo runs it through an LLM (with short conversation memory) and
-replies. This is the "real bot" architecture: instant, no polling.
+endpoint; Argo runs it through an LLM and replies. This is the "real bot"
+architecture: instant, no polling.
+
+Conversation history is persisted to an append-only JSON log (ARGO_CHAT_LOG,
+default data/argo_chat.json) — it's both the LLM's short-term memory and durable
+data for later analysis. On Railway, point ARGO_CHAT_LOG at a mounted volume so
+it survives redeploys.
 
 Host-agnostic: it's a plain WSGI/Flask app, so it runs behind any public HTTPS
 URL — a tunnel (ngrok / cloudflared) for testing, or a host (Railway / Render /
@@ -28,7 +33,6 @@ Register URL: python src/set_webhook.py https://your-public-url/webhook
 import json
 import os
 import re
-from collections import deque
 from pathlib import Path
 
 try:
@@ -56,16 +60,46 @@ SYSTEM_PROMPT = (
     "chat, not an essay). You are not a generic assistant."
 )
 
-# Short in-memory conversation history per chat (resets if the process restarts;
-# a persistent store can replace this later). Keep last N turns.
-HISTORY_TURNS = 12
-_history = {}
+# Persisted, append-only chat log. This is durable conversation data (for
+# analysis) AND the source of the LLM's short-term memory. On Railway, point
+# ARGO_CHAT_LOG at a mounted volume (e.g. /data/argo_chat.json) so it survives
+# redeploys; locally it defaults to data/argo_chat.json.
+HISTORY_TURNS = 12  # how many recent turns to feed the model as context
+CHAT_LOG_PATH = Path(
+    os.environ.get("ARGO_CHAT_LOG", str(ROOT / "data" / "argo_chat.json"))
+)
 
 
-def _history_for(chat_id):
-    if chat_id not in _history:
-        _history[chat_id] = deque(maxlen=HISTORY_TURNS)
-    return _history[chat_id]
+def _append_turn(chat_id, role, text):
+    """Append one turn to the durable log (creates the file/dir if needed)."""
+    from datetime import datetime, timezone
+
+    CHAT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log = []
+    if CHAT_LOG_PATH.exists():
+        try:
+            log = json.loads(CHAT_LOG_PATH.read_text())
+        except (json.JSONDecodeError, ValueError):
+            log = []  # never lose a reply over a corrupt read
+    log.append({
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "chat_id": chat_id,
+        "role": role,
+        "text": text,
+    })
+    CHAT_LOG_PATH.write_text(json.dumps(log, indent=2) + "\n")
+
+
+def _recent_turns(chat_id, n=HISTORY_TURNS):
+    """Read the last n turns for this chat from the durable log."""
+    if not CHAT_LOG_PATH.exists():
+        return []
+    try:
+        log = json.loads(CHAT_LOG_PATH.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return []
+    turns = [t for t in log if t.get("chat_id") == chat_id]
+    return turns[-n:]
 
 
 def _llm_reply(chat_id, user_text):
@@ -78,11 +112,11 @@ def _llm_reply(chat_id, user_text):
     if not runnable:
         return "(Argo can't think right now — no API key configured.)"
 
-    hist = _history_for(chat_id)
-    # Build a single prompt: system + recent turns + this message. We reuse
-    # generate_observations (a generic "send prompt -> text" call), so memory is
-    # folded into the prompt rather than passed as structured messages.
-    convo = "\n".join(f"{role}: {text}" for role, text in hist)
+    # Build a single prompt: system + recent turns (from the durable log) + this
+    # message. We reuse generate_observations (a generic "send prompt -> text"
+    # call), so memory is folded into the prompt rather than passed as messages.
+    hist = _recent_turns(chat_id)
+    convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         f"Conversation so far:\n{convo}\n\n"
@@ -93,8 +127,9 @@ def _llm_reply(chat_id, user_text):
     for model in runnable:
         try:
             reply = observe.generate_observations(prompt, model).strip()
-            hist.append(("Yiya", user_text))
-            hist.append(("Argo", reply))
+            # Persist both turns so memory survives restarts and is analysable.
+            _append_turn(chat_id, "Yiya", user_text)
+            _append_turn(chat_id, "Argo", reply)
             return reply
         except Exception as exc:
             last_error = exc
