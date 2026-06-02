@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Agent Organization Design",
+    "status": "applied",
+    "description": "Designing systems composed of multiple specialized agents that coordinate to solve problems.",
+    "signals": [
+      "Claude Code Subagents"
+    ],
+    "experiments": [
+      "Build a multi-agent research team "
+    ],
+    "artifacts": [
+      "Multi-agent research team prototype"
+    ],
+    "last_updated": "2026-06-01"
+  }
+]
