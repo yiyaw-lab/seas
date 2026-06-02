@@ -1,3 +1,10 @@
+SUPERSEDED:
+This document reflects an earlier capability-centered architecture.
+The current SEAS north star is:
+Signal → Opportunity → Experiment → Finding → Theory
+
+---
+
 # SEAS V2 Architecture
 
 Mission
