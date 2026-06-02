@@ -1,0 +1,18 @@
+[
+  {
+    "id": "P-001",
+    "date": "2026-06-02",
+    "model": "gpt-4o",
+    "text": "\u2693 Argo\n\nI've been watching something.\n\nEveryone's exploring AI for large-scale innovations, but they're walking past localized applications that could create immediate impact in digital health, especially for diagnostics. If we use AI to analyze existing public health datasets, we might uncover patterns that lead to broader symptom recognition, aiding early diagnosis of common conditions.\n\nThis week's bet:\nLocalized Diagnosis Amplifier\n\nDevelop a small AI tool that mines open public health data to identify patterns in symptoms and early indicators of common ailments, focusing on accessible digital platforms for doctors in underserved areas.\n\nArtifact:\nA public demo showing case studies of symptom identification improvements.\n\nEffort:\nA weekend\n\nPotential upside:\nUnlocking immediate access to advanced diagnostic insights in everyday clinics, reshaping early healthcare response.",
+    "energy": null,
+    "rated_at": null
+  },
+  {
+    "id": "P-002",
+    "date": "2026-06-02",
+    "model": "gpt-4o",
+    "text": "\u2693 Argo\n\nI've been watching something.\n\nEveryone is focused on AI's role in complex optimizations and scraping all kinds of web data. But few are considering how these tools can enhance public health research. AI-driven optimization has applications beyond tech \u2014 it's a crucial area for medical diagnosis.\n\nThis week's bet:\nAugmented Health Diagnosis Framework\n\nBuild an AI framework that combines scraping medical databases with optimal transport-based algorithms to identify rare disease markers efficiently.\n\nArtifact:\nA GitHub repository for medical research teams to improve diagnosis accuracy.\n\nEffort:\nA weekend\n\nPotential upside:\nUnlock new potential in healthcare by improving diagnosis rates for rare diseases using advanced AI techniques.",
+    "energy": 7,
+    "rated_at": "2026-06-02 12:45 UTC"
+  }
+]
