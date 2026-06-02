@@ -26,5 +26,19 @@
       "accessibility": 4,
       "novelty": 4
     }
+  },
+  {
+    "title": "MCP Ecosystem Growth",
+    "source": "",
+    "category": "",
+    "summary": "",
+    "possible_capability_unlocked": "",
+    "scores": {
+      "durability": 0,
+      "leverage": 0,
+      "alignment": 0,
+      "accessibility": 0,
+      "novelty": 0
+    }
   }
 ]
