@@ -41,19 +41,39 @@ Components:
 
 Argo only responds while both the server and the tunnel are running.
 
-## Option B — Always-on (Railway / Render / Fly / VPS)
+## Option B — Always-on (Railway — recommended)
 
-1. Deploy this repo to your host. Start command:
-   ```
-   python src/argo_webhook.py
-   ```
-   The server reads `PORT` from the environment (hosts set this automatically).
-2. Set the secrets on the host (same names as above). Do **not** rely on `.env`
-   in production — use the host's secret manager.
-3. Register the webhook to your host's public URL:
+The repo is deploy-ready for Railway: `Procfile` (`web: python src/argo_webhook.py`),
+`runtime.txt` (Python 3.11), and `requirements.txt` are all present, and the
+server binds `$PORT` / `0.0.0.0` automatically.
+
+1. Go to https://railway.app → **New Project → Deploy from GitHub repo** →
+   pick `yiyaw-lab/seas`. Railway detects Python and runs the `Procfile`.
+2. In the service → **Variables**, add (same names as `.env`):
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID`
+   - `OPENAI_API_KEY`  (or `ANTHROPIC_API_KEY`)
+   - `ARGO_MODEL`  (optional)
+   - `TELEGRAM_WEBHOOK_SECRET`  (optional but recommended — see below)
+   Paste each value as a single line (no trailing newline).
+3. Under **Settings → Networking**, click **Generate Domain** to get a public
+   HTTPS URL like `https://seas-production.up.railway.app`.
+4. Register the webhook to that URL + `/webhook` (run locally, or anywhere with
+   the bot token):
    ```bash
-   python src/set_webhook.py https://your-app.example.com/webhook
+   python src/set_webhook.py https://YOUR-RAILWAY-URL/webhook
    ```
+5. Text your bot on Telegram. Argo replies, 24/7. ✅
+
+Health check: visit `https://YOUR-RAILWAY-URL/` — it should say
+"Argo webhook is up."
+
+### Other hosts (Render / Fly / VPS)
+
+Same idea: deploy the repo, start command `python src/argo_webhook.py`, set the
+secrets in the host's secret manager (not `.env`), expose HTTPS, then run
+`set_webhook.py` against the public URL. Render's free tier sleeps on
+inactivity (slow first reply); Railway/Fly stay warm.
 
 ## Securing the endpoint (recommended)
 
