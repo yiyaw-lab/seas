@@ -35,13 +35,14 @@ Novelty:
 3 = emerging
 5 = frontier
 
-Return ONLY valid JSON:
+Return ONLY valid JSON in this exact format:
 
 {
-  "durability": X,
-  "leverage": X,
-  "alignment": X,
-  "accessibility": X,
-  "novelty": X,
+  "signal_title": "exact signal title here",
+  "durability": 1,
+  "leverage": 1,
+  "alignment": 1,
+  "accessibility": 1,
+  "novelty": 1,
   "reasoning": "one short paragraph"
 }

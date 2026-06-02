@@ -9,13 +9,13 @@ with open("data/signals.json", "r") as f:
 
 unscored = [
     s for s in signals
-    if sum(s["scores"].values()) == 0
+    if all(v == 0 for v in s["scores"].values())
 ]
 
 output_dir = Path("runs/scoring")
 output_dir.mkdir(parents=True, exist_ok=True)
 
-print(f"\nFound {len(unscored)} unscored signals.\n")
+generated = 0
 
 for signal in unscored:
     full_prompt = f"""{scoring_prompt}
@@ -34,4 +34,7 @@ Capability Unlocked: {signal.get('possible_capability_unlocked', '')}
     with open(filename, "w") as f:
         f.write(full_prompt)
 
-    print(f"Saved: {filename}")
+    generated += 1
+
+print(f"\nGenerated {generated} scoring jobs.")
+print(f"Skipped {len(signals) - generated} already-scored signals.")
