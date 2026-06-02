@@ -20,7 +20,7 @@ if unscored:
 else:
     print("\n✅ All signals scored.")
     print("\nGenerating ranked opportunities...\n")
-    subprocess.run(["python", "src/opportunities.py"])
+    subprocess.run(["python", "src/opportunities.py"], check=True)
 
     print("\nGenerating experiment recommendation...\n")
-    subprocess.run(["python", "src/main.py"])
+    subprocess.run(["python", "src/main.py"], check=True)
