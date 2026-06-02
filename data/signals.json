@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "title": "Claude Code Subagents",
+    "source": "Anthropic",
+    "category": "Agent Architecture",
+    "summary": "Specialized subagents collaborating on tasks",
+    "possible_capability_unlocked": "Agent Orchestration",
+    "scores": {
+      "durability": 5,
+      "leverage": 5,
+      "alignment": 5,
+      "accessibility": 4,
+      "novelty": 4
+    }
+  }
+]
