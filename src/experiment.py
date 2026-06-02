@@ -1,31 +1,30 @@
-def generate_experiment(signal):
+def generate_experiments(signal):
     title = signal["title"]
     capability = signal.get(
         "possible_capability_unlocked",
         "Unknown Capability"
     )
 
-    return {
-        "title": f"Explore: {title}",
-        "source_signal": title,
-        "capability": capability,
-        "why_now": f"{title} scored highly enough to clear the SEAS action threshold.",
-        "time_scope": "Under 10 hours",
-        "artifact": f"A working prototype or demo that demonstrates {capability}",
-        "completion": f"Show practical use of {title} through a concrete artifact",
-        "build_steps": [
-            "Define the smallest useful version",
-            "Set up the project structure",
-            "Build the core workflow",
-            "Test with one real use case",
-            "Document what worked and what failed"
-        ],
-        "failure_risks": [
-            "Experiment becomes too broad",
-            "Signal is interesting but not actionable",
-            "Prototype does not demonstrate real capability"
-        ],
-        "fallback_plan": "Reduce scope to a written architecture and one minimal working demo.",
-        "reflection_prompt": "What can I now do that I could not do before?",
-        "possible_public_output": "A short build-in-public post explaining the experiment and what it taught."
-    }
+    return [
+        {
+            "type": "Fast Prototype",
+            "title": f"Build a tiny working demo of {title}",
+            "capability": capability,
+            "artifact": f"A minimal prototype demonstrating {capability}",
+            "completion": "A working demo exists and can be explained in under 2 minutes"
+        },
+        {
+            "type": "Evaluation Experiment",
+            "title": f"Test whether {title} actually improves a real workflow",
+            "capability": f"Evaluating {capability}",
+            "artifact": "A before/after comparison or small benchmark",
+            "completion": "You can clearly say whether the signal is useful, overhyped, or promising"
+        },
+        {
+            "type": "Public Builder Artifact",
+            "title": f"Create a build-in-public experiment around {title}",
+            "capability": f"Communicating and applying {capability}",
+            "artifact": "A GitHub repo, demo note, or public post",
+            "completion": "Someone else could understand and reference the experiment"
+        }
+    ]

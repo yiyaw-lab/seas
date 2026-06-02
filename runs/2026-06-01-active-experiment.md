@@ -1,3 +1,11 @@
+# Active SEAS Experiment — 2026-06-01
+
+Chosen Option: 1
+
+Source File: runs/2026-06-01-experiment.md
+
+---
+
 # SEAS Run — 2026-06-01
 
 ## Selected Opportunity
@@ -52,4 +60,5 @@ A GitHub repo, demo note, or public post
 
 Completion:
 Someone else could understand and reference the experiment
+
 

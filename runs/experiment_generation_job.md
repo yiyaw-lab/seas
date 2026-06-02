@@ -22,3 +22,28 @@ Return:
 - Artifact
 - Completion condition
 - Estimated hours
+
+
+Return ONLY valid JSON.
+
+{
+  "signal_title": "",
+  "experiments": [
+    {
+      "title": "",
+      "why_now": "",
+      "capability_gained": "",
+      "artifact": "",
+      "completion_condition": "",
+      "estimated_hours": 0
+    }
+  ]
+}
+
+
+Signal:
+
+Title: Claude Code Subagents
+Category: Agent Architecture
+Capability: Agent Orchestration
+Weighted Score: 4.8
