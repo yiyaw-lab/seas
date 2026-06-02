@@ -39,56 +39,93 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 # rotates rather than repeating). Add Bets here; do not over-engineer.
 # ---------------------------------------------------------------------------
 
+# Bet fields:
+#   insight   - the observation Argo leads with (the "I've been watching
+#               something" hook). Several short lines; one thought each.
+#   concept / concept_emoji - the named bet
+#   structures - bullet list shown under the bet (or None)
+#   artifact  - the public thing produced
+#   effort    - HUMAN label only: "An evening" / "A weekend" / "A few days" / "A week"
+#   upside    - the frontier-scale payoff Argo closes on (not a score)
+#   confidence / potential_upside / reason / energy_prediction - INTERNAL
+#     (logged for analysis; never shown in the message)
+
 BET_POOL = [
     {
         "id": "B-001",
-        "bet": "Agent Organization Lab",
+        "bet": "Cognitive Operators",
+        "concept_emoji": "🧠",
+        "insight": [
+            "Everyone's still arguing about which model is best.",
+            "But subagents quietly changed the question.",
+            "The variable that matters now may not be the model.",
+            "It may be the organizational structure wrapped around it.",
+            "Almost nobody is measuring that.",
+        ],
+        "structures": ["Single Agent", "Researcher", "Researcher + Critic"],
+        "build_this_week": "Run the same frontier signal through three structures "
+                           "and observe how the thinking changes.",
+        "artifact": "A public “Agent Structure → Thinking Mode” benchmark.",
+        "effort": "A weekend.",
+        "upside": "If the hypothesis is true, future AI systems may be designed "
+                  "around desired cognitive operations rather than tasks. That's a "
+                  "bigger frontier than prompt engineering.",
         "confidence": "Medium",
         "potential_upside": "High",
-        "why_now": "Subagents just made agent *organization* a tunable variable. "
-                   "The frontier question shifted from 'which model?' to 'which "
-                   "structure?' — and almost nobody is measuring it.",
-        "build_this_week": "A tiny harness that runs ONE frontier signal through "
-                           "3 structures (Single Agent, Researcher, "
-                           "Researcher+Critic) and labels the thinking mode each "
-                           "produces.",
-        "artifact": "Public repo + short writeup: 'Agent Structure -> Thinking "
-                    "Mode' with a results table anyone can re-run.",
         "reason": "Could reveal organizational laws of intelligence.",
         "energy_prediction": 8,
     },
     {
         "id": "B-002",
-        "bet": "Cognitive Operators Map",
+        "bet": "Theory, Tested Three More Times",
+        "concept_emoji": "🔬",
+        "insight": [
+            "F-001 said something quietly bold:",
+            "agent structure may change *how* a system thinks, not just what it says.",
+            "But it's only been seen on two signals.",
+            "A pattern that holds twice is a coincidence wearing a theory's clothes.",
+        ],
+        "structures": None,
+        "build_this_week": "Run three fresh frontier signals through the Researcher "
+                           "structure and check whether it keeps producing theory.",
+        "artifact": "An updated cognitive-operations table + a one-page claim, with "
+                    "evidence from signals #3, #4 and #5.",
+        "effort": "A few days.",
+        "upside": "If it holds, a tentative finding becomes a defensible frontier "
+                  "theory — the kind other builders cite.",
         "confidence": "Low",
         "potential_upside": "High",
-        "why_now": "F-001 hints that agent structure changes *how* an agent "
-                   "thinks, but it's only been tested on 2 signals. The map is "
-                   "wide open and nobody has named it.",
-        "build_this_week": "Run 3 fresh frontier signals through the Researcher "
-                           "structure and check whether it keeps producing Theory "
-                           "Thinking. Publish signal #3, #4, #5.",
-        "artifact": "An updated cognitive-operations table + a one-page claim: "
-                    "'structure is a cognitive operator,' with evidence.",
         "reason": "Turns a tentative finding into a defensible frontier theory.",
         "energy_prediction": 7,
     },
     {
         "id": "B-003",
-        "bet": "Argo Energy Loop (dogfood)",
+        "bet": "Run Argo On Yourself",
+        "concept_emoji": "⚓",
+        "insight": [
+            "Argo's most novel idea is that *energy* — not correctness — is the "
+            "signal worth optimizing.",
+            "That's just a hypothesis right now.",
+            "The fastest way to test a hypothesis about you is to run it on you.",
+        ],
+        "structures": None,
+        "build_this_week": "Use Argo every Monday for a few weeks; quietly log "
+                           "whether the energy you reported predicted what you "
+                           "actually built.",
+        "artifact": "A short note: “Does energy predict shipping?” with your "
+                    "first weeks of data.",
+        "effort": "An evening, then a few minutes a week.",
+        "upside": "If energy predicts shipping, Argo has found its optimization "
+                  "target — and you've validated it before building anything heavier.",
         "confidence": "High",
         "potential_upside": "Medium",
-        "why_now": "Argo's most novel idea — optimizing for *energy* — is "
-                   "untested. The fastest way to learn if energy is the right "
-                   "signal is to run it on yourself.",
-        "build_this_week": "Use this very tool every Monday for the week; log "
-                           "predicted vs actual energy and whether you built.",
-        "artifact": "A short note: 'Does energy predict shipping?' with your "
-                    "first weeks of data.",
         "reason": "Validates Argo's core optimization target before building more.",
         "energy_prediction": 6,
     },
 ]
+
+# Human effort labels Argo is allowed to use (no hour counts).
+EFFORT_LABELS = ("An evening", "A weekend", "A few days", "A week")
 
 
 def load_bets_log():
@@ -116,26 +153,38 @@ def select_bet(log):
 
 
 def format_bet(bet):
-    return f"""🌊 Argo — This Week's Bet ({TODAY})
+    """Render a Bet as a Telegram message in Argo's frontier-scout voice.
 
-Bet:
-{bet['bet']}
+    Leads with the insight, presents the project as a bet, closes on the upside.
+    No markdown headings, short paragraphs. Does NOT ask for energy — that is a
+    separate cognitive moment, prompted later by ask_energy().
+    This is the single weekly-bet formatter in the repo; seas_demo.py calls it.
+    """
+    # Insight: one short line per thought, each its own paragraph.
+    insight = "\n\n".join(bet["insight"])
 
-Confidence:
-{bet['confidence']}
+    parts = [
+        "⚓ Argo",
+        "I've been watching something.",
+        insight,
+        "This week's bet:",
+        f"{bet['concept_emoji']} {bet['bet']}",
+    ]
 
-Potential Upside:
-{bet['potential_upside']}
+    if bet.get("structures"):
+        bullets = "\n".join(f"• {s}" for s in bet["structures"])
+        parts.append(
+            f"Run the same frontier signal through:\n\n{bullets}\n\n"
+            "and observe how the thinking changes."
+        )
+    else:
+        parts.append(bet["build_this_week"])
 
-Why Now:
-{bet['why_now']}
+    parts.append(f"Artifact:\n{bet['artifact']}")
+    parts.append(f"Effort:\n{bet['effort']}")
+    parts.append(f"Potential upside:\n{bet['upside']}")
 
-Build This Week:
-{bet['build_this_week']}
-
-Artifact:
-{bet['artifact']}
-"""
+    return "\n\n".join(parts) + "\n"
 
 
 def ask_energy():

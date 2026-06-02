@@ -1,34 +1,26 @@
-# Weekly Project Message — 2026-06-02
+⚓ Argo
 
-> Draft of what SEAS would text you every Monday.
-> (Not yet wired to SMS/Telegram — preview only.)
+I've been watching something.
 
----
+F-001 said something quietly bold:
 
-🌊 SEAS — Your Project This Week
+agent structure may change *how* a system thinks, not just what it says.
 
-**Project:** Cognitive Operators — map agent structures to thinking modes
+But it's only been seen on two signals.
 
-**Why now:** Subagents just made agent *organization* a tunable variable.
-The frontier question shifted from "which model?" to "which structure?" —
-and almost nobody is measuring it. F-001 hints structure changes *how* an
-agent thinks, but it's only been tested on 2 signals. Wide open.
+A pattern that holds twice is a coincidence wearing a theory's clothes.
 
-**Build this week:** A tiny harness that runs ONE frontier signal through
-3 structures (Single Agent, Researcher, Researcher+Critic) and labels the
-thinking mode each produces.
+This week's bet:
 
-**Artifact:** A public repo + short writeup: "Agent Structure → Thinking Mode"
-with a results table anyone can re-run.
+🔬 Theory, Tested Three More Times
 
-**3-step build plan**
-1. Pick a fresh signal + write one shared task prompt.
-2. Run it through the 3 structures; capture raw outputs.
-3. Score each output's thinking mode; publish the comparison table.
+Run three fresh frontier signals through the Researcher structure and check whether it keeps producing theory.
 
-**Why this builds frontier capability:** You'll be designing agent systems
-around *desired cognition*, not just task completion — and you'll have public
-evidence for a theory (cognitive operators) that the field hasn't formalized.
-That's a frontier-builder signature.
+Artifact:
+An updated cognitive-operations table + a one-page claim, with evidence from signals #3, #4 and #5.
 
-— SEAS
+Effort:
+A few days.
+
+Potential upside:
+If it holds, a tentative finding becomes a defensible frontier theory — the kind other builders cite.
