@@ -55,6 +55,8 @@ server binds `$PORT` / `0.0.0.0` automatically.
    - `OPENAI_API_KEY`  (or `ANTHROPIC_API_KEY`)
    - `ARGO_MODEL`  (optional)
    - `TELEGRAM_WEBHOOK_SECRET`  (optional but recommended — see below)
+   - `ARGO_CHAT_LOG` = `/data/argo_chat.json`  (so chat memory lands on the
+     persistent volume below — see "Persistent chat memory")
    Paste each value as a single line (no trailing newline).
 3. Under **Settings → Networking**, click **Generate Domain** to get a public
    HTTPS URL like `https://seas-production.up.railway.app`.
@@ -95,11 +97,29 @@ python src/set_webhook.py --info      # show current webhook + pending count
 python src/set_webhook.py --delete    # remove it (returns to getUpdates polling)
 ```
 
+## Persistent chat memory (Railway volume)
+
+Conversation history is written to an append-only log (`ARGO_CHAT_LOG`, default
+`data/argo_chat.json`) — it's both the LLM's short-term memory and durable data
+for later analysis. Railway's container disk is wiped on every redeploy, so put
+this log on a **volume**:
+
+1. In the service → **Settings → Volumes** (or the **Data** tab) → **Add Volume**.
+2. Set the mount path to `/data`.
+3. Ensure the `ARGO_CHAT_LOG=/data/argo_chat.json` variable (step 2 above) points
+   inside that mount.
+
+Now memory survives redeploys and restarts. To analyse it, pull the file from
+the volume (Railway shell/CLI) — it's a plain JSON array of
+`{ts, chat_id, role, text}` turns.
+
+Without a volume the bot still works and remembers within a single deploy, but
+history is lost on each redeploy.
+
 ## How it behaves
 
 - Any text → LLM reply in Argo's scout voice, with the last ~12 turns of memory
-  (memory is in-process; it resets if the server restarts — a persistent store
-  can replace it later).
+  read from the persisted log (survives restarts when on a volume).
 - A bare `1-10` → recorded as energy on the latest unrated project in
   `data/argo_projects.json` (same as the old rating flow).
 - The weekly project push (`argo_project.py`) is unchanged and independent.
