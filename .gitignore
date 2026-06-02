@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .env
 .venv/
+
+# Transient runtime data: refreshed each run by src/fetch_signals.py
+data/signals.json

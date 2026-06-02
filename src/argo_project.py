@@ -86,9 +86,12 @@ Rules:
 
 
 def build_project_prompt():
+    # Insight comes purely from the fresh signals. We deliberately do NOT pin a
+    # prior finding (e.g. F-001) into the prompt: a single strong finding anchors
+    # every insight to its theme, which is what made past projects all look the
+    # same. Themes should follow the actual news.
     signals = observe.load_signals()
     signals_block = observe.format_signals(signals)
-    finding_text = observe.FINDING_PATH.read_text().strip()
 
     prompt = f"""{PROJECT_INSTRUCTIONS}
 ---
@@ -96,12 +99,6 @@ def build_project_prompt():
 ## Frontier signals
 
 {signals_block}
-
----
-
-## Context — Finding F-001 (cross-signal pattern)
-
-{finding_text}
 """
     return prompt, signals
 

@@ -5,3 +5,6 @@ anthropic       # claude-* models (provider supported by argo_observe.py)
 
 # Telegram delivery (src/send_telegram.py)
 certifi         # CA bundle for TLS verification (macOS framework Python lacks roots)
+
+# Fresh signal ingestion (src/fetch_signals.py)
+feedparser      # robust RSS/Atom parsing (stdlib fallback exists if absent)
