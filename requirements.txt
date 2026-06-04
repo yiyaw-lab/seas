@@ -11,3 +11,9 @@ feedparser      # robust RSS/Atom parsing (stdlib fallback exists if absent)
 
 # Two-way Telegram chat webhook (src/argo_webhook.py)
 flask           # WSGI app receiving Telegram webhook POSTs
+
+# Agentic MCP server + ASGI hosting (src/argo_mcp_server.py, create_asgi_app)
+mcp             # FastMCP streamable-HTTP server (Argo's tools)
+uvicorn         # ASGI server running webhook + MCP in one process
+asgiref         # WsgiToAsgi: serve the Flask webhook under ASGI
+starlette       # ASGI routing/mounting + bearer-auth middleware
