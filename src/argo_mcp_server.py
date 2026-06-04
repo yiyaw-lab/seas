@@ -43,6 +43,7 @@ def _build_allowed_hosts():
         "github.com", "raw.githubusercontent.com",
         "huggingface.co",
         "openai.com",
+        "anthropic.com", "www.anthropic.com",  # no RSS feed, but /news fetches fine
         "blog.google",
         "github.blog",
     })
