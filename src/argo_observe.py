@@ -274,20 +274,12 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
         # No tools (Phase A path): a plain messages call, no beta needed.
         response = client.messages.create(**kwargs)
 
-    # Diagnostic: log non-text blocks (tool_use / tool_result / errors) so a
-    # silent connector failure (server unreachable -> tools dropped) is visible
-    # in the Railway logs instead of just producing a no-tool answer.
+    # Log only MCP tool *failures* (silent on success), so a broken connector or
+    # erroring tool is visible in the logs without spamming every tool turn.
     if mcp_servers:
-        types = [getattr(b, "type", "?") for b in response.content]
-        print(f"[mcp] stop={getattr(response,'stop_reason',None)} blocks={types}")
         for b in response.content:
-            bt = getattr(b, "type", "")
-            if bt == "mcp_tool_result":
-                print(f"[mcp] tool_result is_error={getattr(b,'is_error',None)} "
-                      f"content={str(getattr(b,'content',''))[:300]}")
-            elif bt == "mcp_tool_use":
-                print(f"[mcp] tool_use name={getattr(b,'name',None)} "
-                      f"server={getattr(b,'server_name',None)}")
+            if getattr(b, "type", "") == "mcp_tool_result" and getattr(b, "is_error", False):
+                print(f"[mcp] tool error: {str(getattr(b, 'content', ''))[:300]}")
 
     return "".join(
         block.text for block in response.content
