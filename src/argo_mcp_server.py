@@ -129,8 +129,37 @@ def web_fetch(url: str) -> str:
     try:
         raw = fetch_signals._fetch_url(url, timeout=20)
     except Exception as exc:
-        return f"Fetch failed: {type(exc).__name__}: {exc}"
+        msg = f"Fetch failed: {type(exc).__name__}: {exc}"
+        # Many sites (e.g. openai.com) 403 automated HTML requests but serve
+        # their RSS feed fine. Point Argo at the feed for this host if we have it.
+        if "403" in str(exc):
+            feed = _feed_for_host(host)
+            if feed:
+                msg += (f"  This host blocks page scraping; use its feed instead: "
+                        f"{feed} (call web_fetch on that).")
+        return msg
     return _to_text(raw) or "(empty page)"
+
+
+def _feed_for_host(host):
+    """Return an approved feed URL whose host matches, if any."""
+    if not host:
+        return None
+    host = host.lower()
+    for _label, url in fetch_signals.FEEDS:
+        h = (urlparse(url).hostname or "").lower()
+        if h == host or host.endswith("." + h) or h.endswith("." + host):
+            return url
+    return None
+
+
+@mcp.tool()
+def list_feeds() -> str:
+    """List Argo's approved RSS/Atom feed URLs (arXiv, GitHub trending, OpenAI,
+    Hugging Face, Google AI, GitHub changelog). Prefer fetching these feeds over
+    HTML pages: feeds are reliable and machine-readable, while many sites block
+    automated page requests. Use this when the user asks 'what's new on X'."""
+    return "\n".join(f"{label}: {url}" for label, url in fetch_signals.FEEDS)
 
 
 def mcp_asgi_app():
