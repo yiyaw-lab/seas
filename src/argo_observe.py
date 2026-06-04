@@ -236,7 +236,7 @@ def _call_anthropic(job, model):
 # Beta header for the MCP connector (Anthropic runs the tool loop server-side).
 # Isolated here so a beta-string change touches one place. Confirm against
 # current Anthropic docs if connector calls start failing.
-MCP_BETA = "mcp-client-2025-04-04"
+MCP_BETA = "mcp-client-2025-11-20"
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
@@ -244,10 +244,11 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
 
     Separate from generate_observations (the string-in/string-out helper the
     batch jobs use) because tool-use needs structured messages + the MCP beta.
-    `messages` is a list of {role: 'user'|'assistant', content: str}. When
-    mcp_servers is given, Anthropic runs the tool loop and may return
-    mcp_tool_use/mcp_tool_result blocks alongside text; we return only the text.
-    Used by argo_webhook._llm_reply. Claude-only (the connector requires it).
+    `messages` is a list of {role: 'user'|'assistant', content: str}. `mcp_servers`
+    is the connector's server-definition list; for each server we add the matching
+    `mcp_toolset` entry to `tools` (required by the 2025-11-20 connector). Anthropic
+    runs the tool loop and may return mcp_tool_use/mcp_tool_result blocks alongside
+    text; we return only the text. Used by argo_webhook._llm_reply. Claude-only.
     """
     import anthropic
 
@@ -262,10 +263,15 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
     }
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
+        # Each server must be referenced by exactly one mcp_toolset (2025-11-20).
+        kwargs["tools"] = [
+            {"type": "mcp_toolset", "mcp_server_name": s["name"]}
+            for s in mcp_servers
+        ]
         kwargs["betas"] = [MCP_BETA]
         response = client.beta.messages.create(**kwargs)
     else:
-        # No tools yet (Phase A): a plain messages call, no beta needed.
+        # No tools (Phase A path): a plain messages call, no beta needed.
         response = client.messages.create(**kwargs)
 
     return "".join(

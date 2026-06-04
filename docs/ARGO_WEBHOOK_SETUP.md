@@ -59,7 +59,14 @@ server binds `$PORT` / `0.0.0.0` automatically.
      persistent volume below — see "Persistent chat memory")
    - `WEBHOOK_URL` = `https://YOUR-RAILWAY-DOMAIN`  (base URL, no `/webhook`) —
      the server self-registers the webhook on every startup, so a domain change
-     or bot-token rotation can't silently leave the bot deaf.
+     or bot-token rotation can't silently leave the bot deaf. Also used to build
+     the MCP server URL the chat hands to Claude.
+   - `ARGO_MCP_TOKEN` = `<long random string>`  (enables Argo's tools) — bearer
+     token guarding the `/mcp` endpoint. When this AND `WEBHOOK_URL` are set,
+     chat gains tool use (web fetch, etc.); unset = plain chat, no tools. Argo
+     passes it to itself via the connector, so it never needs to be shared.
+   - `ANTHROPIC_API_KEY` = `sk-ant-...`  (required for Claude chat + MCP; without
+     it the bot falls back to gpt-4o and tools are off).
    Paste each value as a single line (no trailing newline).
 3. Under **Settings → Networking**, click **Generate Domain** to get a public
    HTTPS URL like `https://seas-production.up.railway.app`.

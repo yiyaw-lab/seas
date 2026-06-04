@@ -57,9 +57,25 @@ PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
 # webhook (set_webhook.py does). Blocks randoms POSTing to your endpoint.
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 
-# MCP servers Argo's chat can use (Phase B+ wires real ones). None = no tools,
-# which keeps Phase A a pure model-swap with no agentic behaviour yet.
-MCP_SERVERS = None
+# MCP servers Argo's chat can use. Wired automatically when both WEBHOOK_URL
+# (so the connector has a public URL to reach) and ARGO_MCP_TOKEN (bearer auth)
+# are set; otherwise None = no tools (pure chat, the Phase A behaviour).
+ARGO_MCP_TOKEN = os.environ.get("ARGO_MCP_TOKEN")
+
+
+def _build_mcp_servers():
+    base = os.environ.get("WEBHOOK_URL")
+    if not base or not ARGO_MCP_TOKEN:
+        return None
+    return [{
+        "type": "url",
+        "url": base.rstrip("/") + "/mcp/mcp",  # FastMCP serves under /mcp on mount
+        "name": "argo",
+        "authorization_token": ARGO_MCP_TOKEN,
+    }]
+
+
+MCP_SERVERS = _build_mcp_servers()
 
 # Chat model routing for token efficiency: Sonnet handles routine turns, Opus is
 # reserved for high-stakes ones. Overridable via env without code change.
@@ -341,12 +357,61 @@ def self_register_webhook():
         print(f"Self-register error (server still starting): {exc}")
 
 
+def create_asgi_app():
+    """ASGI app serving the Flask webhook (WSGI-wrapped) plus the MCP server
+    under /mcp. Used in production by uvicorn so the Streamable-HTTP MCP server
+    (FastMCP, ASGI) and the Telegram webhook (Flask, WSGI) share one service.
+
+    The /mcp mount is guarded by a bearer token (ARGO_MCP_TOKEN) so only the
+    Anthropic connector (which sends it as Authorization) can reach the tools.
+    """
+    from asgiref.wsgi import WsgiToAsgi
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Mount
+
+    import argo_mcp_server
+
+    flask_asgi = WsgiToAsgi(create_app())
+
+    class BearerAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if not ARGO_MCP_TOKEN:
+                return PlainTextResponse("MCP disabled", status_code=503)
+            header = request.headers.get("authorization", "")
+            token = header[7:] if header.lower().startswith("bearer ") else ""
+            if token != ARGO_MCP_TOKEN:
+                return PlainTextResponse("forbidden", status_code=403)
+            return await call_next(request)
+
+    mcp_app = argo_mcp_server.mcp_asgi_app()
+
+    routes = [
+        Mount("/mcp", app=mcp_app, middleware=[Middleware(BearerAuth)]),
+        Mount("/", app=flask_asgi),  # everything else -> Flask (/, /webhook)
+    ]
+
+    # FastMCP's streamable-http session manager must be run in the parent app's
+    # lifespan, or requests fail with "Task group is not initialized".
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with argo_mcp_server.session_manager().run():
+            yield
+
+    return Starlette(routes=routes, lifespan=lifespan)
+
+
 def main():
-    app = create_app()
     self_register_webhook()
     port = int(os.environ.get("PORT", "8080"))
-    print(f"🛰️  Argo webhook listening on :{port} (POST /webhook)")
-    app.run(host="0.0.0.0", port=port)
+    print(f"🛰️  Argo serving on :{port} (POST /webhook, MCP at /mcp)")
+    import uvicorn
+
+    uvicorn.run(create_asgi_app(), host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
