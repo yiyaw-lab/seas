@@ -130,6 +130,31 @@ V2 evolves *beside* V1 without replacing it. See:
 - [ARGO_V2.md](ARGO_V2.md) — Argo V2 (insight engine), approved design.
 - [ARGO_V2_MIGRATION.md](ARGO_V2_MIGRATION.md) — the smallest path from V1 to V2.
 
+### Argo as an agent (live)
+
+Argo is a two-way, always-on Telegram agent. It runs as a webhook on Railway
+(`src/argo_webhook.py`), thinks with Claude (model-routed: Sonnet for routine
+turns, Opus for high-stakes ones; gpt-4o fallback), and has tools.
+
+- **Two-way chat** — text the bot, it replies in a frontier-scout voice with
+  persistent memory (append-only log on a Railway volume). A bare `1-10` reply
+  records a project's energy score.
+- **Live web access (tool)** — `src/argo_mcp_server.py` is an MCP server exposing
+  `web_fetch` over an **approved-host allowlist** (arXiv, GitHub, Hugging Face,
+  OpenAI, Anthropic, Google AI). Claude calls it via the Anthropic MCP connector,
+  so Argo reads real current pages/papers instead of guessing. Prefers RSS feeds
+  for sites that block scraping.
+- **Tripwire (proactive alerts)** — `src/argo_watch.py` runs on a cron
+  (`.github/workflows/argo-watch.yml`, ~3×/day): it fetches the frontier feeds,
+  dedups against `data/argo_seen.json`, asks an LLM judge *"would a frontier
+  builder want to know this today?"*, and texts up to 3 alerts + links for real
+  launches/tools/capabilities — dropping routine noise. This flips Argo from
+  reactive to proactive.
+
+See [build-log/](build-log/) for the dated build history and
+[docs/ARGO_WEBHOOK_SETUP.md](docs/ARGO_WEBHOOK_SETUP.md) / [docs/ARGO_LLM_SETUP.md](docs/ARGO_LLM_SETUP.md)
+for setup.
+
 ---
 
 ## The Weekly Message + Telegram
@@ -164,15 +189,22 @@ src/                      ← Python
   week.py, opportunities.py, score.py, main.py, experiment.py
   seas_demo.py            ← demo: report + weekly message
   argo.py                 ← Argo V1: weekly bet + energy
-  send_telegram.py        ← Telegram delivery (PoC)
+  fetch_signals.py        ← live RSS signal ingestion (balanced feeds)
+  argo_project.py         ← generate a fresh LLM project + send to Telegram
+  argo_observe.py         ← LLM call layer (providers + chat_with_mcp)
+  argo_webhook.py         ← two-way Telegram chat (webhook + MCP host, ASGI)
+  argo_mcp_server.py      ← Argo's MCP server: web_fetch (allowlist), list_feeds
+  argo_watch.py           ← tripwire: proactive frontier alerts
+  send_telegram.py, set_webhook.py
   (older capability/scoring scripts — see AUDIT.md / PHASE_1_PLAN.md)
 
 data/                     ← state
-  signals.json            ← SEAS signal store
-  opportunities.json      ← SEAS ranked opportunities
-  argo_bets.json          ← Argo bet + energy log
-  signal_template.json    ← signal schema
-  (capabilities.json, ledger.json — legacy)
+  signals.json            ← live signal cache (gitignored, refreshed each run)
+  argo_bets.json          ← Argo V1 bet + energy log
+  argo_projects.json      ← Argo V2 projects + energy ratings
+  argo_chat.json          ← chat memory (on Railway volume; gitignored locally)
+  argo_seen.json          ← tripwire seen-store (dedup)
+  (opportunities.json, capabilities.json, ledger.json — SEAS/legacy)
 
 inbox/        signals.md  ← signal intake
 experiments/  SEAS-00x experiment cards + supporting prompts
@@ -180,8 +212,9 @@ results/      raw experiment outputs (evidence)
 findings/     F-001 cognitive operators (canonical finding)
 runs/         schemas, run logs, dated outputs
 demo/         generated demo report + weekly message
-docs/         TELEGRAM_SETUP.md
-.github/workflows/        seas-weekly.yml, seas-friday-telegram.yml
+build-log/    dated build history (newest first)
+docs/         TELEGRAM_SETUP.md, ARGO_LLM_SETUP.md, ARGO_WEBHOOK_SETUP.md
+.github/workflows/        seas-weekly.yml, seas-friday-telegram.yml, argo-watch.yml
 ```
 
 ## Automation
@@ -189,7 +222,8 @@ docs/         TELEGRAM_SETUP.md
 | Workflow | Schedule | What it does |
 |---|---|---|
 | `seas-weekly.yml` | Mondays 15:00 UTC | Runs `python src/seas.py` and commits updated `data/` + `runs/`. |
-| `seas-friday-telegram.yml` | Fridays 08:00 America/Los_Angeles (15:00 UTC) | Generates the weekly message and sends it to Telegram. Requires the `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` repo secrets. |
+| `seas-friday-telegram.yml` | Fridays (15:00 UTC) | Generates a fresh Argo V2 project and sends it to Telegram. |
+| `argo-watch.yml` | ~3×/day (14/19/00 UTC) | Tripwire: fetches frontier feeds, judges new items, texts up to 3 alerts + links, commits the seen-store. |
 
 > GitHub cron is UTC with no daylight-saving awareness; the Friday job lands at
 > 08:00 Pacific during PDT and 07:00 during PST. See
