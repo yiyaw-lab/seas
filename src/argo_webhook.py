@@ -38,6 +38,7 @@ Register URL: python src/set_webhook.py https://your-public-url/webhook
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
 try:
@@ -332,6 +333,14 @@ def handle_update(update):
     send_telegram.send_message(reply)
 
 
+def _safe_handle(update):
+    """Run handle_update in a background thread; never raise out of the thread."""
+    try:
+        handle_update(update)
+    except Exception as exc:
+        print(f"handle_update error: {exc}")
+
+
 def create_app():
     from flask import Flask, request
 
@@ -348,10 +357,14 @@ def create_app():
             if sent != WEBHOOK_SECRET:
                 return "forbidden", 403
         update = request.get_json(force=True, silent=True) or {}
-        try:
-            handle_update(update)
-        except Exception as exc:  # never 500 back to Telegram (it retries)
-            print(f"handle_update error: {exc}")
+        # Process in a background thread and return 200 immediately. Critical:
+        # a chat turn's tool call loops back into THIS server's /mcp endpoint, so
+        # if we block the request worker on the model call, the server can't
+        # answer its own tool request -> deadlock (300s timeout, webhook 502s).
+        # Returning fast frees the worker; the reply is sent via send_message.
+        threading.Thread(
+            target=_safe_handle, args=(update,), daemon=True
+        ).start()
         return "ok", 200
 
     return app
