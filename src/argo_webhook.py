@@ -26,6 +26,11 @@ Does NOT touch Argo V1 (argo.py) or generation. Webhook and getUpdates are
 mutually exclusive in Telegram — running this means argo_rate.py polling is off
 (ratings now happen here instead).
 
+Set WEBHOOK_URL (public base, e.g. https://argo.up.railway.app) and the server
+re-registers its webhook with Telegram on every startup — so a domain change or
+bot-token rotation can't silently leave the bot deaf. Without WEBHOOK_URL, register
+manually with set_webhook.py.
+
 Run locally:  python src/argo_webhook.py   (then expose :8080 via a tunnel)
 Register URL: python src/set_webhook.py https://your-public-url/webhook
 """
@@ -236,8 +241,50 @@ def create_app():
     return app
 
 
+def self_register_webhook():
+    """Register this server's webhook with Telegram on startup.
+
+    Set WEBHOOK_URL (the public base URL, e.g. https://argo.up.railway.app) and
+    every deploy/restart re-points Telegram here automatically — so a domain or
+    bot-token change can't silently leave the bot deaf. No-op if WEBHOOK_URL is
+    unset (e.g. local dev behind a tunnel you register manually).
+    """
+    import ssl
+    import urllib.parse
+    import urllib.request
+
+    base = os.environ.get("WEBHOOK_URL")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not base or not token:
+        print("WEBHOOK_URL or TELEGRAM_BOT_TOKEN unset — skipping self-register.")
+        return
+
+    url = base.rstrip("/") + "/webhook"
+    params = {"url": url}
+    if WEBHOOK_SECRET:
+        params["secret_token"] = WEBHOOK_SECRET
+
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+
+    api = (f"https://api.telegram.org/bot{token}/setWebhook?"
+           + urllib.parse.urlencode(params))
+    try:
+        with urllib.request.urlopen(api, timeout=20, context=ctx) as r:
+            ok = json.loads(r.read().decode()).get("ok")
+        print(f"Self-registered webhook -> {url}" if ok
+              else f"Self-register failed for {url}")
+    except Exception as exc:
+        # Don't let a registration hiccup stop the server from booting.
+        print(f"Self-register error (server still starting): {exc}")
+
+
 def main():
     app = create_app()
+    self_register_webhook()
     port = int(os.environ.get("PORT", "8080"))
     print(f"🛰️  Argo webhook listening on :{port} (POST /webhook)")
     app.run(host="0.0.0.0", port=port)
