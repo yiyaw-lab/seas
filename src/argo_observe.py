@@ -233,6 +233,47 @@ def _call_anthropic(job, model):
     )
 
 
+# Beta header for the MCP connector (Anthropic runs the tool loop server-side).
+# Isolated here so a beta-string change touches one place. Confirm against
+# current Anthropic docs if connector calls start failing.
+MCP_BETA = "mcp-client-2025-04-04"
+
+
+def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
+    """Claude chat call with structured messages and optional MCP tool servers.
+
+    Separate from generate_observations (the string-in/string-out helper the
+    batch jobs use) because tool-use needs structured messages + the MCP beta.
+    `messages` is a list of {role: 'user'|'assistant', content: str}. When
+    mcp_servers is given, Anthropic runs the tool loop and may return
+    mcp_tool_use/mcp_tool_result blocks alongside text; we return only the text.
+    Used by argo_webhook._llm_reply. Claude-only (the connector requires it).
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
+
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+        "temperature": 1.0,
+    }
+    if mcp_servers:
+        kwargs["mcp_servers"] = mcp_servers
+        kwargs["betas"] = [MCP_BETA]
+        response = client.beta.messages.create(**kwargs)
+    else:
+        # No tools yet (Phase A): a plain messages call, no beta needed.
+        response = client.messages.create(**kwargs)
+
+    return "".join(
+        block.text for block in response.content
+        if getattr(block, "type", None) == "text"
+    )
+
+
 # Provider registry. Each entry: how to recognise a model name, which env var
 # holds its key, and how to call it. Adding a provider = adding a row here; no
 # provider is hardcoded into the generation flow.
