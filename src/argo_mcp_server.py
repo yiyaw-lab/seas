@@ -22,6 +22,7 @@ import ipaddress
 import os
 import re
 import socket
+from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
@@ -248,6 +249,88 @@ def github_list(repo: str, path: str = "") -> str:
     if isinstance(entries, dict):  # a file path, not a dir
         return f"{entries.get('name')} (file, {entries.get('size')} bytes)"
     return "\n".join(f"{e['type']:4s}  {e['name']}" for e in entries) or "(empty)"
+
+
+# --- Phase D: self-status (read-only, autonomy L0) --------------------------
+# Tools that let Argo report its OWN health. Read-only: they observe, never act
+# (self-heal actions are Phase E). Argo can diagnose and tell you what to do.
+
+ROOT = Path(__file__).resolve().parent.parent
+PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
+SIGNALS_PATH = ROOT / "data" / "signals.json"
+
+
+@mcp.tool()
+def get_webhook_health() -> str:
+    """Report Argo's own Telegram webhook status: the registered URL, pending
+    update count, and the last delivery error (if any). Use when asked 'are you
+    healthy / is the bot working / why might messages be dropping'."""
+    import json as _json
+    import ssl
+    import urllib.request
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return "TELEGRAM_BOT_TOKEN not set, can't check webhook."
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
+        with urllib.request.urlopen(url, timeout=15, context=ctx) as r:
+            info = _json.loads(r.read().decode()).get("result", {})
+    except Exception as exc:
+        return f"Couldn't reach Telegram: {type(exc).__name__}: {exc}"
+    parts = [
+        f"url: {info.get('url') or '(none set!)'}",
+        f"pending updates: {info.get('pending_update_count', 0)}",
+    ]
+    if info.get("last_error_message"):
+        parts.append(f"last error: {info['last_error_message']}")
+    return "; ".join(parts)
+
+
+@mcp.tool()
+def get_latest_project() -> str:
+    """Report Argo's most recent weekly project and its energy rating (or that
+    it's unrated). Use when asked 'what did you suggest last / what's my latest
+    project / did I rate it'."""
+    import json as _json
+
+    if not PROJECTS_LOG.exists():
+        return "No projects logged yet."
+    try:
+        log = _json.loads(PROJECTS_LOG.read_text())
+    except (ValueError, _json.JSONDecodeError):
+        return "Project log is unreadable."
+    if not log:
+        return "No projects logged yet."
+    p = log[-1]
+    energy = p.get("energy")
+    rating = f"energy {energy}/10" if energy is not None else "not yet rated"
+    return f"{p.get('id')} ({p.get('date')}, {rating}):\n{p.get('text','')[:800]}"
+
+
+@mcp.tool()
+def get_signal_freshness() -> str:
+    """Report how fresh Argo's signal pool is: when signals.json was last
+    refreshed and how many signals it holds. Use when asked 'how current are your
+    signals / when did you last pull'."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    if not SIGNALS_PATH.exists():
+        return "No signals file yet (signals are fetched fresh per run)."
+    mtime = datetime.fromtimestamp(SIGNALS_PATH.stat().st_mtime, tz=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+    try:
+        n = len(_json.loads(SIGNALS_PATH.read_text()))
+    except (ValueError, _json.JSONDecodeError):
+        n = "?"
+    return (f"{n} signals, last refreshed {mtime:%Y-%m-%d %H:%M UTC} "
+            f"({age_h:.1f}h ago).")
 
 
 def mcp_asgi_app():
