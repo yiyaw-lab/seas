@@ -82,7 +82,31 @@ def _to_text(raw):
     return text[:MAX_FETCH_CHARS]
 
 
-mcp = FastMCP("argo")
+# FastMCP's Streamable-HTTP transport enforces DNS-rebinding protection: it
+# rejects requests whose Host header isn't in allowed_hosts (defaults to
+# localhost only), returning 421. Behind Railway the Host is our public domain,
+# so we must allow it or the Anthropic connector's calls are refused. Derive the
+# host from WEBHOOK_URL; allow it (and its :port form) plus localhost for dev.
+def _transport_security():
+    from urllib.parse import urlparse
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    base = os.environ.get("WEBHOOK_URL")
+    if base:
+        host = urlparse(base).hostname
+        if host:
+            hosts += [host, f"{host}:*"]
+            origins += [f"https://{host}", f"https://{host}:*"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+mcp = FastMCP("argo", transport_security=_transport_security())
 
 
 @mcp.tool()
