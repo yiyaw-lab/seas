@@ -57,15 +57,22 @@ server binds `$PORT` / `0.0.0.0` automatically.
    - `TELEGRAM_WEBHOOK_SECRET`  (optional but recommended — see below)
    - `ARGO_CHAT_LOG` = `/data/argo_chat.json`  (so chat memory lands on the
      persistent volume below — see "Persistent chat memory")
+   - `WEBHOOK_URL` = `https://YOUR-RAILWAY-DOMAIN`  (base URL, no `/webhook`) —
+     the server self-registers the webhook on every startup, so a domain change
+     or bot-token rotation can't silently leave the bot deaf.
    Paste each value as a single line (no trailing newline).
 3. Under **Settings → Networking**, click **Generate Domain** to get a public
    HTTPS URL like `https://seas-production.up.railway.app`.
-4. Register the webhook to that URL + `/webhook` (run locally, or anywhere with
-   the bot token):
+4. With `WEBHOOK_URL` set (step 2), the server registers itself on startup —
+   no manual step. Otherwise register once:
    ```bash
    python src/set_webhook.py https://YOUR-RAILWAY-URL/webhook
    ```
 5. Text your bot on Telegram. Argo replies, 24/7. ✅
+
+> Gotcha: changing the Railway domain OR rotating the Telegram bot token wipes
+> the webhook (the bot goes silent with no error). With `WEBHOOK_URL` set, the
+> next redeploy fixes it automatically; otherwise re-run `set_webhook.py`.
 
 Health check: visit `https://YOUR-RAILWAY-URL/` — it should say
 "Argo webhook is up."
