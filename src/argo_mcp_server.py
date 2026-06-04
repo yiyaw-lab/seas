@@ -45,6 +45,7 @@ def _build_allowed_hosts():
         "huggingface.co",
         "openai.com",
         "anthropic.com", "www.anthropic.com",  # no RSS feed, but /news fetches fine
+        "x.ai", "docs.x.ai",  # x.ai/news hard-blocks bots (403); docs.x.ai fetches
         "blog.google",
         "github.blog",
     })
