@@ -75,6 +75,10 @@ genuinely want to know about TODAY: real launches, new models, new tools/product
 notable capability jumps, or major lab announcements. DROP routine papers,
 incremental research, listicles, and noise. Most items should be dropped.
 
+NEVER miss a flagship launch from a major lab (OpenAI, Anthropic, Google
+DeepMind, Meta, xAI/Grok, Mistral, DeepSeek) or a tool builders will adopt
+widely. If a major lab ships a new model or product, that always clears the bar.
+
 For each item you keep, write ONE short plain-text line (no markdown) saying what
 it is and why it matters, then the link on its own. Keep at most {max_alerts}.
 If nothing clears the bar, output exactly: NONE
