@@ -1,7 +1,7 @@
 # Argo V2 observation generation (src/argo_observe.py)
 python-dotenv   # load OPENAI_API_KEY / ANTHROPIC_API_KEY / ARGO_MODEL from .env
 openai          # gpt-* / o* models
-anthropic       # claude-* models (provider supported by argo_observe.py)
+anthropic>=0.105  # claude-* models + beta.messages MCP connector (argo_observe.chat_with_mcp)
 
 # Telegram delivery (src/send_telegram.py)
 certifi         # CA bundle for TLS verification (macOS framework Python lacks roots)

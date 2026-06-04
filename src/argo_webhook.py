@@ -57,6 +57,29 @@ PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
 # webhook (set_webhook.py does). Blocks randoms POSTing to your endpoint.
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 
+# MCP servers Argo's chat can use (Phase B+ wires real ones). None = no tools,
+# which keeps Phase A a pure model-swap with no agentic behaviour yet.
+MCP_SERVERS = None
+
+# Chat model routing for token efficiency: Sonnet handles routine turns, Opus is
+# reserved for high-stakes ones. Overridable via env without code change.
+CHAT_MODEL_DEFAULT = os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")
+CHAT_MODEL_PREMIUM = os.environ.get("ARGO_CHAT_MODEL_PREMIUM", "claude-opus-4-8")
+# Message looks high-stakes -> escalate to the premium model.
+PREMIUM_TRIGGERS = (
+    "should i build", "worth building", "strategy", "strategic", "architecture",
+    "design", "why ", "tradeoff", "trade-off", "decide", "roadmap", "bet on",
+)
+PREMIUM_LEN = 280  # long messages tend to be the meaty ones
+
+
+def _route_model(user_text):
+    """Pick the chat model for this turn (Sonnet default, Opus on triggers)."""
+    t = user_text.lower()
+    if len(user_text) >= PREMIUM_LEN or any(k in t for k in PREMIUM_TRIGGERS):
+        return CHAT_MODEL_PREMIUM
+    return CHAT_MODEL_DEFAULT
+
 SYSTEM_PROMPT = (
     "You are Argo. You talk with Yiya — a frontier AI builder — over text about "
     "what's worth building and what's actually happening at the edge of the "
@@ -92,17 +115,16 @@ SYSTEM_PROMPT = (
     "things, not an assistant.\n"
     "\n"
     "Know what you actually are, so you don't bullshit when asked about yourself: "
-    "you're an LLM (gpt-4o) driven by this prompt — you have NO tunable "
-    "parameters, weights, or algorithms to adjust. 'Improving you' means editing "
-    "your prompt, changing your signal sources, or the workflow around you, "
-    "nothing else. Your inputs are a few fresh signals pulled weekly from RSS "
-    "(arXiv cs.AI/LG/CL, GitHub trending, and OpenAI/Hugging Face/GitHub-changelog/"
-    "Google-AI feeds). You remember only about the last 12 turns of this chat; no "
-    "long-term memory beyond that. You send one project a week over Telegram and "
-    "track a 1-10 'energy' rating per project. When asked how to improve you, "
-    "answer concretely from these facts (e.g. narrow signal sources, short "
-    "memory, prompt not parameters); if you don't know a detail, say so. Never "
-    "invent generic optimization advice."
+    "you're a Claude model driven by this prompt. You have NO tunable parameters "
+    "or weights to adjust; 'improving you' means editing your prompt, your signal "
+    "sources, or the workflow around you. Your inputs are a few fresh signals "
+    "pulled weekly from RSS (arXiv cs.AI/LG/CL, GitHub trending, and OpenAI/"
+    "Hugging Face/GitHub-changelog/Google-AI feeds). You remember only about the "
+    "last 12 turns of this chat; no long-term memory beyond that. You send one "
+    "project a week over Telegram and track a 1-10 'energy' rating per project. "
+    "When asked how to improve you, answer concretely from these facts (e.g. "
+    "narrow signal sources, short memory, prompt not parameters); if you don't "
+    "know a detail, say so. Never invent generic optimization advice."
 )
 
 # Persisted, append-only chat log. This is durable conversation data (for
@@ -159,29 +181,50 @@ def _strip_dashes(text):
 
 def _llm_reply(chat_id, user_text):
     """Generate Argo's reply with short conversation memory."""
-    models = observe.resolve_models()
-    runnable = [
-        m for m in models
-        if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])
-    ]
+    # Prefer the routed Claude model for chat (Sonnet default, Opus on triggers);
+    # fall back to whatever resolve_models() yields (e.g. gpt-4o escape hatch).
+    candidates = [_route_model(user_text)] + observe.resolve_models()
+    seen = set()
+    runnable = []
+    for m in candidates:
+        if m in seen:
+            continue
+        seen.add(m)
+        p = observe.provider_for(m)
+        if p and os.environ.get(p["key_env"]):
+            runnable.append(m)
     if not runnable:
         return "(Argo can't think right now, no API key configured.)"
 
-    # Build a single prompt: system + recent turns (from the durable log) + this
-    # message. We reuse generate_observations (a generic "send prompt -> text"
-    # call), so memory is folded into the prompt rather than passed as messages.
     hist = _recent_turns(chat_id)
-    convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"Conversation so far:\n{convo}\n\n"
-        f"Yiya: {user_text}\n\nArgo:"
-    )
 
     last_error = None
     for model in runnable:
         try:
-            reply = _strip_dashes(observe.generate_observations(prompt, model).strip())
+            if observe.provider_for(model)["name"] == "anthropic":
+                # Claude path: structured messages + (later) MCP tools. Map the
+                # stored "Yiya"/"Argo" labels to user/assistant roles.
+                messages = [
+                    {
+                        "role": "assistant" if t["role"] == "Argo" else "user",
+                        "content": t["text"],
+                    }
+                    for t in hist
+                ] + [{"role": "user", "content": user_text}]
+                raw = observe.chat_with_mcp(
+                    SYSTEM_PROMPT, messages, model, mcp_servers=MCP_SERVERS
+                )
+            else:
+                # Fallback path (gpt-4o): the original single string prompt.
+                convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
+                prompt = (
+                    f"{SYSTEM_PROMPT}\n\n"
+                    f"Conversation so far:\n{convo}\n\n"
+                    f"Yiya: {user_text}\n\nArgo:"
+                )
+                raw = observe.generate_observations(prompt, model)
+
+            reply = _strip_dashes(raw.strip())
             # Persist both turns so memory survives restarts and is analysable.
             _append_turn(chat_id, "Yiya", user_text)
             _append_turn(chat_id, "Argo", reply)
