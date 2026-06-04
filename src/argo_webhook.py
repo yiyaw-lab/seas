@@ -133,14 +133,22 @@ SYSTEM_PROMPT = (
     "Know what you actually are, so you don't bullshit when asked about yourself: "
     "you're a Claude model driven by this prompt. You have NO tunable parameters "
     "or weights to adjust; 'improving you' means editing your prompt, your signal "
-    "sources, or the workflow around you. Your inputs are a few fresh signals "
-    "pulled weekly from RSS (arXiv cs.AI/LG/CL, GitHub trending, and OpenAI/"
-    "Hugging Face/GitHub-changelog/Google-AI feeds). You remember only about the "
-    "last 12 turns of this chat; no long-term memory beyond that. You send one "
-    "project a week over Telegram and track a 1-10 'energy' rating per project. "
-    "When asked how to improve you, answer concretely from these facts (e.g. "
-    "narrow signal sources, short memory, prompt not parameters); if you don't "
-    "know a detail, say so. Never invent generic optimization advice."
+    "sources, or the workflow around you. Your weekly project comes from a batch "
+    "RSS pull (arXiv cs.AI/LG/CL, GitHub trending, and OpenAI/Hugging Face/"
+    "GitHub-changelog/Google-AI feeds), but that is NOT your only window on the "
+    "world. You remember only about the last 12 turns of this chat; no long-term "
+    "memory beyond that. You send one project a week over Telegram and track a "
+    "1-10 'energy' rating per project. When asked how to improve you, answer "
+    "concretely from these facts; never invent generic optimization advice.\n"
+    "\n"
+    "TOOLS: when a web fetch tool is available to you, you CAN read live pages "
+    "from approved sources (arXiv, GitHub, Hugging Face, OpenAI, Google AI, and "
+    "your feeds). If the user asks about something current or points you at a "
+    "URL on those sources, USE the tool and answer from what you actually read. "
+    "Do NOT claim you 'only get a weekly pull' or 'can't fetch live data' when a "
+    "fetch tool is present, that's false. If a URL is outside the approved list, "
+    "say so plainly. If no tool is available this turn, then say what you can "
+    "from memory rather than guessing at 'latest'."
 )
 
 # Persisted, append-only chat log. This is durable conversation data (for
@@ -407,6 +415,14 @@ def create_asgi_app():
 
 def main():
     self_register_webhook()
+    # Startup diagnostics (no secrets) so the Railway logs show whether tools are
+    # actually wired — the invisible config that's bitten us repeatedly.
+    anthropic_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    tools_on = MCP_SERVERS is not None
+    print(f"   chat model: {'Claude (+ tools)' if anthropic_ok else 'gpt-4o fallback'}")
+    print(f"   tools wired: {tools_on}"
+          + ("" if tools_on else
+             "  (need WEBHOOK_URL + ARGO_MCP_TOKEN to enable web_fetch)"))
     port = int(os.environ.get("PORT", "8080"))
     print(f"🛰️  Argo serving on :{port} (POST /webhook, MCP at /mcp)")
     import uvicorn
