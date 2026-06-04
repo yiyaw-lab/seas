@@ -163,6 +163,91 @@ def list_feeds() -> str:
     return "\n".join(f"{label}: {url}" for label, url in fetch_signals.FEEDS)
 
 
+# --- Phase C: repo/code read (GitHub) ---------------------------------------
+# Repos Argo may read. Comma-separated owner/repo in GITHUB_REPO_ALLOWLIST; "*"
+# allows any (public) repo. Default: just this project's repo. Private repos
+# require GITHUB_TOKEN.
+def _repo_allowlist():
+    raw = os.environ.get("GITHUB_REPO_ALLOWLIST", "yiyaw-lab/seas")
+    return {r.strip().lower() for r in raw.split(",") if r.strip()}
+
+
+def _repo_allowed(repo):
+    allow = _repo_allowlist()
+    return "*" in allow or repo.lower() in allow
+
+
+def _gh_api(path, raw=False):
+    """Call the GitHub REST API; return (ok, text). Uses GITHUB_TOKEN if set."""
+    import ssl
+    import urllib.request
+
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+
+    headers = {
+        "User-Agent": "argo-mcp/1.0",
+        "Accept": "application/vnd.github.raw+json" if raw
+                  else "application/vnd.github+json",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token.strip()
+
+    req = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+            return True, r.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        hint = ""
+        if "404" in str(exc):
+            hint = " (private repo? needs GITHUB_TOKEN, or wrong path)"
+        return False, f"GitHub API error: {type(exc).__name__}: {exc}{hint}"
+
+
+@mcp.tool()
+def github_read_file(repo: str, path: str) -> str:
+    """Read a file from an approved GitHub repo. `repo` is 'owner/name', `path`
+    is the file path within it. Use this to read actual source/README/config
+    instead of guessing about a project. Only approved repos are allowed."""
+    if "/" not in repo:
+        return "Refused: repo must be 'owner/name'."
+    if not _repo_allowed(repo):
+        return (f"Refused: '{repo}' is not on Argo's approved repo list "
+                f"({', '.join(sorted(_repo_allowlist()))}).")
+    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}", raw=True)
+    if not ok:
+        return body
+    return body[:MAX_FETCH_CHARS] or "(empty file)"
+
+
+@mcp.tool()
+def github_list(repo: str, path: str = "") -> str:
+    """List files/dirs in an approved GitHub repo at `path` (default: root).
+    `repo` is 'owner/name'. Use to explore a repo's structure before reading a
+    specific file. Only approved repos are allowed."""
+    import json as _json
+
+    if "/" not in repo:
+        return "Refused: repo must be 'owner/name'."
+    if not _repo_allowed(repo):
+        return (f"Refused: '{repo}' is not on Argo's approved repo list "
+                f"({', '.join(sorted(_repo_allowlist()))}).")
+    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}")
+    if not ok:
+        return body
+    try:
+        entries = _json.loads(body)
+    except (ValueError, _json.JSONDecodeError):
+        return "(could not parse listing)"
+    if isinstance(entries, dict):  # a file path, not a dir
+        return f"{entries.get('name')} (file, {entries.get('size')} bytes)"
+    return "\n".join(f"{e['type']:4s}  {e['name']}" for e in entries) or "(empty)"
+
+
 def mcp_asgi_app():
     """The Streamable-HTTP ASGI app to mount under /mcp."""
     return mcp.streamable_http_app()
