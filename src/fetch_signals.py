@@ -82,6 +82,7 @@ def _parse_with_feedparser(raw):
             "title": (e.get("title") or "").strip(),
             "summary": _clean(e.get("summary") or e.get("description") or ""),
             "published": e.get("published_parsed") or e.get("updated_parsed"),
+            "link": (e.get("link") or e.get("id") or "").strip(),
         })
     return items
 
@@ -102,15 +103,21 @@ def _parse_with_stdlib(raw):
         tag = el.tag.split("}")[-1]
         if tag not in ("item", "entry"):
             continue
-        title = summary = ""
+        title = summary = link = ""
         for child in el:
             ctag = child.tag.split("}")[-1]
             if ctag == "title" and child.text:
                 title = child.text.strip()
             elif ctag in ("summary", "description") and child.text:
                 summary = _clean(child.text)
+            elif ctag == "link":
+                # RSS: link text; Atom: href attribute.
+                link = (child.text or child.get("href") or "").strip()
+            elif ctag in ("id", "guid") and child.text and not link:
+                link = child.text.strip()
         if title:
-            items.append({"title": title, "summary": summary, "published": None})
+            items.append({"title": title, "summary": summary,
+                          "published": None, "link": link})
     return items
 
 

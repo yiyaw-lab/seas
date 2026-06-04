@@ -1,0 +1,51 @@
+name: Argo Watch (tripwire)
+
+on:
+  schedule:
+    # ~3x/day. GitHub cron is UTC. 14:00 / 19:00 / 00:00 UTC
+    # (roughly morning / midday / evening Pacific).
+    - cron: "0 14,19,0 * * *"
+  workflow_dispatch:
+
+# Allow committing the updated seen-store back to the repo.
+permissions:
+  contents: write
+
+# Don't let overlapping runs double-send or fight over the seen-store.
+concurrency:
+  group: argo-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Watch frontier feeds and alert
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ARGO_CHAT_MODEL: ${{ vars.ARGO_CHAT_MODEL }}
+          ARGO_MODEL: ${{ vars.ARGO_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/argo_watch.py
+
+      - name: Commit updated seen-store
+        run: |
+          git config user.name "argo-watch"
+          git config user.email "argo-watch@users.noreply.github.com"
+          git add data/argo_seen.json
+          git commit -m "argo-watch: update seen-store" || echo "No changes"
+          git push
