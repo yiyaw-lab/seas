@@ -115,6 +115,9 @@ SYSTEM_PROMPT = (
     "texting, not like a document.\n"
     "- Never use em dashes. Use a comma, a period, or just start a new "
     "sentence.\n"
+    "- Plain text only. No markdown: no **bold**, no ## headers, no bullet "
+    "lists. This is a text message, and the asterisks just show up as literal "
+    "characters. Emphasis comes from your words, not formatting.\n"
     "\n"
     "Match her register. If she's casual and uses shorthand (lowercase, 'u', "
     "'rn', 'ngl', 'tbh', dropped punctuation), reply in kind. If she's precise "
@@ -196,13 +199,23 @@ def _recent_turns(chat_id, n=HISTORY_TURNS):
     return turns[-n:]
 
 
-def _strip_dashes(text):
-    """Remove em/en dashes deterministically (the prompt rule alone is unreliable).
-
-    A dash flanked by spaces becomes a comma; a dash glued between words becomes
-    a space; stray dashes are dropped. Collapses any double spaces left behind.
+def _clean_reply(text):
+    """Deterministically enforce the plain-text rules the prompt asks for, since
+    the model doesn't always comply: strip em/en dashes and any markdown (bold,
+    italic, headers, bullet markers). Telegram sends with no parse_mode, so
+    markdown would otherwise show up as literal **asterisks** and ## hashes.
     """
+    # Em/en dashes: spaced -> comma, glued -> space.
     text = re.sub(r"\s*[—–]\s*", lambda m: ", " if " " in m.group(0) else " ", text)
+    # Bold/italic: **x**/__x__/*x*/_x_ -> x (keep the inner text).
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+    # Markdown headers and list bullets at line starts -> plain.
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+    text = re.sub(r"(?m)^\s{0,3}[-*+]\s+", "", text)
+    # Tidy leftover double spaces.
     return re.sub(r"  +", " ", text)
 
 
@@ -251,7 +264,7 @@ def _llm_reply(chat_id, user_text):
                 )
                 raw = observe.generate_observations(prompt, model)
 
-            reply = _strip_dashes(raw.strip())
+            reply = _clean_reply(raw.strip())
             # Persist both turns so memory survives restarts and is analysable.
             _append_turn(chat_id, "Yiya", user_text)
             _append_turn(chat_id, "Argo", reply)
