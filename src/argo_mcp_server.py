@@ -165,10 +165,12 @@ def list_feeds() -> str:
 
 # --- Phase C: repo/code read (GitHub) ---------------------------------------
 # Repos Argo may read. Comma-separated owner/repo in GITHUB_REPO_ALLOWLIST; "*"
-# allows any (public) repo. Default: just this project's repo. Private repos
-# require GITHUB_TOKEN.
+# (the default) allows ANY repo so Argo can read trending/other repos it surfaces.
+# Reads are read-only and size-capped (same risk class as web_fetch). Public
+# repos need no token; private repos require GITHUB_TOKEN. Set the env var to a
+# specific list if you ever want to restrict it.
 def _repo_allowlist():
-    raw = os.environ.get("GITHUB_REPO_ALLOWLIST", "yiyaw-lab/seas")
+    raw = os.environ.get("GITHUB_REPO_ALLOWLIST", "*")
     return {r.strip().lower() for r in raw.split(",") if r.strip()}
 
 
@@ -210,9 +212,9 @@ def _gh_api(path, raw=False):
 
 @mcp.tool()
 def github_read_file(repo: str, path: str) -> str:
-    """Read a file from an approved GitHub repo. `repo` is 'owner/name', `path`
-    is the file path within it. Use this to read actual source/README/config
-    instead of guessing about a project. Only approved repos are allowed."""
+    """Read a file from a GitHub repo. `repo` is 'owner/name', `path` is the file
+    path within it. Use this to read actual source/README/config of any project,
+    especially a trending repo you just surfaced, instead of guessing."""
     if "/" not in repo:
         return "Refused: repo must be 'owner/name'."
     if not _repo_allowed(repo):
@@ -226,9 +228,9 @@ def github_read_file(repo: str, path: str) -> str:
 
 @mcp.tool()
 def github_list(repo: str, path: str = "") -> str:
-    """List files/dirs in an approved GitHub repo at `path` (default: root).
-    `repo` is 'owner/name'. Use to explore a repo's structure before reading a
-    specific file. Only approved repos are allowed."""
+    """List files/dirs in a GitHub repo at `path` (default: root). `repo` is
+    'owner/name'. Use to explore a repo's structure (e.g. a trending project you
+    surfaced) before reading a specific file."""
     import json as _json
 
     if "/" not in repo:
