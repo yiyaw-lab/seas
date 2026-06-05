@@ -219,7 +219,7 @@ def _guarded(provider, do_call, label):
     return run()
 
 
-def _call_openai(job, model):
+def _call_openai(job, model, temperature=1.0):
     from openai import OpenAI  # lazy: no-key path needs no SDK
 
     # Strip the key: a stray newline/space (common when pasting into a CI secret)
@@ -234,14 +234,14 @@ def _call_openai(job, model):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": job},
             ],
-            temperature=1.0,  # observations want breadth, not determinism
+            temperature=temperature,  # default 1.0: observations want breadth
         )
 
     response = _guarded("openai", do_call, f"openai/{model}")
     return response.choices[0].message.content
 
 
-def _call_anthropic(job, model):
+def _call_anthropic(job, model, temperature=1.0):
     import anthropic  # lazy: no-key path needs no SDK
 
     # Strip the key (see _call_openai) to avoid illegal-header errors from a
@@ -254,7 +254,7 @@ def _call_anthropic(job, model):
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": job}],
-            temperature=1.0,
+            temperature=temperature,
         )
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
@@ -302,7 +302,8 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
 MCP_BETA = "mcp-client-2025-11-20"
 
 
-def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
+def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
+                  temperature=1.0):
     """Claude chat call with structured messages and optional MCP tool servers.
 
     Separate from generate_observations (the string-in/string-out helper the
@@ -322,7 +323,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
         "max_tokens": max_tokens,
         "system": system,
         "messages": messages,
-        "temperature": 1.0,
+        "temperature": temperature,
     }
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
@@ -388,11 +389,13 @@ def resolve_models():
     return list(DEFAULT_MODELS)
 
 
-def generate_observations(job, model):
+def generate_observations(job, model, temperature=1.0):
     """Generate observations for `model`, routing to the right provider.
 
     Raises on a missing key, unknown provider, or API/SDK error so the caller
     can fall back to job-only. No observations are ever fabricated here.
+    `temperature` defaults to 1.0 (breadth); pass 0 for a deterministic verdict
+    (the watch judge uses this so the same items don't flip run-to-run).
     """
     provider = provider_for(model)
     if provider is None:
@@ -405,7 +408,7 @@ def generate_observations(job, model):
             f"{provider['key_env']} not set for model '{model}' "
             f"({provider['name']})"
         )
-    return provider["call"](job, model)
+    return provider["call"](job, model, temperature)
 
 
 def main():
