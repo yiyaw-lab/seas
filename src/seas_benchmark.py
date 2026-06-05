@@ -93,7 +93,9 @@ def _score_judgment(judgment, sources):
         evidence=judgment.get("evidence", []), prediction=pred,
         refutation_condition=judgment.get("refutation_condition", ""),
     )
-    passed, problems = seas_schema.validate_finding(draft)
+    # Score through the FULL gate including quote-fidelity, so a model that
+    # fabricates quotes is marked an overclaim, not a clean finding.
+    passed, problems = seas_schema.validate_finding(draft, sources=sources)
     return {
         "outcome": "finding" if passed else "overclaim",
         "gate_passed": passed,

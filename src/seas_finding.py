@@ -320,7 +320,9 @@ def _route_judgment(signal, sig_ref, sources, judgment, dry_run):
         confidence=min(seas_schema.SYNTHESIS_SEED_CONFIDENCE,
                        float(judgment.get("confidence", 0.3) or 0.3)),
     )
-    passed, problems = seas_schema.validate_finding(draft)
+    # Pass sources so the gate also verifies quote FIDELITY (cited quotes must be
+    # real substrings of the fetched sources), not just structure.
+    passed, problems = seas_schema.validate_finding(draft, sources=sources)
 
     if not passed:
         # The model over-claimed: it said "finding" but the evidence/prediction
