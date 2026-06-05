@@ -109,16 +109,97 @@ def _extract_json(text):
         return None
 
 
+def save_signal(what, pattern, liked, steal, source, caption=""):
+    """Persist an already-structured taste signal (e.g. from a studied URL, where
+    the model returns the lesson directly rather than via parse_and_store). Same
+    record shape as the screenshot path. Returns the stored signal."""
+    if not pattern:
+        return None
+    items = _load()
+    sig = {
+        "id": f"T-{len(items) + 1:03d}",
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "source": source,
+        "caption": caption,
+        "what": what or "",
+        "pattern": pattern,
+        "liked": liked or "",
+        "steal": steal or "",
+    }
+    items.append(sig)
+    _save(items)
+    return sig
+
+
+# --- First-class learning: themes (so taste sharpens as it accumulates) ------
+# A flat list of signals is memory; THEMES are learning. Recurring 'liked'
+# qualities cluster into named taste-themes, so the profile gets sharper the more
+# Yiya teaches it. Lightweight keyword clustering (stdlib) — taste is a soft
+# preference, not a claim, so this stays heuristic, not a model call per read.
+
+_STOP = {"the", "a", "an", "of", "to", "and", "in", "on", "for", "with", "is",
+         "it", "that", "this", "without", "no", "low", "high", "more", "less"}
+
+
+def _keywords(text):
+    words = re.findall(r"[a-z][a-z-]{2,}", (text or "").lower())
+    return [w for w in words if w not in _STOP]
+
+
+def themes(min_count=2):
+    """Cluster taste signals by recurring keywords in their 'liked'/'pattern'
+    fields. Returns [(theme_word, count, [signal_ids])] for words appearing in
+    >= min_count signals, most common first. This is the emergent taste profile."""
+    items = _load()
+    from collections import defaultdict
+    hits = defaultdict(list)
+    for s in items:
+        seen = set()
+        for w in _keywords(s.get("liked", "")) + _keywords(s.get("pattern", "")):
+            if w not in seen:
+                hits[w].append(s["id"])
+                seen.add(w)
+    clustered = [(w, len(ids), ids) for w, ids in hits.items() if len(ids) >= min_count]
+    clustered.sort(key=lambda x: x[1], reverse=True)
+    return clustered
+
+
 def format_for_prompt(limit=RECENT_FOR_PROMPT):
-    """Compact recent taste signals for folding into project generation. Empty
-    string if none, so the caller can skip the section cleanly."""
-    items = _load()[-limit:]
+    """Compact recent taste signals + emergent themes for folding into project
+    generation. Empty string if none, so the caller can skip the section."""
+    items = _load()
     if not items:
         return ""
-    lines = ["Yiya's recent taste signals (things she liked, from her feed):"]
-    for s in items:
+    lines = ["Yiya's taste (learned from her feed — lean projects toward this):"]
+    th = themes()
+    if th:
+        lines.append("Recurring themes: "
+                     + ", ".join(f"{w} (x{n})" for w, n, _ in th[:5]))
+    lines.append("Recent signals:")
+    for s in items[-limit:]:
         line = f"- {s['pattern']}"
         if s.get("liked"):
             line += f" (why it works: {s['liked']})"
         lines.append(line)
     return "\n".join(lines)
+
+
+def format_profile():
+    """Human-readable taste profile for read_taste (what Yiya + Argo inspect).
+    Shows themes first (the learning), then the signals (the evidence)."""
+    items = _load()
+    if not items:
+        return ("No taste signals yet. Send Argo a screenshot or a url of "
+                "something you like and it'll start learning your taste.")
+    out = [f"Taste profile — {len(items)} signal(s) learned from your feed.\n"]
+    th = themes()
+    if th:
+        out.append("Themes you keep coming back to:")
+        for w, n, ids in th[:8]:
+            out.append(f"  {w} — {n}x ({', '.join(ids)})")
+        out.append("")
+    out.append("Signals:")
+    for s in items:
+        out.append(f"  {s['id']} [{s['source']}, {s['date']}]: {s['pattern']}"
+                   + (f" — likes: {s['liked']}" if s.get("liked") else ""))
+    return "\n".join(out)

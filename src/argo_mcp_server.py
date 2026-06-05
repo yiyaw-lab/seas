@@ -559,6 +559,46 @@ def read_findings(name: str = "") -> str:
     return match.read_text()[:MAX_FETCH_CHARS]
 
 
+# --- Taste: first-class learning of what Yiya likes (parallel to findings) ---
+# Taste is a PREFERENCE (what she likes), not a falsifiable belief, so it lives
+# in its own store (data/taste_signals.json), NOT the world model. But it is
+# first-class learning: readable on demand, theme-clustered, and fed into project
+# generation + (via save_taste_signal) the study_url loop. read_taste lets Yiya
+# AND Argo inspect the accumulated profile; save_taste_signal lets Argo persist a
+# taste lesson from a source she pointed it at.
+
+@mcp.tool()
+@with_deadline(10)
+def read_taste() -> str:
+    """Show Yiya's learned taste profile — the design/product patterns she's
+    liked (from screenshots and urls she's sent), with the recurring THEMES that
+    have emerged. Use when she asks 'what do you know about my taste / what have
+    you learned / show my taste profile', or to ground a project in what she
+    actually likes."""
+    import taste_signals
+    return taste_signals.format_profile()
+
+
+@mcp.tool()
+@with_deadline(10)
+def save_taste_signal(what: str, pattern: str, liked: str, steal: str = "",
+                      source: str = "url") -> str:
+    """Persist a TASTE lesson you extracted from a design/product/app source Yiya
+    pointed you at (e.g. after study_url on a product page she likes). Use this
+    ONLY for taste (what she'd like / how she builds), NOT for factual research
+    (that goes through findings). Fields: what (the thing), pattern (the
+    transferable design/interaction pattern), liked (the underlying quality that
+    makes it good), steal (how it could inform something she builds). This makes
+    the lesson durable + part of her taste profile, not just this chat."""
+    import taste_signals
+    sig = taste_signals.save_signal(what, pattern, liked, steal, source=source)
+    if sig is None:
+        return "Need at least a 'pattern' to save a taste signal."
+    return (f"Saved taste {sig['id']}: {sig['pattern']}"
+            + (f" (the win: {sig['liked']})" if sig['liked'] else "")
+            + ". It's in your taste profile now and will nudge future projects.")
+
+
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
 # L0 (default): report-only. The tools describe the fix and refuse to execute.
 # L1: the tool stages a pending action and tells the user to reply CONFIRM in
