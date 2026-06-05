@@ -288,6 +288,10 @@ def _llm_reply(chat_id, user_text):
             _append_turn(chat_id, "Yiya", user_text)
             _append_turn(chat_id, "Argo", reply)
             return reply
+        except observe.argo_guard.DailyBudget.BudgetExceeded:
+            # Hard daily cap hit: stop immediately, don't try other models.
+            return ("Argo's hit its daily call budget, taking a breather. "
+                    "Back tomorrow (or raise the cap).")
         except Exception as exc:
             last_error = exc
     return f"(Argo hit an error reaching the model: {last_error})"

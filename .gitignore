@@ -14,3 +14,6 @@ data/argo_chat.json
 
 # Private / trade-secret — never commit
 COST_PLAYBOOK.md
+
+# Transient daily-budget counter (argo_guard)
+data/argo_budget.json
