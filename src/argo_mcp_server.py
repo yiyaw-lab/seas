@@ -147,6 +147,41 @@ def web_fetch(url: str) -> str:
     return _to_text(raw) or "(empty page)"
 
 
+@mcp.tool()
+def verify_feed(url: str) -> str:
+    """Check whether a URL is a real, working RSS/Atom feed, BEFORE proposing it
+    as a new source. Unlike web_fetch, this works on ANY https host (so you can
+    vet a new source), but it is deliberately narrow: it only reports whether the
+    URL is a valid feed and how many items it has, never returns arbitrary page
+    content. Use this to vet a candidate feed, then propose_change to add it to
+    data/feeds.json. SSRF-guarded (no internal hosts), short timeout."""
+    if not url.lower().startswith("https://"):
+        return "Not a feed: only https:// URLs can be verified."
+    host = urlparse(url).hostname
+    # NOTE: intentionally NOT allowlist-gated (that's the whole point — vetting a
+    # NEW host). Still SSRF-guarded so it can't probe internal/metadata hosts.
+    if not _resolves_to_public_ip(host):
+        return f"Refused: '{host}' did not resolve to a public address."
+    try:
+        raw = fetch_signals._fetch_url(url, timeout=8)
+    except Exception as exc:
+        return (f"Not usable: fetch failed ({type(exc).__name__}: {exc}). "
+                "Probably blocks bots or is down, not a clean feed to add.")
+    # Parse with the same parser the pipeline uses; report item count + a sample.
+    try:
+        items = fetch_signals._parse_with_feedparser(raw)
+    except ImportError:
+        items = fetch_signals._parse_with_stdlib(raw)
+    items = [i for i in items if i.get("title")]
+    if not items:
+        return ("Fetched, but found no feed items. It may be an HTML page, not an "
+                "RSS/Atom feed, so it's not a clean add.")
+    sample = items[0]["title"][:80]
+    return (f"Valid feed: {len(items)} items. Sample: \"{sample}\". "
+            f"Safe to propose adding to data/feeds.json (its host, '{host}', will "
+            f"be auto-allowed once the feed PR is merged).")
+
+
 def _feed_for_host(host):
     """Return an approved feed URL whose host matches, if any."""
     if not host:
