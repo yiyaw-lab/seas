@@ -247,6 +247,13 @@ def _clean_reply(text):
     # Markdown headers and list bullets at line starts -> plain.
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
     text = re.sub(r"(?m)^\s{0,3}[-*+]\s+", "", text)
+    # Repair a missing space after sentence-ending punctuation: the model
+    # sometimes glues "end.Next" together (more so after markdown stripping).
+    # Only when a .!? is followed directly by an uppercase letter (a sentence
+    # boundary) AND the char before the . isn't a lone capital (skip initialisms
+    # like U.S.A.). Lowercase-after-period is left alone, so URLs/filenames/
+    # decimals (docs.x.ai, argo_chat.json, 3.14) are untouched.
+    text = re.sub(r"(?<![A-Z])([.!?])([A-Z])", r"\1 \2", text)
     # Tidy leftover double spaces.
     return re.sub(r"  +", " ", text)
 
