@@ -107,6 +107,60 @@ def send_message(text):
     print("✅ Message delivered to Telegram.")
 
 
+def send_document(filename, content, caption=""):
+    """Upload `content` (str) as a file named `filename` to the chat, with an
+    optional short caption. Used to deliver a full project proposal as an
+    attachment while a one-line pitch goes as a normal message.
+
+    Returns True on success, False on any failure — unlike send_message it does
+    NOT exit, so a caller can fall back to sending the proposal as text. Pure
+    stdlib multipart/form-data (no requests dependency)."""
+    import uuid
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id or not content:
+        return False
+
+    boundary = uuid.uuid4().hex
+    data = content.encode("utf-8")
+
+    def part(headers, payload):
+        return (f"--{boundary}\r\n{headers}\r\n\r\n".encode("utf-8")
+                + payload + b"\r\n")
+
+    body = part('Content-Disposition: form-data; name="chat_id"',
+                str(chat_id).encode("utf-8"))
+    if caption:
+        body += part('Content-Disposition: form-data; name="caption"',
+                     caption.encode("utf-8"))
+    body += part(
+        f'Content-Disposition: form-data; name="document"; filename="{filename}"'
+        '\r\nContent-Type: text/markdown',
+        data,
+    )
+    body += f"--{boundary}--\r\n".encode("utf-8")
+
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendDocument",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=ctx) as resp:
+            ok = json.loads(resp.read().decode("utf-8")).get("ok", False)
+        return bool(ok)
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+        print(f"sendDocument failed: {type(exc).__name__}: {exc}")
+        return False
+
+
 def main():
     if not MESSAGE_PATH.exists():
         fail(

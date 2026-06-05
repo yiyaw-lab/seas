@@ -532,21 +532,42 @@ def _deliver(body):
         return body + f"\n\n[Note: direct send failed ({type(exc).__name__}).]"
 
 
+def _deliver_proposal(project_id, pitch, doc):
+    """Send the one-line pitch as a chat message and the full proposal as an
+    attached doc, so Yiya gets a clean pitch plus decision-grade detail (ratings,
+    reasoning, real sources) to open. Falls back to sending the doc as text if the
+    file upload fails. Returns the do-not-repeat note for the model."""
+    import send_telegram
+    try:
+        send_telegram.send_message(pitch)
+        sent = send_telegram.send_document(
+            f"{project_id}-proposal.md", doc,
+            caption="Full proposal: ratings, reasoning, sources.")
+        if not sent:
+            send_telegram.send_message(doc)  # fallback: proposal as text
+        return ("[Pitch + full proposal already sent to Yiya. Do NOT repeat or "
+                "summarize them; just acknowledge briefly, e.g. 'sent'.]")
+    except Exception as exc:
+        return (pitch + "\n\n" + doc
+                + f"\n\n[Note: direct send failed ({type(exc).__name__}).]")
+
+
 @mcp.tool()
 @with_deadline(120)  # refreshes signals + a full model call; give it room
 def new_project() -> str:
-    """Generate a FRESH weekly project on demand and send it to Yiya. Use when
-    she asks for a project, a new one, or 'give me another' / 'a different one'
-    because she didn't like the last. Each call logs a new project she can accept
-    by replying SELECT. The project is sent to her directly; you just acknowledge."""
+    """Generate a FRESH weekly project on demand and send it to Yiya as a one-line
+    pitch plus an attached proposal doc (ratings, reasoning, real sources). Use
+    when she asks for a project, a new one, or 'give me another' / 'a different
+    one'. Logs a project she can accept by replying SELECT. Sent directly; you
+    just acknowledge."""
     import argo_project
 
-    made = argo_project.make_project(refresh=True)
+    made = argo_project.make_proposal(refresh=True)
     if made is None:
         return ("Couldn't generate a project right now (no model available). "
                 "Tell Yiya plainly and suggest trying again shortly.")
-    project_id, text, _model = made
-    return _deliver(text + argo_project.project_invite(project_id))
+    project_id, pitch, _text, doc, _model = made
+    return _deliver_proposal(project_id, pitch, doc)
 
 
 @mcp.tool()
@@ -585,14 +606,19 @@ def project_too_complex(what_lost_her: str = "") -> str:
         caption=bet,
     )
 
-    made = argo_project.make_project(refresh=False)  # taste already updated
+    made = argo_project.make_proposal(refresh=False)  # taste already updated
     if made is None:
         return ("Saved that it was too complex, but couldn't generate another "
                 "right now (no model available). Tell Yiya to try again shortly.")
-    project_id, text, _model = made
-    return _deliver("Got it, that one was over the bar. I'll keep projects more "
-                    "approachable from here.\n\n" + text
-                    + argo_project.project_invite(project_id))
+    project_id, pitch, _text, doc, _model = made
+    send_telegram_note = ("Got it, that one was over the bar. I'll keep projects "
+                          "more approachable from here.")
+    import send_telegram
+    try:
+        send_telegram.send_message(send_telegram_note)
+    except Exception:
+        pass
+    return _deliver_proposal(project_id, pitch, doc)
 
 
 @mcp.tool()
@@ -606,13 +632,18 @@ def add_project(idea: str) -> str:
         return "Tell me the idea and I'll shape it into a bet you can weigh."
     import argo_project
 
-    made = argo_project.shape_idea_into_project(idea)
+    made = argo_project.make_proposal(refresh=True, seed=idea, source="yiya")
     if made is None:
         return ("Couldn't shape that right now (no model available). Tell Yiya "
                 "to try again shortly.")
-    project_id, text, _model = made
-    return _deliver("Added your idea as a candidate.\n\n" + text
-                    + argo_project.project_invite(project_id))
+    project_id, pitch, _text, doc, _model = made
+    import send_telegram
+    try:
+        send_telegram.send_message("Shaped your idea into a proposal, with my "
+                                   "honest take on it.")
+    except Exception:
+        pass
+    return _deliver_proposal(project_id, pitch, doc)
 
 
 @mcp.tool()
