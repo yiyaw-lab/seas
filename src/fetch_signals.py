@@ -36,23 +36,37 @@ PER_FEED = 8
 # Curated frontier feeds — the control surface for what Argo "watches".
 # Balanced across three lenses so insights don't collapse to one theme:
 #   research (arXiv), what builders ship/star (GitHub), and company releases.
-# Each: (label/category, url).
-# Note: Anthropic publishes no working public RSS as of 2026-06; add here if it
-# ever does, e.g. ("Anthropic News", "https://www.anthropic.com/news/rss.xml").
-FEEDS = [
-    # Research
+# Feeds live in data/feeds.json (DATA, so Argo can propose new ones via a small
+# Contents-only PR instead of rewriting this file). The hardcoded list below is a
+# fallback if the JSON is missing/unreadable, so signal fetching never breaks.
+# Each FEEDS entry stays (label, url) for all existing consumers.
+_FEEDS_FALLBACK = [
     ("arXiv cs.AI", "https://export.arxiv.org/rss/cs.AI"),
     ("arXiv cs.LG", "https://export.arxiv.org/rss/cs.LG"),
     ("arXiv cs.CL", "https://export.arxiv.org/rss/cs.CL"),
-    # GitHub trending (no official RSS; mshibanami is the standard mirror)
     ("GitHub Trending", "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml"),
     ("GitHub Trending (Python)", "https://mshibanami.github.io/GitHubTrendingRSS/daily/python.xml"),
-    # Company changelogs / releases
     ("OpenAI News", "https://openai.com/news/rss.xml"),
     ("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
     ("GitHub Changelog", "https://github.blog/changelog/feed/"),
     ("Google AI Blog", "https://blog.google/technology/ai/rss/"),
 ]
+
+
+def _load_feeds():
+    path = ROOT / "data" / "feeds.json"
+    try:
+        data = json.loads(path.read_text())
+        feeds = [(f["label"], f["url"]) for f in data["feeds"]
+                 if f.get("label") and f.get("url")]
+        if feeds:
+            return feeds
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        pass
+    return _FEEDS_FALLBACK
+
+
+FEEDS = _load_feeds()
 
 USER_AGENT = "argo-fetch-signals/1.0 (+https://github.com/yiyaw-lab/seas)"
 
