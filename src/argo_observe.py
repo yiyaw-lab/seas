@@ -116,9 +116,12 @@ Output format: a numbered list, 1 to {NUM_OBSERVATIONS}, nothing else.
 """
 
 
-def load_signals():
+def load_signals(limit=NUM_SIGNALS):
+    """Load the top `limit` signals. Defaults to NUM_SIGNALS (3) for the
+    observation path, which wants a tight slice; the project generator passes a
+    larger limit so it has real material to synthesize a bet from."""
     signals = json.loads(SIGNALS_PATH.read_text())
-    return signals[:NUM_SIGNALS]
+    return signals[:limit]
 
 
 def format_signals(signals):
