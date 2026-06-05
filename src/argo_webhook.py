@@ -438,11 +438,20 @@ def _download_telegram_photo(msg):
     import ssl
     import urllib.request
 
+    # Telegram delivers an image two ways:
+    #   - "photo" (compressed, via the image picker): msg['photo'] = [sizes...]
+    #   - "document" (sent as a FILE, common on desktop / to keep quality):
+    #     msg['document'] = {file_id, mime_type: 'image/...'}
+    # We must handle BOTH, or a screenshot sent as a file is silently dropped.
+    file_id = None
+    media = None
     photos = msg.get("photo") or []
-    if not photos:
-        return None, None
-    # `photo` is an array of sizes; the last is the largest.
-    file_id = photos[-1].get("file_id")
+    doc = msg.get("document") or {}
+    if photos:
+        file_id = photos[-1].get("file_id")  # array of sizes; last is largest
+    elif doc and str(doc.get("mime_type", "")).startswith("image/"):
+        file_id = doc.get("file_id")
+        media = doc.get("mime_type")
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not file_id or not token:
         return None, None
@@ -460,7 +469,9 @@ def _download_telegram_photo(msg):
         dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
         with urllib.request.urlopen(dl, timeout=20, context=ctx) as r:
             data = r.read()
-        media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        # Prefer the document's declared mime_type; else infer from the path.
+        if not media:
+            media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
         return data, media
     except Exception as exc:
         print(f"photo download failed: {exc}")
@@ -508,9 +519,14 @@ def handle_update(update):
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "")
 
-    # A photo (screenshot) has no `text` — handle it before the text guard below,
-    # which would otherwise silently drop it (the bug: Argo ignored screenshots).
-    if chat_id is not None and msg.get("photo"):
+    # A photo/image (screenshot) has no `text` — handle it before the text guard
+    # below, which would otherwise silently drop it (the bug: Argo ignored
+    # screenshots). Cover BOTH delivery forms: a compressed 'photo' and an image
+    # sent as a 'document'/file (common on desktop), or a screenshot sent the
+    # latter way never reaches vision.
+    doc = msg.get("document") or {}
+    is_image = bool(msg.get("photo")) or str(doc.get("mime_type", "")).startswith("image/")
+    if chat_id is not None and is_image:
         _handle_photo(chat_id, msg)
         return
 
