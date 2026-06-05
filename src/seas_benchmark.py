@@ -73,6 +73,13 @@ def _signals(n):
     return [s for s in sigs if s.get("link")][:n]
 
 
+# A clean synthesis call is ~10-20s. A call far above that means argo_guard.retry
+# backed off through a rate limit (we can't see the retry count from here since
+# the guard swallows it, so latency is the honest proxy). This makes the
+# operational-reliability question a NUMBER, not an anecdote.
+THROTTLE_LATENCY_S = 60
+
+
 def _judge_with_model(job, model):
     """One model call. Returns (judgment, latency_s, out_len, cost_usd)."""
     full_input = f"{sf.SYSTEM}\n\n{job}"
@@ -168,7 +175,8 @@ def run(models, n):
     print(f"\n📊 SEAS model benchmark — {len(models)} models × {len(signals)} "
           f"signals (inputs held constant)\n")
 
-    per_model = {m: {"rows": [], "latency": [], "out_len": [], "cost": []}
+    per_model = {m: {"rows": [], "latency": [], "out_len": [], "cost": [],
+                     "throttled": 0, "errors": 0}
                  for m in models}
 
     for i, sig in enumerate(signals, 1):
@@ -193,14 +201,19 @@ def run(models, n):
             per_model[m]["out_len"].append(olen)
             if cost is not None:
                 per_model[m]["cost"].append(cost)
+            if lat >= THROTTLE_LATENCY_S:
+                per_model[m]["throttled"] += 1
+            if isinstance(judgment, dict) and "_error" in judgment:
+                per_model[m]["errors"] += 1
+            flag = " ⚠throttled" if lat >= THROTTLE_LATENCY_S else ""
             costs = f", ${cost*100:.2f}/100" if cost is not None else ""
-            print(f"    {m:22s} -> {row.get('outcome'):12s} ({lat:.1f}s{costs})")
+            print(f"    {m:22s} -> {row.get('outcome'):12s} ({lat:.1f}s{costs}{flag})")
 
     # Summary table.
-    print("\n" + "=" * 86)
+    print("\n" + "=" * 94)
     print(f"{'model':22s} {'find':>4s} {'over':>4s} {'probe':>5s} "
-          f"{'pass%':>5s} {'qv%':>4s} {'s':>5s} {'$/call':>8s} {'$/finding':>10s}")
-    print("-" * 86)
+          f"{'pass%':>5s} {'qv%':>4s} {'s':>5s} {'thr':>4s} {'$/call':>8s} {'$/finding':>10s}")
+    print("-" * 94)
     summary = {}
     for m in models:
         agg = _aggregate(per_model[m]["rows"])
@@ -209,6 +222,8 @@ def run(models, n):
         agg["avg_latency_s"] = (sum(lat) / len(lat)) if lat else None
         agg["avg_cost_usd"] = (sum(cost) / len(cost)) if cost else None
         agg["total_cost_usd"] = sum(cost) if cost else None
+        agg["throttled_calls"] = per_model[m]["throttled"]
+        agg["error_calls"] = per_model[m]["errors"]
         # The bottom line: cost per CLEAN finding (a probe yields no finding, so a
         # model that probes everything has infinite $/finding — that's honest).
         agg["cost_per_finding"] = (
@@ -221,11 +236,12 @@ def run(models, n):
         cpf = (f"${agg['cost_per_finding']*1000:.2f}/k" if agg["cost_per_finding"] is not None
                else ("none" if agg["findings"] == 0 else "-"))
         print(f"{m:22s} {agg['findings']:>4d} {agg['overclaims']:>4d} "
-              f"{agg['probes']:>5d} {pr:>5s} {qv:>4s} {sl:>5s} {cc:>8s} {cpf:>10s}")
-    print("=" * 86)
+              f"{agg['probes']:>5d} {pr:>5s} {qv:>4s} {sl:>5s} "
+              f"{agg['throttled_calls']:>4d} {cc:>8s} {cpf:>10s}")
+    print("=" * 94)
     print("find=clean findings  over=claimed-but-failed-gate  pass%=findings/claims")
-    print("qv%=quotes verifiable  s=latency  $/call & $/finding shown PER 1000 runs")
-    print("(none under $/finding = produced 0 findings, so cost-per-finding undefined)\n")
+    print("qv%=quotes verifiable  s=latency  thr=throttled calls (>60s, rate-limit proxy)")
+    print("$/call & $/finding PER 1000 runs  (none=0 findings, cost-per-finding undefined)\n")
 
     RESULTS_PATH.write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Wrote {RESULTS_PATH.relative_to(ROOT)}")
