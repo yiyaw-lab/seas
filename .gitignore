@@ -11,3 +11,6 @@ argo/telegram_offset.json
 
 # Local chat memory log (durable copy lives on the Railway volume)
 data/argo_chat.json
+
+# Private / trade-secret — never commit
+COST_PLAYBOOK.md
