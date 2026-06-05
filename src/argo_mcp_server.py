@@ -527,6 +527,52 @@ def new_project() -> str:
 
 
 @mcp.tool()
+@with_deadline(120)  # saves a taste signal + a full model call to regenerate
+def project_too_complex(what_lost_her: str = "") -> str:
+    """Yiya says the latest project is over her head / too complex / she can't
+    follow it. Do TWO things: (1) save a durable taste signal so future projects
+    lean more approachable, and (2) generate another, simpler project. Pass a
+    short note of WHAT made it too complex if she said (e.g. 'assumed kernel/CUDA
+    knowledge'); leave blank if she just said it's too much. Use this instead of
+    plain new_project whenever the reason is difficulty, so Argo actually learns
+    to dial it down."""
+    import json as _json
+    import argo_project
+    import taste_signals
+
+    # Anchor the lesson to the actual project so it's concrete, not generic.
+    bet = ""
+    if PROJECTS_LOG.exists():
+        try:
+            log = _json.loads(PROJECTS_LOG.read_text())
+            if log:
+                bet = log[-1].get("text", "")[:200]
+        except (ValueError, _json.JSONDecodeError):
+            pass
+
+    detail = f" ({what_lost_her.strip()})" if what_lost_her.strip() else ""
+    taste_signals.save_signal(
+        what=f"A weekly project was too complex for Yiya to follow{detail}.",
+        pattern=("prefer approachable projects Yiya can understand and start "
+                 "without deep infra/ML/systems expertise; favor a clear, "
+                 "explainable core over heavy machinery"),
+        liked="projects she can actually grasp and begin this weekend",
+        steal="keep the bet small and legible; assume no specialist background",
+        source="telegram-feedback",
+        caption=bet,
+    )
+
+    made = argo_project.make_project(refresh=False)  # taste already updated
+    if made is None:
+        return ("Saved that it was too complex, but couldn't generate another "
+                "right now (no model available). Tell Yiya to try again shortly.")
+    project_id, text, _model = made
+    return ("Got it, that one was over the bar. I'll keep projects more "
+            "approachable from here.\n\n" + text
+            + argo_project.project_invite(project_id))
+
+
+@mcp.tool()
 @with_deadline(120)  # a full model call to draft the kickoff plan
 def scaffold_project() -> str:
     """Produce a concrete kickoff plan for the LATEST project so Yiya can start
