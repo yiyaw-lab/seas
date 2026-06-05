@@ -39,6 +39,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -360,7 +361,9 @@ def _parse_rating(text):
 # periodic heartbeat while the model works, so there's always a sign of life.
 # We can't show WHICH tool (that loop is remote), only that Argo is still on it.
 
-HEARTBEAT_EVERY = 15  # seconds between "still working" nudges
+HEARTBEAT_EVERY = 90   # seconds between nudges (the ack already landed instantly)
+VAGUE_BEATS_MAX = 2    # at most this many soft "hang tight" lines before switching
+                       # to honest elapsed-time state reporting
 
 # Messages that tend to trigger tool use (web/repo/PR) and thus run long. We ack
 # these specifically; a plain "hey" gets the normal fast reply with no ack noise.
@@ -391,21 +394,34 @@ def _ack_text(text):
 
 
 class _Heartbeat:
-    """Sends a periodic 'still working' message until stopped. Daemon timer, so
-    it can never keep the process alive or outlive the turn."""
+    """Sends a periodic progress nudge until stopped. Daemon timer, so it can
+    never keep the process alive or outlive the turn.
+
+    The first VAGUE_BEATS_MAX nudges are soft reassurance ("still on it"). After
+    that it switches to HONEST elapsed-time state — the only true thing this
+    process knows, since the tool loop runs remotely and we can't see which tool
+    is active. No more "almost there": we don't actually know it's almost there."""
 
     def __init__(self, every=HEARTBEAT_EVERY):
         self._every = every
         self._stop = threading.Event()
         self._thread = None
         self._beats = 0
+        self._started = time.monotonic()
+
+    def _message(self):
+        """The nudge for the current beat: soft reassurance for the first couple,
+        then honest 'still going, ~N min in' state."""
+        if self._beats < VAGUE_BEATS_MAX:
+            return ["still on it...",
+                    "still working, this one's taking a moment."][self._beats]
+        mins = max(1, round((time.monotonic() - self._started) / 60))
+        return (f"still working on this, about {mins} min in. it's a slow one, "
+                "I'll send the moment it's done.")
 
     def _run(self):
-        # Escalating, honest nudges — not the same line every time.
-        lines = ["still working...", "still on it, this one's taking a moment.",
-                 "hang tight, almost there."]
         while not self._stop.wait(self._every):
-            msg = lines[min(self._beats, len(lines) - 1)]
+            msg = self._message()
             self._beats += 1
             try:
                 send_telegram.send_message(msg)
@@ -587,6 +603,32 @@ def _safe_handle(update):
         print(f"handle_update error: {exc}")
 
 
+# Telegram RETRIES a webhook delivery (same update_id) if it doesn't get a fast
+# 200 — a slow turn or a cold start can make it resend, and without this each
+# resend spawned another turn + heartbeat (the "hang tight x20" pile-up). Track
+# recently-handled update_ids and drop duplicates. Bounded + locked (the route
+# can run concurrently). Survives only in-process, which is all we need: retries
+# arrive within seconds, far inside this window.
+_SEEN_UPDATES = {}            # update_id -> insertion order (dict keeps order)
+_SEEN_UPDATES_CAP = 1000
+_SEEN_LOCK = threading.Lock()
+
+
+def _already_handled(update_id):
+    """True if this update_id was seen before; otherwise record it and return
+    False. None ids (shouldn't happen) are never deduped."""
+    if update_id is None:
+        return False
+    with _SEEN_LOCK:
+        if update_id in _SEEN_UPDATES:
+            return True
+        _SEEN_UPDATES[update_id] = None
+        if len(_SEEN_UPDATES) > _SEEN_UPDATES_CAP:
+            # drop the oldest (insertion-ordered dict)
+            del _SEEN_UPDATES[next(iter(_SEEN_UPDATES))]
+        return False
+
+
 def create_app():
     from flask import Flask, request
 
@@ -603,6 +645,10 @@ def create_app():
             if sent != WEBHOOK_SECRET:
                 return "forbidden", 403
         update = request.get_json(force=True, silent=True) or {}
+        # Drop Telegram's retries of an update we're already handling, so one
+        # message can't spawn multiple turns (and multiple heartbeats).
+        if _already_handled(update.get("update_id")):
+            return "ok", 200
         # Process in a background thread and return 200 immediately. Critical:
         # a chat turn's tool call loops back into THIS server's /mcp endpoint, so
         # if we block the request worker on the model call, the server can't
