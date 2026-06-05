@@ -1,0 +1,15 @@
+{
+  "_comment": "Argo's frontier signal sources as DATA (not code). fetch_signals.py loads this. Add a feed by appending {label, url} -- Argo can propose this via a Contents-only PR (a tiny safe data diff, no Python rewrite). Balanced across research / builder activity / company releases.",
+  "feeds": [
+    { "label": "arXiv cs.AI", "url": "https://export.arxiv.org/rss/cs.AI" },
+    { "label": "arXiv cs.LG", "url": "https://export.arxiv.org/rss/cs.LG" },
+    { "label": "arXiv cs.CL", "url": "https://export.arxiv.org/rss/cs.CL" },
+    { "label": "GitHub Trending", "url": "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml" },
+    { "label": "GitHub Trending (Python)", "url": "https://mshibanami.github.io/GitHubTrendingRSS/daily/python.xml" },
+    { "label": "Hacker News (Show HN)", "url": "https://hnrss.org/show" },
+    { "label": "OpenAI News", "url": "https://openai.com/news/rss.xml" },
+    { "label": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml" },
+    { "label": "GitHub Changelog", "url": "https://github.blog/changelog/feed/" },
+    { "label": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/" }
+  ]
+}
