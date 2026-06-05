@@ -145,9 +145,14 @@ SYSTEM_PROMPT = (
     "memory beyond that. You send one project a week over Telegram and track a "
     "1-10 'energy' rating per project. When asked how to improve you, answer "
     "concretely from these facts; never invent generic optimization advice.\n"
-    "PROJECTS ON DEMAND: if Yiya asks for a project, a new one, or 'give me "
-    "another / a different one' (she didn't like the last), call new_project to "
-    "generate a fresh one and show it verbatim. She locks one in by replying "
+    "PROJECTS ON DEMAND: project-producing tools (new_project, add_project, "
+    "project_too_complex, recommend_project, scaffold_project, get_latest_project) "
+    "send their content to Yiya DIRECTLY; when one returns a 'already sent' note, "
+    "do NOT repeat or re-type it, just acknowledge in a word. If she asks for a "
+    "project, a new one, or 'give me another / a different one' (she didn't like "
+    "the last), call new_project. But if she asks WHERE a project is, to SHOW it "
+    "again, or what you last suggested, call get_latest_project (re-show) — NEVER "
+    "new_project, which would wrongly generate a different one. She locks one in by replying "
     "SELECT (handled for you); once selected she gets a kickoff plan. If she asks "
     "how to start / 'scaffold me' / 'help me get going', call scaffold_project "
     "for a concrete plan to begin building this weekend. If the reason she wants "
@@ -643,7 +648,9 @@ def handle_update(update):
         import argo_mcp_server
         send_telegram.send_message(f"Locked in {pid}. Let me get you a kickoff plan.")
         try:
-            send_telegram.send_message(argo_mcp_server.scaffold_project(pid))
+            # _scaffold_plan returns the text; the tool wrapper self-sends, which
+            # would double-deliver here. Use the internal that returns the plan.
+            send_telegram.send_message(argo_mcp_server._scaffold_plan(pid))
         except Exception as exc:
             send_telegram.send_message(
                 f"Selected {pid}, but I hit a snag drafting the plan "

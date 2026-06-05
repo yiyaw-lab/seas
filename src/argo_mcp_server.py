@@ -486,10 +486,12 @@ def get_webhook_health() -> str:
 @mcp.tool()
 @with_deadline(10)  # pure local read
 def get_latest_project() -> str:
-    """Report Argo's most recent weekly project and its energy rating (or that
-    it's unrated). Use when asked 'what did you suggest last / what's my latest
-    project / did I rate it'."""
+    """Re-send Yiya her most recent project, in full. Use when she asks 'where is
+    it / show me the project again / what did you suggest last / did I rate it'.
+    Does NOT generate a new one (that's new_project) — it re-shows the existing
+    latest. The project is sent to her directly; you just acknowledge."""
     import json as _json
+    import argo_project
 
     if not PROJECTS_LOG.exists():
         return "No projects logged yet."
@@ -501,18 +503,42 @@ def get_latest_project() -> str:
         return "No projects logged yet."
     p = log[-1]
     energy = p.get("energy")
-    rating = f"energy {energy}/10" if energy is not None else "not yet rated"
-    return f"{p.get('id')} ({p.get('date')}, {rating}):\n{p.get('text','')[:800]}"
+    status = (f"You rated this energy {energy}/10."
+              if energy is not None else "")
+    body = p.get("text", "").strip()
+    if status:
+        body += "\n\n" + status
+    else:
+        body += argo_project.project_invite(p.get("id"))
+    return _deliver(body)
+
+
+def _deliver(body):
+    """Send user-facing content (a project, a plan) straight to Telegram and
+    return a terse do-not-repeat note for the model.
+
+    The chat model relays a tool's STRING result by composing its own message,
+    so it summarizes long content like a full project (the bug: Yiya got only the
+    invite line, not the bet). Sending directly from the tool guarantees she gets
+    it verbatim; the model just acknowledges instead of re-typing it."""
+    import send_telegram
+    try:
+        send_telegram.send_message(body)
+        return ("[Already sent to Yiya verbatim. Do NOT repeat or summarize it; "
+                "just acknowledge briefly, e.g. 'sent'.]")
+    except Exception as exc:
+        # Delivery failed: fall back to returning the body so the model can relay
+        # it, rather than silently dropping the project.
+        return body + f"\n\n[Note: direct send failed ({type(exc).__name__}).]"
 
 
 @mcp.tool()
 @with_deadline(120)  # refreshes signals + a full model call; give it room
 def new_project() -> str:
-    """Generate a FRESH weekly project on demand and return it, ready to show
-    Yiya. Use when she asks for a project, a new one, or 'give me another' /
-    'a different one' because she didn't like the last. Each call logs a new
-    project she can then accept by replying SELECT. Do NOT paraphrase the result;
-    show it as returned."""
+    """Generate a FRESH weekly project on demand and send it to Yiya. Use when
+    she asks for a project, a new one, or 'give me another' / 'a different one'
+    because she didn't like the last. Each call logs a new project she can accept
+    by replying SELECT. The project is sent to her directly; you just acknowledge."""
     import argo_project
 
     made = argo_project.make_project(refresh=True)
@@ -520,10 +546,7 @@ def new_project() -> str:
         return ("Couldn't generate a project right now (no model available). "
                 "Tell Yiya plainly and suggest trying again shortly.")
     project_id, text, _model = made
-    # The model output already carries Argo's voice/shape; return it verbatim
-    # plus the shared invite (rate / select / another) so the energy loop and the
-    # selection flow both stay live no matter which path sent the project.
-    return text + argo_project.project_invite(project_id)
+    return _deliver(text + argo_project.project_invite(project_id))
 
 
 @mcp.tool()
@@ -567,9 +590,9 @@ def project_too_complex(what_lost_her: str = "") -> str:
         return ("Saved that it was too complex, but couldn't generate another "
                 "right now (no model available). Tell Yiya to try again shortly.")
     project_id, text, _model = made
-    return ("Got it, that one was over the bar. I'll keep projects more "
-            "approachable from here.\n\n" + text
-            + argo_project.project_invite(project_id))
+    return _deliver("Got it, that one was over the bar. I'll keep projects more "
+                    "approachable from here.\n\n" + text
+                    + argo_project.project_invite(project_id))
 
 
 @mcp.tool()
@@ -588,8 +611,8 @@ def add_project(idea: str) -> str:
         return ("Couldn't shape that right now (no model available). Tell Yiya "
                 "to try again shortly.")
     project_id, text, _model = made
-    return ("Added your idea as a candidate.\n\n" + text
-            + argo_project.project_invite(project_id))
+    return _deliver("Added your idea as a candidate.\n\n" + text
+                    + argo_project.project_invite(project_id))
 
 
 @mcp.tool()
@@ -654,18 +677,13 @@ def recommend_project() -> str:
         )
     else:
         rec = _observe.generate_observations(prompt, model, temperature=0.2)
-    return rec.strip() + "\n\nReply SELECT to lock in my pick, or name another to go with."
+    return _deliver(rec.strip()
+                    + "\n\nReply SELECT to lock in my pick, or name another to go with.")
 
 
-@mcp.tool()
-@with_deadline(120)  # a full model call to draft the kickoff plan
-def scaffold_project(project_id: str = "") -> str:
-    """Produce a concrete kickoff plan so Yiya can start building this weekend:
-    the repo skeleton to create, the first 2-3 files or commands, and the very
-    first thing to build. Defaults to the LATEST project; pass a project_id (e.g.
-    'P-002') to scaffold a specific selected one. Use after she SELECTs a project
-    or asks 'how do I start / scaffold me / help me get going'. Returns a plan to
-    show her; writes no files."""
+def _scaffold_plan(project_id=""):
+    """Draft a kickoff plan for a project and return the text. Shared by the
+    SELECT gate (which sends it verbatim itself) and the scaffold_project tool."""
     import json as _json
     import argo_observe as _observe
 
@@ -710,6 +728,18 @@ def scaffold_project(project_id: str = "") -> str:
             [{"role": "user", "content": prompt}], model, temperature=0.3,
         )
     return _observe.generate_observations(prompt, model, temperature=0.3)
+
+
+@mcp.tool()
+@with_deadline(120)  # a full model call to draft the kickoff plan
+def scaffold_project(project_id: str = "") -> str:
+    """Produce a concrete kickoff plan so Yiya can start building this weekend:
+    the repo skeleton to create, the first 2-3 files or commands, and the very
+    first thing to build. Defaults to the LATEST project; pass a project_id (e.g.
+    'P-002') to scaffold a specific selected one. Use after she SELECTs a project
+    or asks 'how do I start / scaffold me / help me get going'. The plan is sent
+    to her directly; you just acknowledge. Writes no files."""
+    return _deliver(_scaffold_plan(project_id))
 
 
 @mcp.tool()
