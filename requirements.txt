@@ -1,6 +1,6 @@
 # Argo V2 observation generation (src/argo_observe.py)
 python-dotenv   # load OPENAI_API_KEY / ANTHROPIC_API_KEY / ARGO_MODEL from .env
-openai          # gpt-* / o* models
+openai>=1.55     # gpt-* / o* models (>=1.55: fixes httpx>=0.28 'proxies' TypeError)
 anthropic>=0.105  # claude-* models + beta.messages MCP connector (argo_observe.chat_with_mcp)
 
 # Telegram delivery (src/send_telegram.py)
