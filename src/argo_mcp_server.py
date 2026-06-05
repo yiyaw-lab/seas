@@ -131,7 +131,9 @@ def web_fetch(url: str) -> str:
     if not _resolves_to_public_ip(host):
         return f"Refused: '{host}' did not resolve to a public address."
     try:
-        raw = fetch_signals._fetch_url(url, timeout=20)
+        # 8s (not 20s): a slow/blocking URL should fail fast so the chat turn
+        # stays responsive, rather than hanging the reply on one bad fetch.
+        raw = fetch_signals._fetch_url(url, timeout=8)
     except Exception as exc:
         msg = f"Fetch failed: {type(exc).__name__}: {exc}"
         # Many sites (e.g. openai.com) 403 automated HTML requests but serve
