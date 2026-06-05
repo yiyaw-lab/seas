@@ -521,8 +521,9 @@ def new_project() -> str:
                 "Tell Yiya plainly and suggest trying again shortly.")
     project_id, text, _model = made
     # The model output already carries Argo's voice/shape; return it verbatim
-    # plus the accept hint so she knows how to lock it in.
-    return f"{text}\n\n(That's {project_id}. Reply SELECT to lock it in, or ask for another.)"
+    # plus the shared invite (rate / select / another) so the energy loop and the
+    # selection flow both stay live no matter which path sent the project.
+    return text + argo_project.project_invite(project_id)
 
 
 @mcp.tool()

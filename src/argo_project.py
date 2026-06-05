@@ -40,6 +40,15 @@ OUT_DIR = ROOT / "argo" / "projects"
 PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
+# One canonical invite appended to every project Argo sends, so all paths (the
+# weekly batch and the on-demand chat tool) offer the same three replies: rate
+# it (keeps the 1-10 energy loop alive), lock it in, or ask for another. Plain
+# text, no em dash (Argo voice).
+def project_invite(project_id):
+    return (f"\n\nThat's {project_id}. Reply 1-10 to rate how much you want to "
+            "build it, SELECT to lock it in and get a kickoff plan, or ask for "
+            "another.")
+
 
 def log_project(project_text, model):
     """Append a project entry and return its id. Rating attaches to this later."""
@@ -274,9 +283,8 @@ def main():
         print("(--no-send: not sending to Telegram)\n")
         return
 
-    # Invite a rating reply; argo_rate.py reads it back from Telegram.
-    message = project_text + "\n\n— Reply 1-10: how much do you want to build this?"
-    send_telegram.send_message(message)
+    # Invite a rating reply (argo_rate.py reads it back), plus select/another.
+    send_telegram.send_message(project_text + project_invite(project_id))
     print()
 
 
