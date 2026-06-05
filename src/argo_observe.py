@@ -41,10 +41,21 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import argo_guard
+
 ROOT = Path(__file__).resolve().parent.parent
 SIGNALS_PATH = ROOT / "data" / "signals.json"
 FINDING_PATH = ROOT / "findings" / "F-001-cognitive-operators.md"
 OUT_DIR = ROOT / "argo" / "observations"
+
+# Resilience guardrails (Phase E1): a circuit breaker per provider + a global
+# daily call budget. Wrap every model call so transient failures retry, a dead
+# provider fails fast, and a runaway loop can't blow past the daily cap.
+_BREAKERS = {
+    "openai": argo_guard.CircuitBreaker("openai"),
+    "anthropic": argo_guard.CircuitBreaker("anthropic"),
+}
+_BUDGET = argo_guard.DailyBudget()
 
 # Load .env (OPENAI_API_KEY / ANTHROPIC_API_KEY / ARGO_MODEL) if python-dotenv
 # is installed. Optional: if the package is missing we fall back to the real
@@ -197,6 +208,17 @@ SYSTEM_PROMPT = (
 )
 
 
+def _guarded(provider, do_call, label):
+    """Run a model call behind the daily budget, the provider circuit breaker,
+    and transient-retry. Order matters: budget first (cheapest guard, hard cap),
+    then breaker (fail fast if provider is down), then retry inside the breaker."""
+    _BUDGET.check_and_increment()  # raises BudgetExceeded at the daily cap
+    breaker = _BREAKERS.get(provider)
+    run = (lambda: argo_guard.retry(do_call, label=label)) if breaker is None \
+        else (lambda: breaker.call(lambda: argo_guard.retry(do_call, label=label)))
+    return run()
+
+
 def _call_openai(job, model):
     from openai import OpenAI  # lazy: no-key path needs no SDK
 
@@ -204,14 +226,18 @@ def _call_openai(job, model):
     # makes an illegal Authorization header value and surfaces as a confusing
     # "Connection error".
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"].strip())
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": job},
-        ],
-        temperature=1.0,  # observations want breadth, not determinism
-    )
+
+    def do_call():
+        return client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": job},
+            ],
+            temperature=1.0,  # observations want breadth, not determinism
+        )
+
+    response = _guarded("openai", do_call, f"openai/{model}")
     return response.choices[0].message.content
 
 
@@ -221,13 +247,17 @@ def _call_anthropic(job, model):
     # Strip the key (see _call_openai) to avoid illegal-header errors from a
     # trailing newline/space in the env value.
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": job}],
-        temperature=1.0,
-    )
+
+    def do_call():
+        return client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": job}],
+            temperature=1.0,
+        )
+
+    response = _guarded("anthropic", do_call, f"anthropic/{model}")
     return "".join(
         block.text for block in response.content if block.type == "text"
     )
@@ -269,10 +299,13 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024):
             for s in mcp_servers
         ]
         kwargs["betas"] = [MCP_BETA]
-        response = client.beta.messages.create(**kwargs)
+        do_call = lambda: client.beta.messages.create(**kwargs)
     else:
         # No tools (Phase A path): a plain messages call, no beta needed.
-        response = client.messages.create(**kwargs)
+        do_call = lambda: client.messages.create(**kwargs)
+
+    # Same guardrails as the other model calls: daily budget + breaker + retry.
+    response = _guarded("anthropic", do_call, f"chat/{model}")
 
     # Log only MCP tool *failures* (silent on success), so a broken connector or
     # erroring tool is visible in the logs without spamming every tool turn.
