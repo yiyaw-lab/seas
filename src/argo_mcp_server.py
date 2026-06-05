@@ -506,6 +506,74 @@ def get_latest_project() -> str:
 
 
 @mcp.tool()
+@with_deadline(120)  # refreshes signals + a full model call; give it room
+def new_project() -> str:
+    """Generate a FRESH weekly project on demand and return it, ready to show
+    Yiya. Use when she asks for a project, a new one, or 'give me another' /
+    'a different one' because she didn't like the last. Each call logs a new
+    project she can then accept by replying SELECT. Do NOT paraphrase the result;
+    show it as returned."""
+    import argo_project
+
+    made = argo_project.make_project(refresh=True)
+    if made is None:
+        return ("Couldn't generate a project right now (no model available). "
+                "Tell Yiya plainly and suggest trying again shortly.")
+    project_id, text, _model = made
+    # The model output already carries Argo's voice/shape; return it verbatim
+    # plus the accept hint so she knows how to lock it in.
+    return f"{text}\n\n(That's {project_id}. Reply SELECT to lock it in, or ask for another.)"
+
+
+@mcp.tool()
+@with_deadline(120)  # a full model call to draft the kickoff plan
+def scaffold_project() -> str:
+    """Produce a concrete kickoff plan for the LATEST project so Yiya can start
+    building this weekend: the repo skeleton to create, the first 2-3 files or
+    commands, and the very first thing to build. Use after she SELECTs a project
+    or asks 'how do I start / scaffold me / help me get going'. Returns a plan to
+    show her; writes no files."""
+    import json as _json
+    import argo_observe as _observe
+
+    if not PROJECTS_LOG.exists():
+        return "No project to scaffold yet — generate one first."
+    try:
+        log = _json.loads(PROJECTS_LOG.read_text())
+    except (ValueError, _json.JSONDecodeError):
+        return "Project log is unreadable."
+    if not log:
+        return "No project to scaffold yet — generate one first."
+    project = log[-1].get("text", "")
+
+    prompt = (
+        "You are Argo, helping Yiya actually START the project below this "
+        "weekend. Give her a concrete kickoff plan, plain text, no markdown, no "
+        "em dashes, Telegram-friendly. Cover, briefly:\n"
+        "1. the repo skeleton to create (folders/files, one line each)\n"
+        "2. the first 2-3 commands or files to write to get a skeleton running\n"
+        "3. the single first thing to build that proves the core idea\n"
+        "Keep it tight and doable in a weekend. No pep talk, no upside restating.\n\n"
+        f"PROJECT:\n{project}"
+    )
+
+    model = next(
+        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+         + _observe.resolve_models()
+         if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
+        None,
+    )
+    if model is None:
+        return "No model available to draft the plan — tell Yiya to try again shortly."
+    if _observe.provider_for(model)["name"] == "anthropic":
+        return _observe.chat_with_mcp(
+            "You are Argo, a terse frontier scout helping a builder start.",
+            [{"role": "user", "content": prompt}], model, temperature=0.3,
+        )
+    return _observe.generate_observations(prompt, model, temperature=0.3)
+
+
+@mcp.tool()
 @with_deadline(10)  # pure local read
 def get_signal_freshness() -> str:
     """Report how fresh Argo's signal pool is: when signals.json was last

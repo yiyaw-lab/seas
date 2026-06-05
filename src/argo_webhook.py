@@ -145,6 +145,12 @@ SYSTEM_PROMPT = (
     "memory beyond that. You send one project a week over Telegram and track a "
     "1-10 'energy' rating per project. When asked how to improve you, answer "
     "concretely from these facts; never invent generic optimization advice.\n"
+    "PROJECTS ON DEMAND: if Yiya asks for a project, a new one, or 'give me "
+    "another / a different one' (she didn't like the last), call new_project to "
+    "generate a fresh one and show it verbatim. She locks one in by replying "
+    "SELECT (handled for you); once selected she gets a kickoff plan. If she asks "
+    "how to start / 'scaffold me' / 'help me get going', call scaffold_project "
+    "for a concrete plan to begin building this weekend.\n"
     "\n"
     "TOOLS: If Yiya pastes or names ANY specific url for you to read or study — "
     "even one off your usual sources (a product page, a random blog, conductor."
@@ -467,6 +473,22 @@ def _record_rating(value):
     return f"Logged energy {value}/10 for {target['id']}. 👍"
 
 
+def _select_latest_project():
+    """Mark the most recent project as selected (the one Yiya committed to with
+    SELECT). Returns its id, or None if there's nothing to select."""
+    if not PROJECTS_LOG.exists():
+        return None
+    log = json.loads(PROJECTS_LOG.read_text())
+    if not log:
+        return None
+    target = log[-1]
+    from datetime import datetime, timezone
+    target["selected"] = True
+    target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
+    return target.get("id")
+
+
 def _download_telegram_photo(msg):
     """Download the largest photo in a Telegram message. Returns (bytes,
     media_type) or (None, None). Telegram sends photos in two steps: getFile to
@@ -589,6 +611,26 @@ def handle_update(update):
             send_telegram.send_message("Okay, dropped it.")
         else:
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
+        return
+
+    # SELECT gate: Yiya commits to the latest project. Mark it selected, then
+    # hand her a concrete kickoff plan so she can start building. Kept upstream of
+    # the model (like CONFIRM) so a plain "SELECT" deterministically locks in and
+    # scaffolds, rather than depending on the LLM to interpret it.
+    if word == "SELECT":
+        pid = _select_latest_project()
+        if pid is None:
+            send_telegram.send_message(
+                "Nothing to select yet, ask me for a project first.")
+            return
+        import argo_mcp_server
+        send_telegram.send_message(f"Locked in {pid}. Let me get you a kickoff plan.")
+        try:
+            send_telegram.send_message(argo_mcp_server.scaffold_project())
+        except Exception as exc:
+            send_telegram.send_message(
+                f"Selected {pid}, but I hit a snag drafting the plan "
+                f"({type(exc).__name__}). Ask me to scaffold it again in a sec.")
         return
 
     reply = _reply_with_progress(chat_id, text)
