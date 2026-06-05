@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argo — Frontier Scout Report, 4 June 2026</title>
+<style>
+  @page{ size:Letter; margin:0; }
+  :root{
+    --paper:#f4efe4;
+    --ink:#1a2238;
+    --green:#1f4435;
+    --muted:#7d776a;
+    --rule:#ddd5c4;
+    --green-soft:#e9eee8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#e7e1d3}
+  body{
+    font-family:"Georgia","Times New Roman",serif;
+    color:var(--ink);-webkit-font-smoothing:antialiased;line-height:1.3;
+    padding:34px 16px;
+  }
+  .page{
+    background:var(--paper);
+    width:8.5in;height:11in;margin:0 auto 34px;
+    padding:0.85in 0.9in;
+    box-shadow:0 24px 80px rgba(26,34,56,.18);
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+
+  /* running head */
+  .rh{display:flex;justify-content:space-between;align-items:baseline;
+    font-size:10px;letter-spacing:.26em;text-transform:uppercase;color:var(--muted)}
+  .rh .b{font-weight:700;letter-spacing:.4em;color:var(--ink);font-size:13px}
+
+  .eyebrow{font-size:11px;letter-spacing:.34em;text-transform:uppercase;
+    color:var(--green);font-weight:700;margin-top:54px}
+  h1.title{font-size:58px;line-height:.98;font-weight:700;letter-spacing:-.02em;
+    margin-top:20px;max-width:14ch}
+  h1.title em{font-style:italic;color:var(--green)}
+  .deck{font-size:15px;line-height:1.6;color:var(--muted);max-width:50ch;margin-top:26px}
+  .deck b{color:var(--green);font-weight:700}
+
+  .footrule{margin-top:auto;display:flex;justify-content:space-between;
+    font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);
+    border-top:2px solid var(--ink);padding-top:11px}
+
+  /* section heading */
+  .sec-eyebrow{font-size:11px;letter-spacing:.3em;text-transform:uppercase;
+    color:var(--green);font-weight:700}
+  .sec-title{font-size:34px;font-weight:700;letter-spacing:-.015em;line-height:1.05;
+    margin-top:12px;max-width:20ch}
+  .sec-title em{font-style:italic;color:var(--green)}
+
+  /* big centered contrast */
+  .contrast{margin:auto 0;display:flex;flex-direction:column;gap:34px}
+  .couplet{font-size:30px;font-weight:700;line-height:1.15;letter-spacing:-.01em}
+  .couplet .q{color:var(--muted);font-weight:400;font-size:19px;display:block;margin-bottom:4px;font-style:italic}
+  .couplet b{color:var(--green)}
+
+  /* vertical architecture stack */
+  .stack{margin:38px 0 0;display:flex;flex-direction:column;align-items:center}
+  .vnode{
+    width:62%;border:2px solid var(--ink);border-radius:4px;
+    padding:18px 20px;text-align:center;background:var(--paper);
+  }
+  .vnode.green{border-color:var(--green);background:var(--green-soft)}
+  .vnode .t{font-size:21px;font-weight:700;line-height:1.1}
+  .vnode .s{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-top:5px}
+  .down{color:var(--green);font-size:22px;line-height:1;margin:11px 0}
+
+  /* pipeline spine */
+  .pipeline{margin-top:34px;text-align:center}
+  .pl-label{font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--muted);margin-bottom:14px}
+  .pl-row{display:flex;justify-content:center;align-items:center;gap:6px;flex-wrap:wrap}
+  .pl{font-size:18px;font-weight:700}
+  .pl .a{color:var(--green);font-weight:400;padding:0 8px}
+
+  /* tool chips */
+  .chips{display:flex;justify-content:center;gap:9px;flex-wrap:wrap;margin-top:30px}
+  .chip{font-size:11.5px;border:1px solid var(--rule);border-radius:22px;padding:6px 15px;
+    color:var(--green);font-weight:700;letter-spacing:.02em}
+
+  /* breakthrough diagram cards */
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:34px 40px;margin-top:36px}
+  .card .ct{font-size:18px;font-weight:700;margin-bottom:12px}
+  .chain{display:flex;align-items:center;gap:7px;flex-wrap:wrap;
+    font-size:12px;color:var(--green);font-weight:700}
+  .chain .x{border:1px solid var(--rule);border-radius:3px;padding:4px 9px;background:var(--paper)}
+  .chain .a{color:var(--muted);font-weight:400}
+  .cres{font-size:12.5px;color:#2b3147;line-height:1.5;margin-top:12px;max-width:40ch}
+
+  /* timeline (vertical, airy) */
+  .tl{margin-top:30px;display:flex;flex-direction:column;gap:0}
+  .step{font-size:17px;font-weight:700;line-height:1;color:var(--muted);padding:7px 0}
+  .step.now{color:var(--green);font-size:21px}
+  .tl .a{color:var(--green);font-size:13px}
+
+  /* finding */
+  .finding{font-size:26px;font-weight:700;line-height:1.18;letter-spacing:-.01em;max-width:24ch;margin-top:10px}
+  .map{margin-top:24px;font-size:15px;line-height:2;font-weight:700}
+  .map .a{color:var(--green);font-weight:400;padding:0 8px}
+  .map .r{color:var(--green)}
+
+  /* north star */
+  .north{margin:auto 0;text-align:center}
+  .north .n{font-size:46px;font-weight:700;line-height:1.18;letter-spacing:-.015em}
+  .north .n em{font-style:italic;color:var(--green)}
+
+  @media print{ body{padding:0;background:var(--paper)} .page{box-shadow:none;margin:0 auto} }
+</style>
+</head>
+<body>
+
+<!-- ===== PAGE 1 — COVER ===== -->
+<div class="page">
+  <div class="rh"><span class="b">Argo</span><span>Frontier Scout Report</span></div>
+  <div class="eyebrow">Technical Capability Snapshot &middot; 04 June 2026</div>
+  <h1 class="title">The AI that <em>brings you the frontier.</em></h1>
+  <div class="deck">The frontier moves faster than anyone can read. Argo reads it
+    for you &mdash; watching the labs, the papers, the repos &mdash; and texts
+    you the one thing worth building this week.<br><br>It started the day as a
+    script that mailed a project on Fridays. It ended it as an agent that thinks,
+    remembers, reads the live web, and taps you on the shoulder when something
+    real ships.<br><br><b>Six capabilities, shipped in a day. Live on Telegram,
+    running on Railway, open on GitHub.</b></div>
+  <div class="footrule"><span>SEAS &middot; Decision &amp; Insight Engine</span><span>Page 1</span></div>
+</div>
+
+<!-- ===== PAGE 2 — DIFFERENCE ===== -->
+<div class="page">
+  <div class="rh"><span class="b">Argo</span><span>What Makes It Different</span></div>
+  <div style="margin-top:44px">
+    <div class="sec-eyebrow">01 &middot; The Difference</div>
+    <div class="sec-title">A chatbot answers you. <em>A scout finds you things.</em></div>
+  </div>
+  <div class="contrast">
+    <div class="couplet"><span class="q">A chatbot waits for a prompt.</span>Argo <b>shows up first</b>, with the thing it found.</div>
+    <div class="couplet"><span class="q">A chatbot forgets when you close the tab.</span>Argo <b>remembers</b> across every restart and deploy.</div>
+    <div class="couplet"><span class="q">A chatbot recites what it was trained on.</span>Argo <b>reads what shipped this morning.</b></div>
+  </div>
+  <div class="footrule"><span>github.com/yiyaw-lab/seas</span><span>Page 2</span></div>
+</div>
+
+<!-- ===== PAGE 3 — ARCHITECTURE ===== -->
+<div class="page">
+  <div class="rh"><span class="b">Argo</span><span>System Architecture</span></div>
+  <div style="margin-top:40px">
+    <div class="sec-eyebrow">02 &middot; Architecture</div>
+    <div class="sec-title">One mind, four layers, seven tools.</div>
+  </div>
+
+  <div class="stack">
+    <div class="vnode"><div class="t">Telegram</div><div class="s">you, on your phone</div></div>
+    <div class="down">&darr;</div>
+    <div class="vnode green"><div class="t">Argo brain</div><div class="s">Claude &middot; Sonnet routine &middot; Opus on stakes</div></div>
+    <div class="down">&darr;</div>
+    <div class="vnode"><div class="t">MCP tool server</div><div class="s">FastMCP &middot; ASGI &middot; bearer-auth</div></div>
+    <div class="down">&darr;</div>
+    <div class="vnode"><div class="t">The world</div><div class="s">web &middot; repos &middot; feeds</div></div>
+  </div>
+
+  <div class="chips">
+    <span class="chip">web_fetch</span><span class="chip">list_feeds</span>
+    <span class="chip">github_read_file</span><span class="chip">github_list</span>
+    <span class="chip">webhook_health</span><span class="chip">latest_project</span>
+    <span class="chip">signal_freshness</span>
+  </div>
+
+  <div class="pipeline">
+    <div class="pl-label">The loop</div>
+    <div class="pl-row">
+      <span class="pl">Signal</span><span class="pl a">&rarr;</span>
+      <span class="pl">Observation</span><span class="pl a">&rarr;</span>
+      <span class="pl">Insight</span><span class="pl a">&rarr;</span>
+      <span class="pl">Bet</span><span class="pl a">&rarr;</span>
+      <span class="pl">Energy</span><span class="pl a">&rarr;</span>
+      <span class="pl" style="color:var(--green)">Artifact</span>
+    </div>
+  </div>
+
+  <div class="footrule"><span>Telegram &rarr; Claude &rarr; MCP &rarr; world</span><span>Page 3</span></div>
+</div>
+
+<!-- ===== PAGE 4 — BREAKTHROUGHS ===== -->
+<div class="page">
+  <div class="rh"><span class="b">Argo</span><span>Technical Breakthroughs</span></div>
+  <div style="margin-top:40px">
+    <div class="sec-eyebrow">03 &middot; Breakthroughs</div>
+    <div class="sec-title">Four things that make it real.</div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="ct">Persistent Memory</div>
+      <div class="chain"><span class="x">Telegram</span><span class="a">&rarr;</span><span class="x">volume</span><span class="a">&rarr;</span><span class="x">history</span></div>
+      <div class="cres">Remembers conversations across restarts, deployments and sessions.</div>
+    </div>
+    <div class="card">
+      <div class="ct">Dynamic Model Routing</div>
+      <div class="chain"><span class="x">routine</span><span class="a">&rarr;</span><span class="x">Sonnet</span>&nbsp;&nbsp;<span class="x">stakes</span><span class="a">&rarr;</span><span class="x">Opus</span></div>
+      <div class="cres">Intelligence scales with task complexity while controlling cost.</div>
+    </div>
+    <div class="card">
+      <div class="ct">Live Tool Access</div>
+      <div class="chain"><span class="x">ask</span><span class="a">&rarr;</span><span class="x">connector</span><span class="a">&rarr;</span><span class="x">fetch / repo</span></div>
+      <div class="cres">Reasons over live information, not just frozen model memory.</div>
+    </div>
+    <div class="card">
+      <div class="ct">Tripwire Monitoring</div>
+      <div class="chain"><span class="x">sources</span><span class="a">&rarr;</span><span class="x">judge</span><span class="a">&rarr;</span><span class="x">alert</span></div>
+      <div class="cres">Doesn't wait to be asked. Watches the frontier and surfaces what matters.</div>
+    </div>
+  </div>
+
+  <div style="margin-top:46px">
+    <div class="sec-eyebrow">04 &middot; Evolution</div>
+    <div class="tl">
+      <span class="step">Static generator</span>
+      <span class="step">Weekly delivery</span>
+      <span class="step">Two-way chat</span>
+      <span class="step">Persistent memory</span>
+      <span class="step">Live web + repos</span>
+      <span class="step">Model routing</span>
+      <span class="step">Tripwire monitoring</span>
+      <span class="step now">Agentic frontier scout</span>
+    </div>
+  </div>
+
+  <div class="footrule"><span>SEAS</span><span>Page 4</span></div>
+</div>
+
+<!-- ===== PAGE 5 — RESEARCH + NORTH STAR ===== -->
+<div class="page">
+  <div class="rh"><span class="b">Argo</span><span>Research &amp; Frontier</span></div>
+  <div style="margin-top:40px">
+    <div class="sec-eyebrow">05 &middot; Strongest Research Output &mdash; F-001</div>
+    <div class="finding">Agent organizational structures may function as <em style="font-style:italic;color:var(--green)">cognitive operators.</em></div>
+    <div class="map">
+      Researcher <span class="a">&rarr;</span> <span class="r">Theory thinking</span><br>
+      Critic <span class="a">&rarr;</span> <span class="r">Assumption-challenging</span><br>
+      Researcher + Critic <span class="a">&rarr;</span> <span class="r">Meta-theory</span>
+    </div>
+  </div>
+
+  <div style="margin-top:54px">
+    <div class="sec-eyebrow">06 &middot; Current Frontier</div>
+    <div class="finding" style="max-width:30ch">Can Argo generate observations that are surprising, true, useful, and action-generating?</div>
+    <div class="deck" style="margin-top:14px">The core research hypothesis. Everything else exists to test it.</div>
+  </div>
+
+  <div class="north">
+    <div class="n">Scout the frontier.<br>Surface what matters.<br><em>Build what's next.</em></div>
+  </div>
+
+  <div class="footrule"><span>SEAS &middot; North Star</span><span>Page 5</span></div>
+</div>
+
+</body>
+</html>
