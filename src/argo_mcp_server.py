@@ -426,6 +426,138 @@ def clear_pending_heal():
     PENDING_HEAL_PATH.unlink(missing_ok=True)
 
 
+# --- Phase E4: propose-only self-create (never self-merge) ------------------
+# Argo can DRAFT a new capability and open a PR for human review. It never
+# merges or deploys to itself. Two boundaries, defense in depth:
+#   1. A SEPARATE token (ARGO_PROPOSE_TOKEN) that is PR-only — scoped so it
+#      cannot merge or push to the default branch. (The serving GITHUB_TOKEN is
+#      not reused here.)
+#   2. Code-level: we only ever create a NEW branch + a PR; we never write to
+#      the default branch, and we cap file count/size.
+# This is the safe closed loop: Argo proposes, you merge, Railway deploys.
+
+PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "yiyaw-lab/seas")
+PROPOSE_BASE = os.environ.get("ARGO_PROPOSE_BASE", "main")
+MAX_PROPOSE_FILES = 5
+MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable
+
+
+def _gh_write(method, path, body):
+    """Authenticated GitHub API call for the PROPOSE path. Uses the dedicated
+    PR-only token (ARGO_PROPOSE_TOKEN); never the serving token. Returns
+    (ok, parsed_json_or_text)."""
+    import ssl
+    import urllib.request
+
+    token = os.environ.get("ARGO_PROPOSE_TOKEN")
+    if not token:
+        return False, ("ARGO_PROPOSE_TOKEN not set. Self-create is disabled until "
+                       "a PR-only GitHub token is configured.")
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"https://api.github.com{path}",
+        data=data, method=method,
+        headers={
+            "User-Agent": "argo-mcp/1.0",
+            "Accept": "application/vnd.github+json",
+            "Authorization": "Bearer " + token.strip(),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25, context=ctx) as r:
+            txt = r.read().decode("utf-8", errors="replace")
+            return True, (json.loads(txt) if txt else {})
+    except Exception as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:200]  # type: ignore
+        except Exception:
+            pass
+        return False, f"{type(exc).__name__}: {exc} {detail}"
+
+
+@mcp.tool()
+def propose_change(title: str, description: str, files_json: str) -> str:
+    """Propose a new capability or fix by opening a GitHub PR for human review.
+    Argo NEVER merges or deploys this itself — it drafts; a human approves.
+    Use when you've identified a concrete improvement (a new feed source, a small
+    new tool, a bug fix).
+
+    title: short PR title.
+    description: what the change does and why (PR body).
+    files_json: a JSON object mapping repo file paths to their FULL new contents,
+      e.g. '{"src/foo.py": "...file text..."}'. Max 5 files, 40KB each.
+
+    Returns the PR URL on success. Opens against a NEW branch only; cannot touch
+    the default branch."""
+    import re as _re
+    from datetime import datetime, timezone
+
+    # Parse + validate the file map.
+    try:
+        files = json.loads(files_json)
+        assert isinstance(files, dict) and files
+    except Exception:
+        return "files_json must be a non-empty JSON object of {path: contents}."
+    if len(files) > MAX_PROPOSE_FILES:
+        return f"Too many files ({len(files)}); max {MAX_PROPOSE_FILES} per proposal."
+    for p, c in files.items():
+        if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
+            return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
+        if p.startswith("/") or ".." in p:
+            return f"Refused: unsafe path '{p}'."
+
+    # 1. Resolve the base branch head SHA (read with the propose token).
+    ok, ref = _gh_write("GET", f"/repos/{PROPOSE_REPO}/git/ref/heads/{PROPOSE_BASE}", None)
+    if not ok:
+        return f"Couldn't read base branch: {ref}"
+    base_sha = ref.get("object", {}).get("sha")
+    if not base_sha:
+        return "Couldn't resolve base branch SHA."
+
+    # 2. Create a NEW branch off base (never write to base itself).
+    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "change"
+    branch = f"argo/{slug}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+    ok, res = _gh_write("POST", f"/repos/{PROPOSE_REPO}/git/refs",
+                        {"ref": f"refs/heads/{branch}", "sha": base_sha})
+    if not ok:
+        return f"Couldn't create branch: {res}"
+
+    # 3. Write each file onto the new branch (PUT contents API; base64).
+    import base64
+    for path, content in files.items():
+        # need the file's current sha if it already exists, to update it
+        okc, cur = _gh_write("GET",
+                             f"/repos/{PROPOSE_REPO}/contents/{path}?ref={branch}", None)
+        sha = cur.get("sha") if okc and isinstance(cur, dict) else None
+        payload = {
+            "message": f"{title}: {path}",
+            "content": base64.b64encode(content.encode()).decode(),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        okw, resw = _gh_write("PUT", f"/repos/{PROPOSE_REPO}/contents/{path}", payload)
+        if not okw:
+            return f"Couldn't write '{path}': {resw}"
+
+    # 4. Open the PR (base = default branch; head = our new branch).
+    body = (f"{description}\n\n---\n*Proposed by Argo (self-create, propose-only). "
+            f"Review and merge to deploy; Argo cannot merge this itself.*")
+    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls",
+                       {"title": title, "head": branch, "base": PROPOSE_BASE,
+                        "body": body})
+    if not ok:
+        return f"Branch + files created ({branch}), but opening the PR failed: {pr}"
+    return f"Opened PR for review: {pr.get('html_url', '(no url)')}"
+
+
 def mcp_asgi_app():
     """The Streamable-HTTP ASGI app to mount under /mcp."""
     return mcp.streamable_http_app()
