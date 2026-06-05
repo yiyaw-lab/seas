@@ -563,6 +563,10 @@ def new_project() -> str:
     import argo_project
 
     made = argo_project.make_proposal(refresh=True)
+    if made == "NO_SIGNALS":
+        return ("Couldn't pull fresh signals to build a project from (the feeds "
+                "may be down). Tell Yiya plainly and suggest trying again "
+                "shortly, or that she can bring her own idea instead.")
     if made is None:
         return ("Couldn't generate a project right now (no model available). "
                 "Tell Yiya plainly and suggest trying again shortly.")
@@ -606,7 +610,14 @@ def project_too_complex(what_lost_her: str = "") -> str:
         caption=bet,
     )
 
-    made = argo_project.make_proposal(refresh=False)  # taste already updated
+    # refresh=True: signals.json is gitignored and may be absent on a fresh
+    # deploy; refreshing both fixes that and keeps the replacement project fresh.
+    # The taste signal was saved above, so a refresh can't lose it.
+    made = argo_project.make_proposal(refresh=True)
+    if made == "NO_SIGNALS":
+        return ("Saved that it was too complex. But I couldn't pull fresh signals "
+                "to build a simpler one right now (feeds may be down). Tell Yiya "
+                "to try again shortly.")
     if made is None:
         return ("Saved that it was too complex, but couldn't generate another "
                 "right now (no model available). Tell Yiya to try again shortly.")

@@ -119,8 +119,17 @@ Output format: a numbered list, 1 to {NUM_OBSERVATIONS}, nothing else.
 def load_signals(limit=NUM_SIGNALS):
     """Load the top `limit` signals. Defaults to NUM_SIGNALS (3) for the
     observation path, which wants a tight slice; the project generator passes a
-    larger limit so it has real material to synthesize a bet from."""
-    signals = json.loads(SIGNALS_PATH.read_text())
+    larger limit so it has real material to synthesize a bet from.
+
+    signals.json is gitignored, so it's absent on a fresh deploy until the first
+    fetch runs. Return [] rather than crashing, so callers degrade to 'no
+    signals' (and can refetch) instead of erroring into a confused self-heal."""
+    if not SIGNALS_PATH.exists():
+        return []
+    try:
+        signals = json.loads(SIGNALS_PATH.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return []
     return signals[:limit]
 
 

@@ -304,6 +304,11 @@ def make_proposal(refresh=True, seed="", source="argo"):
     if refresh:
         _refresh_signals()
     prompt, signals = _build_proposal_prompt(seed)
+    # No signals AND no seed means nothing to ground a fresh project in (e.g. a
+    # feed outage on a deploy with no cached store). A seeded idea is its own
+    # material, so it can still proceed.
+    if not signals and not seed.strip():
+        return "NO_SIGNALS"
     result, _ = generate_project(prompt)
     if result is None:
         return None
