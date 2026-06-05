@@ -223,55 +223,105 @@ def make_project(refresh=True):
     return project_id, text, model
 
 
-SHAPE_INSTRUCTIONS = """You are Argo. Yiya brought you a project idea of her own.
-Shape it into the SAME format you use for your own bets, so it sits comparably
-next to them — but stay true to HER idea; sharpen it, don't replace it. Plain
-text, no markdown, no em dashes.
+# A proposal = a one-line pitch (for chat) + a decision-grade doc (for an
+# attachment): the bet, the model's ratings with reasons, why this one, and the
+# REAL source links the signals came from (never invented).
+PROPOSAL_INSTRUCTIONS = """You are Argo. From the signals below, produce ONE
+project worth building this week, as a decision aid for Yiya. Output EXACTLY
+these labeled blocks, plain text, no markdown, no em dashes:
 
-⚓ Argo
+PITCH: <one vivid line naming the project and what it does, this is all she sees
+in chat first>
 
-I've been watching something.
+PROJECT:
+<the full bet: 2-4 lines of insight, then the project, what to build, the
+artifact it produces, and the effort (An evening / A weekend / A few days / A
+week)>
 
-<1-3 short lines: the real insight under her idea, grounded and specific>
+RATINGS:
+Technical depth: <1-5>/5 - <one line: what skills/stack it demands>
+Impact: <1-5>/5 - <one line: why it matters or doesn't>
+Feasibility this week: <1-5>/5 - <one line: can she realistically ship it>
 
-This week's bet:
-<a short, vivid name for HER project>
-
-<one or two sentences: what to build this week>
-
-Artifact:
-<the public thing it produces>
-
-Effort:
-<one of: An evening / A weekend / A few days / A week>
-
-Potential upside:
-<why it matters, honest, not inflated>
-
-Output only the message. Here is her idea:
+WHY THIS ONE:
+<2-3 lines: the specific reason you picked this from the signals, honestly. These
+are your judgments, say so.>
 """
 
 
-def shape_idea_into_project(idea):
-    """Turn Yiya's rough idea into the standard project shape, log it as her
-    candidate (source 'yiya'), and return (project_id, text, model). None if no
-    model is available. Folds in her taste so the shaping respects it."""
-    taste_block = ""
-    try:
-        import taste_signals
-        taste = taste_signals.format_for_prompt()
-        if taste:
-            taste_block = f"\n\n(Keep these preferences in mind: {taste})"
-    except Exception:
-        pass
-    prompt = f"{SHAPE_INSTRUCTIONS}{idea.strip()}{taste_block}"
+def _build_proposal_prompt(seed=""):
+    """Proposal prompt + the signals it draws on (so real source links can be
+    appended to the doc). If `seed` is given, the proposal shapes HER idea (and
+    rates it honestly, incl. feasibility); otherwise it picks from the signals."""
+    signals = observe.load_signals(limit=PROJECT_SIGNALS)
+    block = observe.format_signals(signals)
+    prompt = f"{PROPOSAL_INSTRUCTIONS}\n---\n\n## Frontier signals\n\n{block}\n"
+    if seed.strip():
+        prompt += (f"\n---\n\nIMPORTANT: build the proposal around YIYA'S OWN "
+                   f"idea below; sharpen it, don't replace it. Rate it honestly, "
+                   f"including whether it's really feasible this week.\n\n"
+                   f"Her idea: {seed.strip()}\n")
+    return prompt, signals
+
+
+def _split_pitch(proposal_text):
+    """Pull the one-line PITCH out of the model's labeled output. Returns
+    (pitch, full_project_text). Falls back gracefully if a label is missing."""
+    pitch = ""
+    for line in proposal_text.splitlines():
+        if line.strip().upper().startswith("PITCH:"):
+            pitch = line.split(":", 1)[1].strip()
+            break
+    # The project text shown/logged is everything from PROJECT: onward, minus the
+    # PITCH line; if PROJECT: is absent, use the whole thing.
+    body = proposal_text
+    idx = proposal_text.upper().find("PROJECT:")
+    if idx != -1:
+        body = proposal_text[idx + len("PROJECT:"):].strip()
+    return pitch, body
+
+
+def _sources_block(signals):
+    """Real 'learn more' links from the signals, never invented. Empty if none."""
+    rows = []
+    for s in signals:
+        link = (s.get("link") or "").strip()
+        if link:
+            rows.append(f"- {s.get('title', '').strip()}\n  {link}")
+    if not rows:
+        return ""
+    return "Sources this drew on (where it originated):\n" + "\n".join(rows)
+
+
+def make_proposal(refresh=True, seed="", source="argo"):
+    """Generate a project PROPOSAL and return
+    (project_id, pitch, project_text, doc, model) or None.
+
+    `pitch` is the one chat line; `doc` is the full proposal (bet + ratings +
+    reasoning + real source links) for an attachment. The logged/selectable
+    project is `project_text`, so SELECT/scaffold/ratings keep working. With a
+    `seed`, the proposal is built around Yiya's own idea (logged source 'yiya')."""
+    if refresh:
+        _refresh_signals()
+    prompt, signals = _build_proposal_prompt(seed)
     result, _ = generate_project(prompt)
     if result is None:
         return None
-    text, model = result
-    text = text.strip()
-    project_id = log_project(text, model, source="yiya")
-    return project_id, text, model
+    raw, model = result
+    raw = raw.strip()
+    pitch, project_text = _split_pitch(raw)
+
+    project_id = log_project(project_text, model, source=source)
+
+    sources = _sources_block(signals)
+    doc = f"PROJECT PROPOSAL {project_id}\n\n{raw}"
+    if sources:
+        doc += f"\n\n{sources}"
+    doc += ("\n\nRatings and 'why this one' are Argo's judgment, not measured "
+            "fact. Reply 1-10 to rate, SELECT to start, or ask for another.")
+    if not pitch:
+        pitch = f"{project_id}: a fresh project (full proposal attached)."
+    return project_id, pitch, project_text, doc, model
 
 
 def main():
