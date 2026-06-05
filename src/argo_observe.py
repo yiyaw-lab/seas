@@ -263,6 +263,39 @@ def _call_anthropic(job, model):
     )
 
 
+def describe_image(image_bytes, media_type, prompt, model=None, system=None,
+                   max_tokens=1024):
+    """Send an image (+ a text prompt) to Claude's vision and return its text.
+
+    Used when the user texts Argo a screenshot: Argo can actually SEE it and
+    reason about it, instead of silently dropping it. Anthropic-only (Claude is
+    multimodal); same guardrails as the other calls. `image_bytes` is raw bytes,
+    `media_type` like 'image/png' or 'image/jpeg'.
+    """
+    import base64
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
+    model = model or "claude-sonnet-4-6"
+    content = [
+        {"type": "image", "source": {
+            "type": "base64", "media_type": media_type,
+            "data": base64.b64encode(image_bytes).decode(),
+        }},
+        {"type": "text", "text": prompt},
+    ]
+
+    def do_call():
+        kwargs = {"model": model, "max_tokens": max_tokens,
+                  "messages": [{"role": "user", "content": content}]}
+        if system:
+            kwargs["system"] = system
+        return client.messages.create(**kwargs)
+
+    response = _guarded("anthropic", do_call, f"vision/{model}")
+    return "".join(b.text for b in response.content if b.type == "text")
+
+
 # Beta header for the MCP connector (Anthropic runs the tool loop server-side).
 # Isolated here so a beta-string change touches one place. Confirm against
 # current Anthropic docs if connector calls start failing.

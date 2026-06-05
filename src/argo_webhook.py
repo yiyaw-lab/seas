@@ -431,11 +431,89 @@ def _record_rating(value):
     return f"Logged energy {value}/10 for {target['id']}. 👍"
 
 
+def _download_telegram_photo(msg):
+    """Download the largest photo in a Telegram message. Returns (bytes,
+    media_type) or (None, None). Telegram sends photos in two steps: getFile to
+    resolve a file_path, then download from the file CDN — both need the token."""
+    import ssl
+    import urllib.request
+
+    photos = msg.get("photo") or []
+    if not photos:
+        return None, None
+    # `photo` is an array of sizes; the last is the largest.
+    file_id = photos[-1].get("file_id")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not file_id or not token:
+        return None, None
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
+        with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
+            path = json.loads(r.read().decode()).get("result", {}).get("file_path")
+        if not path:
+            return None, None
+        dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
+        with urllib.request.urlopen(dl, timeout=20, context=ctx) as r:
+            data = r.read()
+        media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        return data, media
+    except Exception as exc:
+        print(f"photo download failed: {exc}")
+        return None, None
+
+
+def _handle_photo(chat_id, msg):
+    """A screenshot from Yiya's feed: SEE it, extract the durable taste lesson,
+    persist it (so it shapes future projects), and reply in voice. Argo no longer
+    silently drops images."""
+    import taste_signals
+
+    caption = msg.get("caption", "") or ""
+    img, media = _download_telegram_photo(msg)
+    if img is None:
+        send_telegram.send_message(
+            "got an image but couldn't pull it down, mind resending?")
+        return
+    try:
+        extraction = observe.describe_image(
+            img, media, taste_signals.build_extract_prompt(caption),
+            system=taste_signals.EXTRACT_SYSTEM)
+    except Exception as exc:
+        send_telegram.send_message(f"saw the image but couldn't process it: {exc}")
+        return
+
+    sig, summary = taste_signals.parse_and_store(extraction, caption=caption)
+    if sig is None:
+        # Vision worked but extraction didn't parse — still reply with what it saw
+        # rather than drop it, just don't persist a malformed taste signal.
+        send_telegram.send_message(_clean_reply(extraction[:600]))
+        return
+    # Log the turn so it lives in chat memory too, then reply.
+    _append_turn(chat_id, "Yiya", f"[screenshot]{(' ' + caption) if caption else ''}")
+    reply = _clean_reply(
+        f"noted. what's worth stealing here: {summary}. logged it to your taste "
+        f"so it nudges future projects ({sig['id']}).")
+    _append_turn(chat_id, "Argo", reply)
+    send_telegram.send_message(reply)
+
+
 def handle_update(update):
     """Process one Telegram update dict; send a reply. Pure-ish + testable."""
     msg = update.get("message") or update.get("channel_post") or {}
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "")
+
+    # A photo (screenshot) has no `text` — handle it before the text guard below,
+    # which would otherwise silently drop it (the bug: Argo ignored screenshots).
+    if chat_id is not None and msg.get("photo"):
+        _handle_photo(chat_id, msg)
+        return
+
     if chat_id is None or not text:
         return
 

@@ -116,13 +116,24 @@ def build_project_prompt():
     signals = observe.load_signals()
     signals_block = observe.format_signals(signals)
 
+    # Fold in recent taste signals (lessons from screenshots Yiya sent) so the
+    # project leans toward what she actually likes, not just what's in the feed.
+    taste_block = ""
+    try:
+        import taste_signals
+        taste = taste_signals.format_for_prompt()
+        if taste:
+            taste_block = f"\n---\n\n## {taste}\n"
+    except Exception:
+        pass  # taste is a nice-to-have; never block generation on it
+
     prompt = f"""{PROJECT_INSTRUCTIONS}
 ---
 
 ## Frontier signals
 
 {signals_block}
-"""
+{taste_block}"""
     return prompt, signals
 
 
