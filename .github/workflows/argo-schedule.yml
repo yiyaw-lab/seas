@@ -1,0 +1,44 @@
+name: Argo Schedule Runner
+
+# Single hourly scheduler. It does NOT decide what to send; src/argo_scheduled.py
+# reads data/schedule.json and fires whatever is due this UTC hour. New scheduled
+# deliveries are added by editing data/schedule.json (a data change Argo can
+# propose via a Contents-only PR) -- no workflow edit, no Workflows permission.
+on:
+  schedule:
+    - cron: "0 * * * *"   # top of every hour, UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to commit dedupe state + any data the deliveries refresh
+
+concurrency:
+  group: argo-schedule
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Fire due deliveries
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ARGO_CHAT_MODEL: ${{ vars.ARGO_CHAT_MODEL }}
+          ARGO_MODEL: ${{ vars.ARGO_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/argo_scheduled.py
+      - name: Commit updated data (seen-store, schedule state, signals)
+        run: |
+          git config user.name "argo-schedule"
+          git config user.email "argo-schedule@users.noreply.github.com"
+          git add data/argo_seen.json data/schedule_state.json 2>/dev/null || true
+          git commit -m "argo-schedule: update run state" || echo "No changes"
+          git push || echo "Nothing to push"

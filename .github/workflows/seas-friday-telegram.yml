@@ -1,10 +1,8 @@
 name: Argo V2 Friday Telegram
 
 on:
-  schedule:
-    # 08:00 America/Los_Angeles. GitHub cron is UTC and has no DST awareness,
-    # so this fires at 15:00 UTC (PST, winter). During PDT it lands at 08:00.
-    - cron: "0 15 * * 5"
+  # Scheduling moved to data/schedule.json via the Argo Schedule Runner workflow
+  # (single hourly cron dispatches what's due). Kept here for manual runs only.
   workflow_dispatch:
 
 jobs:

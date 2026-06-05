@@ -1,10 +1,8 @@
 name: Argo Watch (tripwire)
 
 on:
-  schedule:
-    # ~3x/day. GitHub cron is UTC. 14:00 / 19:00 / 00:00 UTC
-    # (roughly morning / midday / evening Pacific).
-    - cron: "0 14,19,0 * * *"
+  # Scheduling moved to data/schedule.json via the Argo Schedule Runner workflow.
+  # Kept here for manual runs only.
   workflow_dispatch:
 
 # Allow committing the updated seen-store back to the repo.
