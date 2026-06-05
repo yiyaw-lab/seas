@@ -1,0 +1,61 @@
+name: SEAS Findings (Stage 1 synthesis)
+
+# Runs the V3 evidence-synthesis floor: fetch fresh signals, then investigate the
+# top opportunity -> a genuine cited FINDING (which seeds a world-model belief +
+# a dated prediction) or an honest PROBE (dead-end memory). Commits the durable
+# knowledge back so beliefs/findings/probes accumulate over time.
+#
+# Needs FIRECRAWL_API_KEY for the topical related-source search (the clustering
+# keystone). Without it the run still works but will mostly probe 'premature'
+# (one source, no cross-source convergence).
+
+on:
+  # Manual for now; move to data/schedule.json once the cadence is proven.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch fresh frontier signals
+        run: python src/fetch_signals.py
+
+      - name: Run SEAS Stage 1 synthesis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ARGO_MODEL: ${{ vars.ARGO_MODEL }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+        run: python src/seas_finding.py
+
+      - name: Commit findings, beliefs, and probes
+        run: |
+          git config user.name "seas-agent"
+          git config user.email "seas-agent@users.noreply.github.com"
+          # Durable V3 knowledge: findings + the world model + dead-end/ledger
+          # memory + the source bundles backing each finding. signals.json is
+          # gitignored (transient), so it won't be committed. Add each path on
+          # its own line: a single `git add a b c` aborts (and stages NOTHING) if
+          # any path is missing, which would silently drop a real finding on a
+          # run where, say, runs/ didn't get created.
+          git add findings/ 2>/dev/null || true
+          git add data/world_model.json 2>/dev/null || true
+          git add data/probes.json 2>/dev/null || true
+          git add runs/ 2>/dev/null || true
+          git commit -m "SEAS Stage 1 run (findings/beliefs/probes)" || echo "No new knowledge to commit"
+          git push
