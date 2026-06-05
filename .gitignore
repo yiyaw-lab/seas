@@ -23,3 +23,6 @@ data/argo_pending_heal.json
 
 # Transient schedule dedupe state (argo_scheduled)
 data/schedule_state.json
+
+# Local Claude Code agent config (not project code)
+.claude/
