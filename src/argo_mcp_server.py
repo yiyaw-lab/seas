@@ -19,6 +19,7 @@ Later phases add repo-read (C), self-status (D), and gated self-heal (E) tools.
 """
 
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -332,6 +333,97 @@ def get_signal_freshness() -> str:
         n = "?"
     return (f"{n} signals, last refreshed {mtime:%Y-%m-%d %H:%M UTC} "
             f"({age_h:.1f}h ago).")
+
+
+# --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
+# L0 (default): report-only. The tools describe the fix and refuse to execute.
+# L1: the tool stages a pending action and tells the user to reply CONFIRM in
+#     Telegram; the webhook's CONFIRM shortcut then runs it. Never auto-acts.
+# Only idempotent, non-destructive heals live here (reregister webhook, refetch
+# signals). No restart, no delete, no broadcast, no credential changes.
+
+HEAL_LEVEL = os.environ.get("ARGO_HEAL_LEVEL", "L0").upper()
+PENDING_HEAL_PATH = ROOT / "data" / "argo_pending_heal.json"
+
+# Registry of allowed heal actions: name -> (human description, callable).
+# Callables are imported lazily inside _run_heal to avoid import cycles.
+HEAL_ACTIONS = {
+    "reregister_webhook": "re-register the Telegram webhook to WEBHOOK_URL",
+    "refetch_signals": "refetch the frontier signal feeds",
+}
+
+
+def _stage_pending(action):
+    """Record a single pending heal action for the CONFIRM shortcut to pick up."""
+    from datetime import datetime, timezone
+    PENDING_HEAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_HEAL_PATH.write_text(json.dumps({
+        "action": action,
+        "staged_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }))
+
+
+def _heal(action):
+    """Shared logic for a heal tool. At L0 reports; at L1 stages + asks CONFIRM."""
+    if action not in HEAL_ACTIONS:
+        return f"Unknown heal action '{action}'."
+    desc = HEAL_ACTIONS[action]
+    if HEAL_LEVEL == "L1":
+        _stage_pending(action)
+        return (f"I can {desc}. Reply CONFIRM to let me do it, or CANCEL to drop "
+                f"it. (This is the only action I'll run, and only on your okay.)")
+    # L0 default: report-only, never execute.
+    cmd = {"reregister_webhook": "python3 src/set_webhook.py "
+           "https://argo.up.railway.app/webhook",
+           "refetch_signals": "python3 src/fetch_signals.py"}.get(action, "")
+    return (f"Recommended fix: {desc}. I'm in report-only mode, so I won't run it "
+            f"myself. You can: {cmd}")
+
+
+@mcp.tool()
+def reregister_webhook() -> str:
+    """Heal action: re-register Argo's Telegram webhook (use when get_webhook_health
+    shows no URL or a delivery error). Idempotent and safe. Honors the autonomy
+    level: report-only by default, or asks for CONFIRM at L1."""
+    return _heal("reregister_webhook")
+
+
+@mcp.tool()
+def refetch_signals() -> str:
+    """Heal action: refetch the frontier signal feeds (use when get_signal_freshness
+    shows the pool is stale). Idempotent and safe. Honors the autonomy level:
+    report-only by default, or asks for CONFIRM at L1."""
+    return _heal("refetch_signals")
+
+
+def run_pending_heal():
+    """Execute the staged heal action (called by the webhook CONFIRM shortcut at
+    L1). Returns a status string. Clears the pending file either way."""
+    if not PENDING_HEAL_PATH.exists():
+        return "Nothing staged to confirm."
+    try:
+        pending = json.loads(PENDING_HEAL_PATH.read_text())
+    except (ValueError, json.JSONDecodeError):
+        PENDING_HEAL_PATH.unlink(missing_ok=True)
+        return "Pending action was unreadable; cleared it."
+    action = pending.get("action")
+    PENDING_HEAL_PATH.unlink(missing_ok=True)  # one-shot, clear before running
+    try:
+        if action == "reregister_webhook":
+            import argo_webhook
+            argo_webhook.self_register_webhook()
+            return "Re-registered the webhook. ✅"
+        if action == "refetch_signals":
+            import fetch_signals
+            fetch_signals.main()
+            return "Refetched the signal feeds. ✅"
+        return f"Unknown staged action '{action}'."
+    except Exception as exc:
+        return f"Heal action '{action}' failed: {type(exc).__name__}: {exc}"
+
+
+def clear_pending_heal():
+    PENDING_HEAL_PATH.unlink(missing_ok=True)
 
 
 def mcp_asgi_app():

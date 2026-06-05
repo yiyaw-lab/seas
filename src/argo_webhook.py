@@ -162,6 +162,11 @@ SYSTEM_PROMPT = (
     "You can check your OWN health with get_webhook_health, get_latest_project, "
     "and get_signal_freshness. When asked 'are you working / what did you suggest "
     "last / how current are your signals', use these and report the real status. "
+    "If something's broken you can SELF-HEAL: reregister_webhook (if the webhook "
+    "is down) or refetch_signals (if signals are stale). These are gated: by "
+    "default you only recommend the fix; if asked to actually do it, the tool "
+    "will tell the user to reply CONFIRM. Never claim you fixed something you "
+    "haven't. "
     "Do NOT claim you 'only get a weekly pull' or 'can't fetch live data' when a "
     "fetch tool is present, that's false. If a URL is outside the approved list, "
     "say so plainly. If no tool is available this turn, then say what you can "
@@ -332,6 +337,19 @@ def handle_update(update):
         send_telegram.send_message(
             status or f"Got {rating}/10, but there's no unrated project to log it against."
         )
+        return
+
+    # CONFIRM / CANCEL gate (L1 self-heal): execute or drop a staged heal action.
+    # Kept upstream of the model so a confirmation never reaches the LLM and a
+    # heal only runs on an explicit human okay.
+    word = text.strip().upper()
+    if word in ("CONFIRM", "CANCEL"):
+        import argo_mcp_server
+        if word == "CANCEL":
+            argo_mcp_server.clear_pending_heal()
+            send_telegram.send_message("Okay, dropped it.")
+        else:
+            send_telegram.send_message(argo_mcp_server.run_pending_heal())
         return
 
     reply = _llm_reply(chat_id, text)
