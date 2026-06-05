@@ -573,25 +573,117 @@ def project_too_complex(what_lost_her: str = "") -> str:
 
 
 @mcp.tool()
+@with_deadline(120)  # a model call to shape her idea into a comparable bet
+def add_project(idea: str) -> str:
+    """Capture a project idea YIYA brings (e.g. 'I want to build X', 'add my idea:
+    ...') as a candidate, shaped into Argo's bet format so it sits comparably
+    next to Argo's own suggestions. Use whenever she proposes her own project.
+    Returns the shaped bet. She can rate it, SELECT it, or ask what to ship."""
+    if not idea or not idea.strip():
+        return "Tell me the idea and I'll shape it into a bet you can weigh."
+    import argo_project
+
+    made = argo_project.shape_idea_into_project(idea)
+    if made is None:
+        return ("Couldn't shape that right now (no model available). Tell Yiya "
+                "to try again shortly.")
+    project_id, text, _model = made
+    return ("Added your idea as a candidate.\n\n" + text
+            + argo_project.project_invite(project_id))
+
+
+@mcp.tool()
+@with_deadline(90)  # reads candidates + one model call to weigh them
+def recommend_project() -> str:
+    """When Yiya asks what to ship / build this week, weigh ALL open candidates
+    (her ideas AND Argo's, any not yet selected) and recommend ONE, with the
+    runner-up named. Judge on: can it realistically ship in a week, fit to her
+    learned taste, and any 1-10 energy ratings she gave. Use for 'what should I
+    build/ship this week', 'which one', 'help me decide'."""
+    import json as _json
+    import argo_observe as _observe
+
+    if not PROJECTS_LOG.exists():
+        return "No candidates yet. Bring me an idea or ask me for a project first."
+    try:
+        log = _json.loads(PROJECTS_LOG.read_text())
+    except (ValueError, _json.JSONDecodeError):
+        return "Project log is unreadable."
+    candidates = [p for p in log if not p.get("selected")]
+    if not candidates:
+        return "Nothing open to weigh. Bring an idea or ask for a project."
+    if len(candidates) == 1:
+        c = candidates[0]
+        return (f"Only one candidate open ({c['id']}). Reply SELECT to lock it "
+                "in and get a kickoff plan, or bring another idea to compare.")
+
+    taste = ""
+    try:
+        import taste_signals
+        taste = taste_signals.format_for_prompt()
+    except Exception:
+        pass
+
+    listing = "\n\n".join(
+        f"{c['id']} (from {'Yiya' if c.get('source') == 'yiya' else 'Argo'}"
+        + (f", energy {c['energy']}/10" if c.get("energy") is not None else "")
+        + f"):\n{c.get('text', '')}"
+        for c in candidates
+    )
+    prompt = (
+        "You are Argo, helping Yiya decide which ONE project to ship THIS WEEK. "
+        "Weigh the candidates below on: (1) can it realistically ship in a week, "
+        "(2) fit to her taste, (3) any energy ratings. Recommend exactly one, in "
+        "2-4 short plain-text lines (no markdown, no em dashes): name it, say why "
+        "it wins, and name the runner-up in one line. Be decisive.\n\n"
+        + (f"Her taste:\n{taste}\n\n" if taste else "")
+        + f"Candidates:\n{listing}"
+    )
+    model = next(
+        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+         + _observe.resolve_models()
+         if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
+        None,
+    )
+    if model is None:
+        return "No model available to weigh them, tell Yiya to try again shortly."
+    if _observe.provider_for(model)["name"] == "anthropic":
+        rec = _observe.chat_with_mcp(
+            "You are Argo, a decisive frontier scout.",
+            [{"role": "user", "content": prompt}], model, temperature=0.2,
+        )
+    else:
+        rec = _observe.generate_observations(prompt, model, temperature=0.2)
+    return rec.strip() + "\n\nReply SELECT to lock in my pick, or name another to go with."
+
+
+@mcp.tool()
 @with_deadline(120)  # a full model call to draft the kickoff plan
-def scaffold_project() -> str:
-    """Produce a concrete kickoff plan for the LATEST project so Yiya can start
-    building this weekend: the repo skeleton to create, the first 2-3 files or
-    commands, and the very first thing to build. Use after she SELECTs a project
+def scaffold_project(project_id: str = "") -> str:
+    """Produce a concrete kickoff plan so Yiya can start building this weekend:
+    the repo skeleton to create, the first 2-3 files or commands, and the very
+    first thing to build. Defaults to the LATEST project; pass a project_id (e.g.
+    'P-002') to scaffold a specific selected one. Use after she SELECTs a project
     or asks 'how do I start / scaffold me / help me get going'. Returns a plan to
     show her; writes no files."""
     import json as _json
     import argo_observe as _observe
 
     if not PROJECTS_LOG.exists():
-        return "No project to scaffold yet — generate one first."
+        return "No project to scaffold yet, generate one first."
     try:
         log = _json.loads(PROJECTS_LOG.read_text())
     except (ValueError, _json.JSONDecodeError):
         return "Project log is unreadable."
     if not log:
-        return "No project to scaffold yet — generate one first."
-    project = log[-1].get("text", "")
+        return "No project to scaffold yet, generate one first."
+    if project_id:
+        entry = next((p for p in log if p.get("id") == project_id), None)
+        if entry is None:
+            return f"Couldn't find {project_id} to scaffold."
+    else:
+        entry = log[-1]
+    project = entry.get("text", "")
 
     prompt = (
         "You are Argo, helping Yiya actually START the project below this "
@@ -611,7 +703,7 @@ def scaffold_project() -> str:
         None,
     )
     if model is None:
-        return "No model available to draft the plan — tell Yiya to try again shortly."
+        return "No model available to draft the plan, tell Yiya to try again shortly."
     if _observe.provider_for(model)["name"] == "anthropic":
         return _observe.chat_with_mcp(
             "You are Argo, a terse frontier scout helping a builder start.",

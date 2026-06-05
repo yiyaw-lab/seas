@@ -6,7 +6,6 @@
     "text": "\u2693 Argo\n\nI've been watching something.\n\nDeployBench\u2019s runs often die before any code executes \u2014 the environment never stands up on a clean box.\nA tiny HN app schedules dough by working backwards from serve time.\nIf we plan artifact setup backwards from \u201crun main.py at T=0,\u201d we can pull long poles (datasets, CUDA, builds) forward and make first run predictable.\n\nThis week's bet:\nT-0 Repro Scheduler\n\nA CLI that takes a repo + target command + time budget, detects downloads/builds/drivers, and emits a backward plan that prefetches, parallelizes, and prelayers caches to hit T-0 on a fresh machine. Validate on 5\u201310 DeployBench artifacts.\n\nArtifact:\nRepo + short report with per-artifact critical-path Gantt and before/after time-to-first-run, plus a 2\u2011min demo.\n\nEffort:\nA week\n\nPotential upside:\nTurns environment bring-up from best\u2011effort to SLA\u2011driven; a primitive \u201cdeadline compiler\u201d agents and CI can lean on, lifting reproducibility and agent reliability across research stacks.",
     "energy": null,
     "rated_at": null,
-    "selected": true,
-    "selected_at": "2026-06-05 22:37 UTC"
+    "source": "argo"
   }
 ]

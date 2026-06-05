@@ -50,8 +50,11 @@ def project_invite(project_id):
             "another.")
 
 
-def log_project(project_text, model):
-    """Append a project entry and return its id. Rating attaches to this later."""
+def log_project(project_text, model, source="argo"):
+    """Append a project entry and return its id. Rating attaches to this later.
+
+    `source` is "argo" for a generated project or "yiya" for one she brought, so
+    recommend_project can weigh both kinds as candidates side by side."""
     log = []
     if PROJECTS_LOG.exists():
         log = json.loads(PROJECTS_LOG.read_text())
@@ -61,6 +64,7 @@ def log_project(project_text, model):
         "id": project_id,
         "date": TODAY,
         "model": model,
+        "source": source,
         "text": project_text,
         "energy": None,   # filled by argo_rate.py when you reply on Telegram
         "rated_at": None,
@@ -216,6 +220,57 @@ def make_project(refresh=True):
     text, model = result
     text = text.strip()
     project_id = log_project(text, model)
+    return project_id, text, model
+
+
+SHAPE_INSTRUCTIONS = """You are Argo. Yiya brought you a project idea of her own.
+Shape it into the SAME format you use for your own bets, so it sits comparably
+next to them — but stay true to HER idea; sharpen it, don't replace it. Plain
+text, no markdown, no em dashes.
+
+⚓ Argo
+
+I've been watching something.
+
+<1-3 short lines: the real insight under her idea, grounded and specific>
+
+This week's bet:
+<a short, vivid name for HER project>
+
+<one or two sentences: what to build this week>
+
+Artifact:
+<the public thing it produces>
+
+Effort:
+<one of: An evening / A weekend / A few days / A week>
+
+Potential upside:
+<why it matters, honest, not inflated>
+
+Output only the message. Here is her idea:
+"""
+
+
+def shape_idea_into_project(idea):
+    """Turn Yiya's rough idea into the standard project shape, log it as her
+    candidate (source 'yiya'), and return (project_id, text, model). None if no
+    model is available. Folds in her taste so the shaping respects it."""
+    taste_block = ""
+    try:
+        import taste_signals
+        taste = taste_signals.format_for_prompt()
+        if taste:
+            taste_block = f"\n\n(Keep these preferences in mind: {taste})"
+    except Exception:
+        pass
+    prompt = f"{SHAPE_INSTRUCTIONS}{idea.strip()}{taste_block}"
+    result, _ = generate_project(prompt)
+    if result is None:
+        return None
+    text, model = result
+    text = text.strip()
+    project_id = log_project(text, model, source="yiya")
     return project_id, text, model
 
 
