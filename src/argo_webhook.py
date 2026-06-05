@@ -333,6 +333,89 @@ def _parse_rating(text):
     return int(m.group(1)) if m else None
 
 
+# --- Responsiveness: instant ack + "still working" heartbeat ----------------
+# Argo's tool loop runs server-side (the Anthropic MCP connector), so a turn that
+# reads the web / opens a PR can take 30-120s with NO output. The user is left
+# wondering if their message even sent. Fix: acknowledge instantly, then send a
+# periodic heartbeat while the model works, so there's always a sign of life.
+# We can't show WHICH tool (that loop is remote), only that Argo is still on it.
+
+HEARTBEAT_EVERY = 15  # seconds between "still working" nudges
+
+# Messages that tend to trigger tool use (web/repo/PR) and thus run long. We ack
+# these specifically; a plain "hey" gets the normal fast reply with no ack noise.
+_TOOL_HINTS = (
+    "fetch", "read", "look up", "search", "latest", "what's new", "whats new",
+    "add ", "feed", "propose", "pr ", "open a", "repo", "github", "check",
+    "health", "status", "verify", "find", "investigate",
+)
+
+
+def _likely_slow(text):
+    """Heuristic: will this turn probably hit a tool (and so run long)? Used to
+    decide whether to send an instant ack. Long messages also tend to be meaty."""
+    t = text.lower()
+    return len(text) >= 160 or any(h in t for h in _TOOL_HINTS)
+
+
+def _ack_text(text):
+    """A short, in-voice acknowledgment. Plain, no filler (per the persona)."""
+    t = text.lower()
+    if "add " in t and "feed" in t:
+        return "on it, vetting those feeds now."
+    if any(h in t for h in ("github", "repo", "read", "propose", "pr ")):
+        return "on it, give me a sec."
+    if any(h in t for h in ("latest", "what's new", "whats new", "search", "find")):
+        return "looking now, one sec."
+    return "on it."
+
+
+class _Heartbeat:
+    """Sends a periodic 'still working' message until stopped. Daemon timer, so
+    it can never keep the process alive or outlive the turn."""
+
+    def __init__(self, every=HEARTBEAT_EVERY):
+        self._every = every
+        self._stop = threading.Event()
+        self._thread = None
+        self._beats = 0
+
+    def _run(self):
+        # Escalating, honest nudges — not the same line every time.
+        lines = ["still working...", "still on it, this one's taking a moment.",
+                 "hang tight, almost there."]
+        while not self._stop.wait(self._every):
+            msg = lines[min(self._beats, len(lines) - 1)]
+            self._beats += 1
+            try:
+                send_telegram.send_message(msg)
+            except Exception:
+                break  # never let a heartbeat failure crash the turn
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+
+def _reply_with_progress(chat_id, text):
+    """Run a normal LLM turn, but acknowledge instantly and heartbeat while it
+    works, so the user always knows the message landed and Argo is still going."""
+    if _likely_slow(text):
+        try:
+            send_telegram.send_message(_ack_text(text))
+        except Exception:
+            pass  # an ack failure must not block the real reply
+    hb = _Heartbeat()
+    hb.start()
+    try:
+        return _llm_reply(chat_id, text)
+    finally:
+        hb.stop()
+
+
 def _record_rating(value):
     """Apply a 1-10 to the latest unrated project. Returns a status string."""
     if not PROJECTS_LOG.exists():
@@ -378,7 +461,7 @@ def handle_update(update):
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
         return
 
-    reply = _llm_reply(chat_id, text)
+    reply = _reply_with_progress(chat_id, text)
     send_telegram.send_message(reply)
 
 
