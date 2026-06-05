@@ -17,3 +17,6 @@ COST_PLAYBOOK.md
 
 # Transient daily-budget counter (argo_guard)
 data/argo_budget.json
+
+# Transient pending self-heal action (argo_mcp_server L1)
+data/argo_pending_heal.json
