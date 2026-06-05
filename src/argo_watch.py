@@ -39,6 +39,7 @@ SEEN_PATH = ROOT / "data" / "argo_seen.json"
 PER_FEED = 10          # consider this many recent items per feed
 MAX_ALERTS = 3         # cap alerts per run so the phone doesn't blow up
 SEEN_CAP = 2000        # keep the seen-store bounded
+MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
 
 def _item_id(item):
@@ -47,24 +48,43 @@ def _item_id(item):
 
 
 def load_seen():
-    if SEEN_PATH.exists():
-        try:
-            return json.loads(SEEN_PATH.read_text())
-        except (json.JSONDecodeError, ValueError):
-            return []
-    return []
+    """Return the seen-store as {id: attempts}.
+
+    Backward-compatible: the old format was a flat list of ids. We read those as
+    already-settled (attempts == MAX_ATTEMPTS) so they're never re-judged.
+    """
+    if not SEEN_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SEEN_PATH.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if isinstance(data, list):
+        return {i: MAX_ATTEMPTS for i in data}
+    return data
 
 
 def save_seen(seen):
-    SEEN_PATH.write_text(json.dumps(seen[-SEEN_CAP:], indent=2) + "\n")
+    """Persist the seen-store, bounded to the most recent SEEN_CAP entries.
+
+    dict preserves insertion order, so slicing the items keeps the newest.
+    """
+    bounded = dict(list(seen.items())[-SEEN_CAP:])
+    SEEN_PATH.write_text(json.dumps(bounded, indent=2) + "\n")
 
 
-def collect_new(seen_ids):
-    """Fetch all feeds, return new (unseen) items as a flat list."""
+def collect_new(seen):
+    """Fetch all feeds, return items still eligible for judging.
+
+    An item is eligible if it's never been seen, or has been seen but not yet
+    settled (fewer than MAX_ATTEMPTS un-alerted judgings). Settled means either
+    alerted (recorded at MAX_ATTEMPTS) or judged-and-skipped MAX_ATTEMPTS times.
+    """
     new = []
     for label, url in fetch_signals.FEEDS:
         for item in fetch_signals.fetch_feed(label, url)[:PER_FEED]:
-            if _item_id(item) and _item_id(item) not in seen_ids:
+            iid = _item_id(item)
+            if iid and seen.get(iid, 0) < MAX_ATTEMPTS:
                 new.append(item)
     return new
 
@@ -114,13 +134,15 @@ def judge(new_items):
         print("No API key available for the judge — skipping.")
         return []
 
+    # temperature=0: a deterministic verdict so the same items don't flip
+    # between runs (the bug that re-sent already-delivered drops).
     if observe.provider_for(model)["name"] == "anthropic":
         raw = observe.chat_with_mcp(
             "You are Argo, a terse frontier scout.",
-            [{"role": "user", "content": prompt}], model,
+            [{"role": "user", "content": prompt}], model, temperature=0,
         )
     else:
-        raw = observe.generate_observations(prompt, model)
+        raw = observe.generate_observations(prompt, model, temperature=0)
 
     raw = _clean_reply(raw.strip())
     if not raw or raw.strip().upper() == "NONE":
@@ -141,14 +163,21 @@ def judge(new_items):
     return alerts[:MAX_ALERTS]
 
 
+def _was_alerted(item, alerts):
+    """True if this item's link/title appears in any alert line we're sending."""
+    link = (item.get("link") or "").strip().lower()
+    title = (item.get("title") or "").strip().lower()
+    blob = " ".join(alerts).lower()
+    return bool((link and link in blob) or (title and title in blob))
+
+
 def main():
     no_send = "--no-send" in sys.argv
 
     seen = load_seen()
-    seen_ids = set(seen)
 
-    new_items = collect_new(seen_ids)
-    print(f"\n📡 Argo Watch — {len(new_items)} new items since last check")
+    new_items = collect_new(seen)
+    print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
     alerts = judge(new_items)
 
@@ -161,14 +190,29 @@ def main():
             if not no_send:
                 send_telegram.send_message(f"🛰️ Argo spotted something:\n\n{a}")
 
-    # Record ALL new items as seen (alerted or not) so we don't repeat them.
-    if not no_send:
-        seen.extend(_item_id(it) for it in new_items if _item_id(it))
-        save_seen(seen)
-        print(f"\nRecorded {len(new_items)} items as seen "
-              f"({SEEN_PATH.relative_to(ROOT)}).")
-    else:
+    if no_send:
         print("\n(--no-send: nothing sent, seen-store NOT updated)")
+        print("\n✅ Watch complete.\n")
+        return
+
+    # Update the seen-store. An ALERTED item is settled (recorded at
+    # MAX_ATTEMPTS so it's never reconsidered). An un-alerted item gets its
+    # attempt count bumped, so a real drop the non-deterministic judge skipped
+    # gets a few more shots before retiring -- instead of being lost forever.
+    alerted = skipped = 0
+    for it in new_items:
+        iid = _item_id(it)
+        if not iid:
+            continue
+        if _was_alerted(it, alerts):
+            seen[iid] = MAX_ATTEMPTS
+            alerted += 1
+        else:
+            seen[iid] = seen.get(iid, 0) + 1
+            skipped += 1
+    save_seen(seen)
+    print(f"\nSeen-store: settled {alerted} alerted, bumped {skipped} un-alerted "
+          f"({SEEN_PATH.relative_to(ROOT)}).")
 
     print("\n✅ Watch complete.\n")
 
