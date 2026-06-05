@@ -567,6 +567,56 @@ def read_findings(name: str = "") -> str:
 # AND Argo inspect the accumulated profile; save_taste_signal lets Argo persist a
 # taste lesson from a source she pointed it at.
 
+# What each expected env var GATES — so Argo can report a MISSING secret as a
+# concrete capability loss ("no GITHUB_TOKEN -> can't read private repos"),
+# instead of a vague "I need a token." Presence is checked; VALUES are never read
+# or returned. This is the fix for the recurring "Argo can't do X" rounds that
+# trace to a missing secret it couldn't name.
+_CONFIG_SURFACE = [
+    ("ANTHROPIC_API_KEY", "think (primary chat + synthesis model)", True),
+    ("TELEGRAM_BOT_TOKEN", "send/receive Telegram messages", True),
+    ("TELEGRAM_CHAT_ID", "know which chat to reply in", True),
+    ("WEBHOOK_URL", "self-register the webhook + reach own MCP tools", True),
+    ("ARGO_MCP_TOKEN", "use my own tools (web_fetch, github, etc.)", True),
+    ("GITHUB_TOKEN", "read private repos (github_read_file/github_list)", False),
+    ("ARGO_PROPOSE_TOKEN", "draft PRs (propose_change / self-create)", False),
+    ("FIRECRAWL_API_KEY", "topical search + JS/403 fetch fallback", False),
+    ("OPENAI_API_KEY", "gpt fallback / models", False),
+    ("ARGO_CHAT_LOG", "persist chat memory across redeploys", False),
+]
+
+
+@mcp.tool()
+@with_deadline(10)
+def check_config() -> str:
+    """Report which of my expected secrets/config are PRESENT vs MISSING, and what
+    each missing one stops me doing — so you can fix the right one. Use when you
+    hit 'I can't do X, I need a token/access': call this and name the exact
+    missing var instead of guessing. SECURITY: reports presence only, NEVER a
+    secret's value."""
+    have, missing_core, missing_opt = [], [], []
+    for var, gates, core in _CONFIG_SURFACE:
+        present = bool(os.environ.get(var) or
+                       (var == "GITHUB_TOKEN" and os.environ.get("GH_TOKEN")))
+        if present:
+            have.append(var)
+        elif core:
+            missing_core.append((var, gates))
+        else:
+            missing_opt.append((var, gates))
+    lines = [f"Config check ({len(have)} set):"]
+    if missing_core:
+        lines.append("MISSING (core — I'm degraded without these):")
+        lines += [f"  - {v}: without it I can't {g}" for v, g in missing_core]
+    if missing_opt:
+        lines.append("MISSING (optional — these capabilities are off):")
+        lines += [f"  - {v}: without it I can't {g}" for v, g in missing_opt]
+    if not missing_core and not missing_opt:
+        lines.append("All expected config is present.")
+    lines.append(f"Present: {', '.join(have)}.")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 @with_deadline(10)
 def read_taste() -> str:
