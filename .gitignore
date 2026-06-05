@@ -20,3 +20,6 @@ data/argo_budget.json
 
 # Transient pending self-heal action (argo_mcp_server L1)
 data/argo_pending_heal.json
+
+# Transient schedule dedupe state (argo_scheduled)
+data/schedule_state.json
