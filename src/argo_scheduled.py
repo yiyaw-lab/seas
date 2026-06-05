@@ -43,14 +43,31 @@ def _as_list(v):
     return v if isinstance(v, list) else [v]
 
 
-def _matches(sched, now):
-    """True if this schedule should fire at `now` (UTC)."""
+# How many hours late a delayed cron tick may still fire a missed window.
+# GitHub's scheduled runs are routinely delayed under load and can land in a
+# later UTC hour than the cron requested, which would otherwise skip the window
+# entirely. The per-window/day dedupe (see _fire_key) keeps this from re-sending.
+GRACE_HOURS = 3
+
+
+def _due_hour(sched, now):
+    """Return the scheduled hour this run should fire for (UTC), or None.
+
+    A window is due if `now` is at or up to GRACE_HOURS after its scheduled
+    hour on the same UTC day, so a delayed cron tick still fires it instead of
+    skipping it. Returns the *scheduled* hour (not now.hour) so the dedupe key
+    is stable across the grace window.
+    """
     if not sched.get("enabled", True):
-        return False
+        return None
     days = sched.get("days", "daily")
     if days != "daily" and now.weekday() not in _as_list(days):
-        return False
-    return now.hour in _as_list(sched.get("hour", []))
+        return None
+    # Pick the latest scheduled hour we're within grace of (handles back-to-back
+    # windows); never fire a future hour.
+    candidates = [h for h in _as_list(sched.get("hour", []))
+                  if 0 <= now.hour - h <= GRACE_HOURS]
+    return max(candidates) if candidates else None
 
 
 def _load(path, default):
@@ -62,9 +79,14 @@ def _load(path, default):
     return default
 
 
-def _fire_key(sched, now):
-    """Dedupe key: one fire per schedule per UTC hour."""
-    return f"{sched.get('name', sched.get('command'))}@{now:%Y-%m-%dT%H}"
+def _fire_key(sched, now, target_hour):
+    """Dedupe key: one fire per schedule per scheduled window per UTC day.
+
+    Keyed on the *scheduled* hour, not now's hour, so a window fired late within
+    the grace period maps to the same key it would have at its exact hour.
+    """
+    name = sched.get("name", sched.get("command"))
+    return f"{name}@{now:%Y-%m-%d}T{target_hour:02d}"
 
 
 def run_command(command):
@@ -85,16 +107,19 @@ def main():
         cmd = sched.get("command")
         if cmd not in COMMANDS:
             continue
-        if _matches(sched, now) and _fire_key(sched, now) not in fired:
-            due.append(sched)
+        target_hour = _due_hour(sched, now)
+        if target_hour is None:
+            continue
+        if _fire_key(sched, now, target_hour) not in fired:
+            due.append((sched, target_hour))
 
     print(f"\n⏰ Argo schedule runner — {now:%Y-%m-%d %H:%M UTC}")
     if not due:
         print("Nothing due this hour.\n")
         return
 
-    for sched in due:
-        key = _fire_key(sched, now)
+    for sched, target_hour in due:
+        key = _fire_key(sched, now, target_hour)
         print(f"  -> {sched.get('name')} [{sched['command']}]"
               + (" (dry-run)" if dry else ""))
         if dry:
