@@ -12,6 +12,8 @@
     { "label": "GitHub Changelog", "url": "https://github.blog/changelog/feed/" },
     { "label": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/" },
     { "label": "arXiv cs.SE", "url": "https://export.arxiv.org/rss/cs.SE" },
-    { "label": "Simon Willison's Blog", "url": "https://simonwillison.net/atom/everything/" }
+    { "label": "Simon Willison's Blog", "url": "https://simonwillison.net/atom/everything/" },
+    { "label": "Interconnects (Nathan Lambert)", "url": "https://www.interconnects.ai/feed.xml" },
+    { "label": "LessWrong AI", "url": "https://www.lesswrong.com/feed.xml?view=communityAll&karmaThreshold=50" }
   ]
 }
