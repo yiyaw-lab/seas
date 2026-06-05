@@ -297,6 +297,7 @@ def github_list(repo: str, path: str = "") -> str:
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
 SIGNALS_PATH = ROOT / "data" / "signals.json"
+FINDINGS_DIR = ROOT / "findings"
 
 
 @mcp.tool()
@@ -370,6 +371,51 @@ def get_signal_freshness() -> str:
         n = "?"
     return (f"{n} signals, last refreshed {mtime:%Y-%m-%d %H:%M UTC} "
             f"({age_h:.1f}h ago).")
+
+
+# --- V3 H0.1: read SEAS findings (the SEAS->Argo coupling) -------------------
+# SEAS produces findings (findings/F-*.md) — what the research engine believes is
+# true. Until now they sat in a directory Argo never read. This tool lets Argo
+# (and the V3 critic) read them, so an insight can be grounded in / checked
+# against what SEAS has actually found. Read-only local files, same risk class as
+# the Phase D self-status tools.
+
+def _list_findings():
+    """Return findings/F-*.md paths, sorted (F-001, F-002, ...)."""
+    if not FINDINGS_DIR.exists():
+        return []
+    return sorted(FINDINGS_DIR.glob("F-*.md"))
+
+
+@mcp.tool()
+def read_findings(name: str = "") -> str:
+    """Read SEAS research findings — what the research engine has concluded is
+    true (e.g. F-001). Call with no name to list all findings (id + title);
+    call with a finding id or filename (e.g. 'F-001') to read its full text.
+    Use this to ground an insight in, or check it against, what SEAS has found."""
+    paths = _list_findings()
+    if not paths:
+        return "No findings yet (findings/ is empty)."
+
+    if not name:
+        # List mode: id + first heading line of each, so Argo can pick one.
+        lines = []
+        for p in paths:
+            first = ""
+            for ln in p.read_text().splitlines():
+                if ln.strip():
+                    first = ln.lstrip("# ").strip()
+                    break
+            lines.append(f"{p.stem}: {first}")
+        return "\n".join(lines)
+
+    # Read mode: match by stem prefix (so 'F-001' finds 'F-001-cognitive-...').
+    key = name.strip().lower().removesuffix(".md")
+    match = next((p for p in paths if p.stem.lower().startswith(key)), None)
+    if match is None:
+        avail = ", ".join(p.stem for p in paths)
+        return f"No finding matches '{name}'. Available: {avail}."
+    return match.read_text()[:MAX_FETCH_CHARS]
 
 
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
