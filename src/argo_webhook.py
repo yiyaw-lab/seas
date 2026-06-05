@@ -153,7 +153,12 @@ SYSTEM_PROMPT = (
     "for a concrete plan to begin building this weekend. If the reason she wants "
     "another is that it's TOO COMPLEX / over her head / she can't follow it, call "
     "project_too_complex INSTEAD of new_project — it both teaches Argo to keep "
-    "future projects approachable AND gives her a simpler one.\n"
+    "future projects approachable AND gives her a simpler one. "
+    "BRING-YOUR-OWN: if SHE proposes a project idea ('I want to build X', 'add my "
+    "idea: ...'), call add_project to capture it as a candidate shaped like your "
+    "own bets. When she asks what to ship / build this week or 'which one / help "
+    "me decide', call recommend_project to weigh ALL open candidates (hers and "
+    "yours) and recommend one. So you help her DECIDE, not just generate.\n"
     "\n"
     "TOOLS: If Yiya pastes or names ANY specific url for you to read or study — "
     "even one off your usual sources (a product page, a random blog, conductor."
@@ -476,15 +481,22 @@ def _record_rating(value):
     return f"Logged energy {value}/10 for {target['id']}. 👍"
 
 
-def _select_latest_project():
-    """Mark the most recent project as selected (the one Yiya committed to with
-    SELECT). Returns its id, or None if there's nothing to select."""
+def _select_latest_project(project_id=None):
+    """Mark a project as selected. With no id, marks the most recent (bare
+    SELECT); with an id (e.g. 'SELECT P-002'), marks that specific candidate, so
+    she can lock in a recommended one that isn't the latest. Returns its id, or
+    None if there's nothing/no match to select."""
     if not PROJECTS_LOG.exists():
         return None
     log = json.loads(PROJECTS_LOG.read_text())
     if not log:
         return None
-    target = log[-1]
+    if project_id:
+        target = next((p for p in log if p.get("id") == project_id), None)
+        if target is None:
+            return None
+    else:
+        target = log[-1]
     from datetime import datetime, timezone
     target["selected"] = True
     target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -616,20 +628,22 @@ def handle_update(update):
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
         return
 
-    # SELECT gate: Yiya commits to the latest project. Mark it selected, then
-    # hand her a concrete kickoff plan so she can start building. Kept upstream of
-    # the model (like CONFIRM) so a plain "SELECT" deterministically locks in and
-    # scaffolds, rather than depending on the LLM to interpret it.
-    if word == "SELECT":
-        pid = _select_latest_project()
+    # SELECT gate: Yiya commits to a project. Bare "SELECT" locks in the latest;
+    # "SELECT P-00x" locks in a specific candidate (e.g. the one recommend_project
+    # named, which may not be the latest). Then she gets a kickoff plan. Kept
+    # upstream of the model (like CONFIRM) so selection is deterministic.
+    if word == "SELECT" or word.startswith("SELECT "):
+        requested = word.split(maxsplit=1)[1] if " " in word else None
+        pid = _select_latest_project(requested)
         if pid is None:
             send_telegram.send_message(
-                "Nothing to select yet, ask me for a project first.")
+                f"Couldn't find {requested} to select." if requested
+                else "Nothing to select yet, ask me for a project first.")
             return
         import argo_mcp_server
         send_telegram.send_message(f"Locked in {pid}. Let me get you a kickoff plan.")
         try:
-            send_telegram.send_message(argo_mcp_server.scaffold_project())
+            send_telegram.send_message(argo_mcp_server.scaffold_project(pid))
         except Exception as exc:
             send_telegram.send_message(
                 f"Selected {pid}, but I hit a snag drafting the plan "
