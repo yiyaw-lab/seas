@@ -112,12 +112,18 @@ Rules:
 """
 
 
+# A weekly project needs real raw material to synthesize a non-obvious bet. The
+# observation path uses 3 signals (a tight noticing); project generation starves
+# on that and pads, so pull a wider slice of the (refreshed) frontier here.
+PROJECT_SIGNALS = 10
+
+
 def build_project_prompt():
     # Insight comes purely from the fresh signals. We deliberately do NOT pin a
     # prior finding (e.g. F-001) into the prompt: a single strong finding anchors
     # every insight to its theme, which is what made past projects all look the
     # same. Themes should follow the actual news.
-    signals = observe.load_signals()
+    signals = observe.load_signals(limit=PROJECT_SIGNALS)
     signals_block = observe.format_signals(signals)
 
     # Fold in recent taste signals (lessons from screenshots Yiya sent) so the
@@ -175,6 +181,19 @@ def generate_project(prompt):
 
 def main():
     no_send = "--no-send" in sys.argv
+
+    # Refresh the signal store from the live frontier feeds first, so the project
+    # is built from today's news, not a stale snapshot. Best-effort: if the fetch
+    # fails (network/feeds down), fall back to whatever's already in the store
+    # rather than blocking the weekly project.
+    try:
+        import fetch_signals
+        fetch_signals.main()
+    except SystemExit:
+        print("Signal refresh found nothing new; using the existing store.")
+    except Exception as exc:
+        print(f"Signal refresh failed ({type(exc).__name__}: {exc}); "
+              "using the existing store.")
 
     prompt, signals = build_project_prompt()
 
