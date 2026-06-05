@@ -70,8 +70,10 @@ finding below, produce ONE fresh project worth building this week — but earn i
 by NOTICING first.
 
 Think in this order (internally):
-1. Observation — what is everyone focused on, and what are they walking past?
-   Use the "everyone / but" move.
+1. Observation — something specific and concrete you actually notice in the
+   signals below. A real detail, not a manufactured "everyone is doing X but few
+   do Y" framing. Do NOT use the "everyone is captivated by / but few explore"
+   move — it reads like a pitch deck. Just say the true, specific thing you see.
 2. Insight — if that observation is true, what follows that nobody is saying yet?
    The insight is the point. The project is its consequence.
 3. Bet — the smallest concrete project that tests or exploits the insight.
@@ -102,6 +104,8 @@ Potential upside:
 
 Rules:
 - The insight must be something the reader likely would NOT have thought of.
+- Open with the concrete thing you noticed, not a sweeping "everyone is focused
+  on X" generalization. Ground it in a specific signal.
 - Do not output your internal observation/insight steps as separate sections —
   fold them into the message above.
 - Output only the message, nothing else.

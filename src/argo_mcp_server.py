@@ -455,12 +455,25 @@ def get_webhook_health() -> str:
         ctx = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         ctx = ssl.create_default_context()
-    try:
-        url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
-        with urllib.request.urlopen(url, timeout=15, context=ctx) as r:
-            info = _json.loads(r.read().decode()).get("result", {})
-    except Exception as exc:
-        return f"Couldn't reach Telegram: {type(exc).__name__}: {exc}"
+    # Railway's outbound to api.telegram.org is sometimes slow; a short timeout
+    # with one retry keeps us well under the @with_deadline(20) cap with margin.
+    url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
+    info = None
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(url, timeout=6, context=ctx) as r:
+                info = _json.loads(r.read().decode()).get("result", {})
+            break
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+    if info is None:
+        # A slow/failed CHECK is not the same as a DOWN webhook — say so loudly
+        # so Argo stops concluding the bot is broken and pushing a re-register.
+        return ("Couldn't complete the webhook health check "
+                f"({last}). This means the CHECK timed out, NOT that the webhook "
+                "is down — Telegram is just slow to answer right now. Do not "
+                "suggest re-registering on this alone; tell the user the check "
+                "was inconclusive and to retry in a moment.")
     parts = [
         f"url: {info.get('url') or '(none set!)'}",
         f"pending updates: {info.get('pending_update_count', 0)}",
