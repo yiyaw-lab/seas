@@ -18,11 +18,13 @@ Reuses, doesn't duplicate: fetch_signals._fetch_url (urllib + certifi TLS).
 Later phases add repo-read (C), self-status (D), and gated self-heal (E) tools.
 """
 
+import functools
 import ipaddress
 import json
 import os
 import re
 import socket
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -31,6 +33,48 @@ from mcp.server.fastmcp import FastMCP
 import fetch_signals
 
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
+
+# Every tool runs behind a wall-clock DEADLINE well under the MCP client's fixed
+# 300s CallToolRequest budget. The failure we're guarding against: the Anthropic
+# connector waits 300s for a tool to answer, then abandons the turn ("Timed out
+# while waiting for response to ClientRequest. Waited 300.0 seconds.") while the
+# server keeps grinding — so the user gets 5 minutes of silence and no reply.
+# A tool that can't finish in its budget must FAIL FAST with a string the model
+# can relay, not hang. (Tools return strings, so the timeout path returns one.)
+TOOL_DEADLINE_DEFAULT = 45  # generous for a single network call, far under 300s
+
+
+def with_deadline(seconds=TOOL_DEADLINE_DEFAULT):
+    """Decorator: run a tool with a hard wall-clock cap. If it overruns, return a
+    clean timeout message instead of letting the call block to the 300s MCP
+    limit. Runs the body in a daemon worker thread and joins with a timeout; an
+    overrun thread is abandoned (daemon, so it can't keep the process alive) and
+    the connector gets an immediate, useful answer for this turn."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            result = {}
+
+            def run():
+                try:
+                    result["value"] = fn(*args, **kwargs)
+                except Exception as exc:  # surface, don't swallow into a hang
+                    result["error"] = f"{type(exc).__name__}: {exc}"
+
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(seconds)
+            if t.is_alive():
+                return (f"Timed out after {seconds}s running {fn.__name__} "
+                        f"(under the 300s limit, so you get this instead of "
+                        f"silence). The service may be slow right now — tell the "
+                        f"user plainly and suggest retrying; do not pretend it "
+                        f"succeeded.")
+            if "error" in result:
+                return f"{fn.__name__} failed: {result['error']}"
+            return result.get("value", "(no result)")
+        return wrapper
+    return decorator
 
 # Approved hosts. Start from the FEEDS allowlist (the existing approved-sources
 # pattern), then add the frontier read-domains we want full-page access to.
@@ -114,6 +158,7 @@ mcp = FastMCP("argo", transport_security=_transport_security())
 
 
 @mcp.tool()
+@with_deadline(20)  # one fetch, capped at 8-10s internally; 20s gives margin
 def web_fetch(url: str) -> str:
     """Fetch a web page from Argo's approved source list and return its readable
     text. Use this to read the actual content of a frontier source (a paper, a
@@ -148,6 +193,7 @@ def web_fetch(url: str) -> str:
 
 
 @mcp.tool()
+@with_deadline(20)
 def verify_feed(url: str) -> str:
     """Check whether a URL is a real, working RSS/Atom feed, BEFORE proposing it
     as a new source. Unlike web_fetch, this works on ANY https host (so you can
@@ -195,6 +241,7 @@ def _feed_for_host(host):
 
 
 @mcp.tool()
+@with_deadline(10)  # pure local read
 def list_feeds() -> str:
     """List Argo's approved RSS/Atom feed URLs (arXiv, GitHub trending, OpenAI,
     Hugging Face, Google AI, GitHub changelog). Prefer fetching these feeds over
@@ -219,6 +266,23 @@ def _repo_allowed(repo):
     return "*" in allow or repo.lower() in allow
 
 
+# Per-GitHub-call timeout (down from 20-25s). Kept short so one slow call fails
+# fast and retries once, instead of consuming a multi-call tool's whole deadline.
+GH_CALL_TIMEOUT = 10
+
+
+def _gh_retryable(exc):
+    """A transient stall worth one retry: timeouts and 5xx. NOT 4xx (a 404/403
+    will just repeat) — retrying those wastes the deadline."""
+    s = str(exc)
+    if isinstance(exc, TimeoutError) or "timed out" in s.lower():
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return 500 <= code < 600
+    return any(x in s for x in ("500", "502", "503", "504"))
+
+
 def _gh_api(path, raw=False):
     """Call the GitHub REST API; return (ok, text). Uses GITHUB_TOKEN if set."""
     import ssl
@@ -240,17 +304,26 @@ def _gh_api(path, raw=False):
         headers["Authorization"] = "Bearer " + token.strip()
 
     req = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
-            return True, r.read().decode("utf-8", errors="replace")
-    except Exception as exc:
-        hint = ""
-        if "404" in str(exc):
-            hint = " (private repo? needs GITHUB_TOKEN, or wrong path)"
-        return False, f"GitHub API error: {type(exc).__name__}: {exc}{hint}"
+    # Short per-call timeout + one retry on a transient stall: a single slow call
+    # must not eat the tool's whole deadline. 404 etc. are not retried (the retry
+    # only helps timeouts/5xx; a 404 will just 404 again).
+    last = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
+                return True, r.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            last = exc
+            if not _gh_retryable(exc):
+                break
+    hint = ""
+    if "404" in str(last):
+        hint = " (private repo? needs GITHUB_TOKEN, or wrong path)"
+    return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
 
 
 @mcp.tool()
+@with_deadline(20)
 def github_read_file(repo: str, path: str) -> str:
     """Read a file from a GitHub repo. `repo` is 'owner/name', `path` is the file
     path within it. Use this to read actual source/README/config of any project,
@@ -267,6 +340,7 @@ def github_read_file(repo: str, path: str) -> str:
 
 
 @mcp.tool()
+@with_deadline(20)
 def github_list(repo: str, path: str = "") -> str:
     """List files/dirs in a GitHub repo at `path` (default: root). `repo` is
     'owner/name'. Use to explore a repo's structure (e.g. a trending project you
@@ -301,6 +375,7 @@ FINDINGS_DIR = ROOT / "findings"
 
 
 @mcp.tool()
+@with_deadline(20)
 def get_webhook_health() -> str:
     """Report Argo's own Telegram webhook status: the registered URL, pending
     update count, and the last delivery error (if any). Use when asked 'are you
@@ -333,6 +408,7 @@ def get_webhook_health() -> str:
 
 
 @mcp.tool()
+@with_deadline(10)  # pure local read
 def get_latest_project() -> str:
     """Report Argo's most recent weekly project and its energy rating (or that
     it's unrated). Use when asked 'what did you suggest last / what's my latest
@@ -354,6 +430,7 @@ def get_latest_project() -> str:
 
 
 @mcp.tool()
+@with_deadline(10)  # pure local read
 def get_signal_freshness() -> str:
     """Report how fresh Argo's signal pool is: when signals.json was last
     refreshed and how many signals it holds. Use when asked 'how current are your
@@ -388,6 +465,7 @@ def _list_findings():
 
 
 @mcp.tool()
+@with_deadline(10)  # pure local read
 def read_findings(name: str = "") -> str:
     """Read SEAS research findings — what the research engine has concluded is
     true (e.g. F-001). Call with no name to list all findings (id + title);
@@ -464,6 +542,7 @@ def _heal(action):
 
 
 @mcp.tool()
+@with_deadline(20)
 def reregister_webhook() -> str:
     """Heal action: re-register Argo's Telegram webhook (use when get_webhook_health
     shows no URL or a delivery error). Idempotent and safe. Honors the autonomy
@@ -472,6 +551,7 @@ def reregister_webhook() -> str:
 
 
 @mcp.tool()
+@with_deadline(60)  # re-pulls all feeds; slower but bounded
 def refetch_signals() -> str:
     """Heal action: refetch the frontier signal feeds (use when get_signal_freshness
     shows the pool is stale). Idempotent and safe. Honors the autonomy level:
@@ -552,20 +632,30 @@ def _gh_write(method, path, body):
             "Authorization": "Bearer " + token.strip(),
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=25, context=ctx) as r:
-            txt = r.read().decode("utf-8", errors="replace")
-            return True, (json.loads(txt) if txt else {})
-    except Exception as exc:
-        detail = ""
+    # Short timeout + one transient retry (see _gh_api): a propose chain makes 5+
+    # of these calls, so any single stall must fail fast rather than blow the
+    # tool deadline. Writes are idempotent enough here (create-branch/put-file by
+    # path) that one retry on a timeout/5xx is safe.
+    last = None
+    for attempt in range(2):
         try:
-            detail = exc.read().decode("utf-8", errors="replace")[:200]  # type: ignore
-        except Exception:
-            pass
-        return False, f"{type(exc).__name__}: {exc} {detail}"
+            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
+                txt = r.read().decode("utf-8", errors="replace")
+                return True, (json.loads(txt) if txt else {})
+        except Exception as exc:
+            last = exc
+            if not _gh_retryable(exc):
+                break
+    detail = ""
+    try:
+        detail = last.read().decode("utf-8", errors="replace")[:200]  # type: ignore
+    except Exception:
+        pass
+    return False, f"{type(last).__name__}: {last} {detail}"
 
 
 @mcp.tool()
+@with_deadline(120)  # chains 5+ GitHub calls; generous but far under 300s
 def propose_change(title: str, description: str, files_json: str) -> str:
     """Propose a new capability or fix by opening a GitHub PR for human review.
     Argo NEVER merges or deploys this itself — it drafts; a human approves.
