@@ -42,6 +42,7 @@ from pathlib import Path
 
 import argo_observe as observe
 import fetch_signals
+import firecrawl_client
 import probes
 import seas_schema
 import world_model
@@ -143,11 +144,13 @@ def _extract_json(text):
 
 def _load_opportunity():
     """Pick the signal to investigate: the top qualifying opportunity if scored,
-    else the first signal that has a link. Returns (signal, related_signals)."""
+    else the first signal that has a link. Related sources are no longer pulled
+    from sibling signals (they share no topic) — they come from a topical search
+    in _gather_sources. Returns the chosen signal, or None."""
     signals = json.loads(SIGNALS_PATH.read_text()) if SIGNALS_PATH.exists() else []
     signals = [s for s in signals if s.get("link")]
     if not signals:
-        return None, []
+        return None
     chosen = signals[0]
     if OPPORTUNITIES_PATH.exists():
         try:
@@ -160,17 +163,75 @@ def _load_opportunity():
                     chosen = match
         except (json.JSONDecodeError, ValueError):
             pass
-    related = [s for s in signals if s["title"] != chosen["title"]][:3]
-    return chosen, related
+    return chosen
 
 
 def _signal_ref(signal):
     return "signal:" + re.sub(r"[^a-z0-9]+", "-", signal["title"].lower())[:50]
 
 
+def _search_category(signal):
+    """Map a signal's source to a Firecrawl search category for topical search."""
+    src = (signal.get("source") or "").lower()
+    if src.startswith("arxiv"):
+        return "research"
+    if "github" in src:
+        return "github"
+    return None  # company/blog -> general web search
+
+
+def _search_terms(signal):
+    """A search query for finding sources on the SAME topic as this signal.
+    Uses the title (the densest topic signal); drops arXiv id noise."""
+    title = re.sub(r"arXiv:\S+", "", signal.get("title", "")).strip()
+    return title[:200]
+
+
+def _gather_sources(signal, dry_run=False):
+    """Build a TOPICAL pool of sources to synthesize over. This is the fix for
+    the clustering gap: instead of reusing random sibling signals (which share
+    no topic), we (1) read the signal's own source, then (2) SEARCH for sources
+    about the same topic via Firecrawl. Convergence needs sources about one
+    thing; a stratified-diverse signal batch never had that.
+
+    Falls back to stdlib when Firecrawl is unavailable: at minimum we still get
+    the signal's own source, and the synthesis floor will honestly probe
+    'premature' (one source, no convergence) rather than fake a finding.
+    Returns a list of {"url","title","text"}.
+    """
+    import argo_mcp_server  # for the ALLOWED_HOSTS allowlist
+    sources = []
+
+    # (1) the signal's own source page.
+    own = _fetch_source(signal["link"])
+    if own:
+        sources.append({"url": signal["link"],
+                        "title": signal.get("title", ""), "text": own})
+
+    # (2) topically-related sources via Firecrawl search (the keystone).
+    related = firecrawl_client.search_related(
+        _search_terms(signal),
+        category=_search_category(signal),
+        limit=5,
+        allowed_hosts=argo_mcp_server.ALLOWED_HOSTS,
+    )
+    if related:
+        have = {s["url"] for s in sources}
+        for r in related:
+            if r["url"] not in have:
+                sources.append(r)
+                have.add(r["url"])
+    elif related is None and not dry_run:
+        # Firecrawl unavailable. We proceed with whatever we have (often just the
+        # signal's own source) — the gate will honestly probe premature.
+        print("  (firecrawl unavailable — synthesizing on the signal's source "
+              "alone; expect a 'premature' probe)")
+    return sources
+
+
 # --- the run -----------------------------------------------------------------
 
-def investigate(signal, related, dry_run=False):
+def investigate(signal, dry_run=False):
     """Investigate one opportunity end-to-end. Returns a status string."""
     sig_ref = _signal_ref(signal)
 
@@ -178,25 +239,27 @@ def investigate(signal, related, dry_run=False):
     if not ok and not dry_run:
         return f"Skipped {sig_ref}: {why}"
 
-    # Gather candidate sources: the signal's own link + related signals' links.
-    candidates = [signal["link"]] + [s["link"] for s in related if s.get("link")]
-    sources = []
-    for url in candidates:
-        text = _fetch_source(url)
-        if text:
-            sources.append({"url": url, "text": text})
+    # Gather a TOPICAL pool: the signal's own source + Firecrawl-searched related
+    # sources on the same topic. This is the clustering-gap fix (see
+    # _gather_sources): convergence needs sources about ONE thing.
+    sources = _gather_sources(signal, dry_run=dry_run)
 
     if len(sources) < MIN_SOURCES:
-        # Couldn't ground it — was it the topic (premature) or the tooling
-        # (unreachable)? If we hit fetch failures, it's unreachable + maybe heal.
-        reason = "could not fetch enough sources to synthesize"
+        # Too thin to look for cross-source convergence. Distinguish the cause:
+        # if the signal's own source failed to fetch, that's a tooling problem
+        # (unreachable -> failure ledger); otherwise the topic is just under-
+        # sourced right now (premature).
+        own_failed = not any(s["url"] == signal["link"] for s in sources)
+        reason = ("signal's own source unreachable" if own_failed
+                  else "no related sources found to corroborate against")
         if not dry_run:
-            outcome = "unreachable" if len(candidates) > len(sources) else "premature"
+            outcome = "unreachable" if own_failed else "premature"
             probes.record_probe(sig_ref, outcome, [s["url"] for s in sources],
-                                reason, cost={"fetches": len(candidates)})
-            _maybe_escalate(candidates)
+                                reason, cost={"sources": len(sources)})
+            if own_failed:
+                _maybe_escalate([signal["link"]])
             return f"No finding ({outcome}): {reason}"
-        return f"[dry-run] would probe (too few sources): {reason}"
+        return f"[dry-run] would probe ({len(sources)} sources): {reason}"
 
     # Build the synthesis job and call the model (guarded inside argo_observe).
     sources_block = "\n\n".join(
@@ -318,14 +381,15 @@ def _maybe_escalate(urls):
 
 def main():
     dry_run = "--dry-run" in sys.argv
-    signal, related = _load_opportunity()
+    signal = _load_opportunity()
     if signal is None:
         print("No signal with a source link to investigate. "
               "Run fetch_signals.py first.")
         return
+    mode = "firecrawl search" if firecrawl_client.is_enabled() else "stdlib only"
     print(f"\n🔬 SEAS Stage 1 — investigating: {signal['title'][:70]}")
-    print(f"   related sources: {len(related)}  | dry-run: {dry_run}\n")
-    result = investigate(signal, related, dry_run=dry_run)
+    print(f"   related-source mode: {mode}  | dry-run: {dry_run}\n")
+    result = investigate(signal, dry_run=dry_run)
     print("\n" + result + "\n")
 
 

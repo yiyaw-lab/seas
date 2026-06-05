@@ -180,6 +180,15 @@ def web_fetch(url: str) -> str:
         # stays responsive, rather than hanging the reply on one bad fetch.
         raw = fetch_signals._fetch_url(url, timeout=8)
     except Exception as exc:
+        # Fallback: if a direct fetch failed (often a 403 or JS-only page) AND
+        # Firecrawl is configured, try its scraper, which renders JS and gets
+        # past many bot blocks. The host is already allowlist-approved above, so
+        # this stays inside the security boundary. Optional: no key -> None ->
+        # we fall through to the original error message.
+        import firecrawl_client
+        scraped = firecrawl_client.scrape(url)
+        if scraped:
+            return scraped
         msg = f"Fetch failed: {type(exc).__name__}: {exc}"
         # Many sites (e.g. openai.com) 403 automated HTML requests but serve
         # their RSS feed fine. Point Argo at the feed for this host if we have it.

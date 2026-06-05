@@ -12,6 +12,10 @@ feedparser      # robust RSS/Atom parsing (stdlib fallback exists if absent)
 # Two-way Telegram chat webhook (src/argo_webhook.py)
 flask           # WSGI app receiving Telegram webhook POSTs
 
+# Optional: Firecrawl web search + scrape (src/firecrawl_client.py). NOT a pip
+# dependency — called via REST with urllib, activated only by FIRECRAWL_API_KEY.
+# Used for SEAS topical related-source search and as a web_fetch JS/403 fallback.
+
 # Agentic MCP server + ASGI hosting (src/argo_mcp_server.py, create_asgi_app)
 mcp             # FastMCP streamable-HTTP server (Argo's tools)
 uvicorn         # ASGI server running webhook + MCP in one process
