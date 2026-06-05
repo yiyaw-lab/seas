@@ -179,13 +179,9 @@ def generate_project(prompt):
     return None, errors
 
 
-def main():
-    no_send = "--no-send" in sys.argv
-
-    # Refresh the signal store from the live frontier feeds first, so the project
-    # is built from today's news, not a stale snapshot. Best-effort: if the fetch
-    # fails (network/feeds down), fall back to whatever's already in the store
-    # rather than blocking the weekly project.
+def _refresh_signals():
+    """Refresh the signal store from the live feeds. Best-effort: never raises —
+    on failure we fall back to whatever's already in the store."""
     try:
         import fetch_signals
         fetch_signals.main()
@@ -194,6 +190,34 @@ def main():
     except Exception as exc:
         print(f"Signal refresh failed ({type(exc).__name__}: {exc}); "
               "using the existing store.")
+
+
+def make_project(refresh=True):
+    """Generate ONE fresh project, log it, and return (project_id, text, model).
+
+    The reusable core shared by the weekly batch (main) and the on-demand chat
+    tool ("give me another"). Returns None if no model could generate. When
+    refresh is True, pulls today's signals first."""
+    if refresh:
+        _refresh_signals()
+    prompt, _ = build_project_prompt()
+    result, _ = generate_project(prompt)
+    if result is None:
+        return None
+    text, model = result
+    text = text.strip()
+    project_id = log_project(text, model)
+    return project_id, text, model
+
+
+def main():
+    no_send = "--no-send" in sys.argv
+
+    # Refresh the signal store from the live frontier feeds first, so the project
+    # is built from today's news, not a stale snapshot. Best-effort: if the fetch
+    # fails (network/feeds down), fall back to whatever's already in the store
+    # rather than blocking the weekly project.
+    _refresh_signals()
 
     prompt, signals = build_project_prompt()
 
