@@ -10,6 +10,7 @@
     { "label": "OpenAI News", "url": "https://openai.com/news/rss.xml" },
     { "label": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml" },
     { "label": "GitHub Changelog", "url": "https://github.blog/changelog/feed/" },
-    { "label": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/" }
+    { "label": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/" },
+    { "label": "arXiv cs.SE", "url": "https://export.arxiv.org/rss/cs.SE" }
   ]
 }
