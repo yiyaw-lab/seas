@@ -181,6 +181,11 @@ def to_signal(item):
         "source": item["source"],
         "category": item["source"],
         "summary": item["summary"],
+        # Keep the source link: the V3 SEAS synthesis floor (seas_finding.py)
+        # fetches the real page behind a signal to ground a finding in cited
+        # evidence. Without this, a signal has no source to pull. Existing
+        # consumers ignore the extra field, so this is backward-compatible.
+        "link": item.get("link", ""),
         "possible_capability_unlocked": "",
         "scores": {
             "durability": 0,
