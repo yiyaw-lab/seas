@@ -105,13 +105,47 @@ def _check_evidence(evidence):
     return problems
 
 
-def validate_finding(finding):
+def _check_quote_fidelity(finding, sources):
+    """Verify cited quotes are REAL substrings of the fetched source text. The
+    benchmark caught a model passing the structural gate while ~75% of its quotes
+    were fabricated/paraphrased — citing a source it didn't actually support the
+    claim from. Structure (is there a quote?) isn't enough; fidelity (is the
+    quote real?) is what makes evidence trustworthy.
+
+    `sources` is a list of {"url","text"}. A quote counts as verified if a short
+    window of it appears in its cited source (or, lenient, in any source). Only
+    runs when sources are supplied — omit them to keep the old structural-only
+    behavior (existing callers/tests).
+    """
+    text_by_url = {s["url"]: s.get("text", "") for s in sources}
+    all_text = " ".join(text_by_url.values()).lower()
+    problems = []
+    for i, ev in enumerate(finding.get("evidence", [])):
+        if not isinstance(ev, dict) or ev.get("kind") != "source":
+            continue
+        quote = (ev.get("quote") or "").strip()
+        if not quote:
+            continue  # a source cited without a quote is allowed; nothing to verify
+        body = (text_by_url.get(ev.get("url", ""), "") or "").lower()
+        probe = quote[:40].lower()
+        if probe not in body and probe not in all_text:
+            problems.append(
+                f"evidence[{i}] quote not found in its source (possible "
+                f"fabrication): \"{quote[:50]}...\"")
+    return problems
+
+
+def validate_finding(finding, sources=None):
     """Apply the emission gate. Returns (ok: bool, problems: list[str]).
 
     This is the rule that makes a finding 'genuine': external cited evidence AND
-    a falsifiable dated prediction AND a stated refutation condition. A draft
-    that fails this never becomes a finding — the caller emits a PROBE instead
-    (see probes.py).
+    a falsifiable dated prediction AND a stated refutation condition — AND, when
+    `sources` are supplied, that the cited quotes are REAL (not fabricated). A
+    draft that fails this never becomes a finding; the caller emits a PROBE
+    instead (see probes.py).
+
+    `sources` (optional): list of {"url","text"} the finding was synthesized
+    from. Supply it to enforce quote fidelity; omit it for structure-only checks.
     """
     problems = []
     if not finding.get("claim"):
@@ -123,4 +157,6 @@ def validate_finding(finding):
         problems.append("refutation_condition is missing (what would kill this?)")
     problems += _check_evidence(finding.get("evidence", []))
     problems += _check_prediction(finding.get("prediction"))
+    if sources:
+        problems += _check_quote_fidelity(finding, sources)
     return (not problems, problems)
