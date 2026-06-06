@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
+import argo_github
 import argo_http
 import argo_paths
 import fetch_signals
@@ -317,92 +318,17 @@ def list_feeds() -> str:
 
 
 # --- Phase C: repo/code read (GitHub) ---------------------------------------
-# Repos Argo may read. Comma-separated owner/repo in GITHUB_REPO_ALLOWLIST; "*"
-# (the default) allows ANY repo so Argo can read trending/other repos it surfaces.
-# Reads are read-only and size-capped (same risk class as web_fetch). Public
-# repos need no token; private repos require GITHUB_TOKEN. Set the env var to a
-# specific list if you ever want to restrict it.
-def _repo_allowlist():
-    raw = os.environ.get("GITHUB_REPO_ALLOWLIST", "*")
-    return {r.strip().lower() for r in raw.split(",") if r.strip()}
-
-
-def _repo_allowed(repo):
-    allow = _repo_allowlist()
-    return "*" in allow or repo.lower() in allow
-
-
-# Per-GitHub-call timeout (down from 20-25s). Kept short so one slow call fails
-# fast and retries once, instead of consuming a multi-call tool's whole deadline.
-GH_CALL_TIMEOUT = 10
-
-
-def _gh_retryable(exc):
-    """A transient stall worth one retry: timeouts and 5xx. NOT 4xx (a 404/403
-    will just repeat) — retrying those wastes the deadline."""
-    s = str(exc)
-    if isinstance(exc, TimeoutError) or "timed out" in s.lower():
-        return True
-    code = getattr(exc, "code", None)
-    if isinstance(code, int):
-        return 500 <= code < 600
-    return any(x in s for x in ("500", "502", "503", "504"))
-
-
-def _gh_api(path, raw=False):
-    """Call the GitHub REST API; return (ok, text). Uses GITHUB_TOKEN if set."""
-    import ssl
-    import urllib.request
-
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
-
-    headers = {
-        "User-Agent": "argo-mcp/1.0",
-        "Accept": "application/vnd.github.raw+json" if raw
-                  else "application/vnd.github+json",
-    }
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer " + token.strip()
-
-    req = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
-    # Short per-call timeout + one retry on a transient stall: a single slow call
-    # must not eat the tool's whole deadline. 404 etc. are not retried (the retry
-    # only helps timeouts/5xx; a 404 will just 404 again).
-    last = None
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
-                return True, r.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            last = exc
-            if not _gh_retryable(exc):
-                break
-    hint = ""
-    if "404" in str(last):
-        hint = " (private repo? needs GITHUB_TOKEN, or wrong path)"
-    return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
-
-
+# The GitHub read stack (allowlist + API call + read/list bodies) lives in
+# argo_github now. These @mcp.tool() wrappers must stay here -- they register on
+# the FastMCP instance at import -- so they're thin delegations. Their docstrings
+# are the model-facing tool spec; keep them.
 @mcp.tool()
 @with_deadline(20)
 def github_read_file(repo: str, path: str) -> str:
     """Read a file from a GitHub repo. `repo` is 'owner/name', `path` is the file
     path within it. Use this to read actual source/README/config of any project,
     especially a trending repo you just surfaced, instead of guessing."""
-    if "/" not in repo:
-        return "Refused: repo must be 'owner/name'."
-    if not _repo_allowed(repo):
-        return (f"Refused: '{repo}' is not on Argo's approved repo list "
-                f"({', '.join(sorted(_repo_allowlist()))}).")
-    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}", raw=True)
-    if not ok:
-        return body
-    return body[:MAX_FETCH_CHARS] or "(empty file)"
+    return argo_github.gh_read_file(repo, path, MAX_FETCH_CHARS)
 
 
 @mcp.tool()
@@ -411,23 +337,7 @@ def github_list(repo: str, path: str = "") -> str:
     """List files/dirs in a GitHub repo at `path` (default: root). `repo` is
     'owner/name'. Use to explore a repo's structure (e.g. a trending project you
     surfaced) before reading a specific file."""
-    import json as _json
-
-    if "/" not in repo:
-        return "Refused: repo must be 'owner/name'."
-    if not _repo_allowed(repo):
-        return (f"Refused: '{repo}' is not on Argo's approved repo list "
-                f"({', '.join(sorted(_repo_allowlist()))}).")
-    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}")
-    if not ok:
-        return body
-    try:
-        entries = _json.loads(body)
-    except (ValueError, _json.JSONDecodeError):
-        return "(could not parse listing)"
-    if isinstance(entries, dict):  # a file path, not a dir
-        return f"{entries.get('name')} (file, {entries.get('size')} bytes)"
-    return "\n".join(f"{e['type']:4s}  {e['name']}" for e in entries) or "(empty)"
+    return argo_github.gh_list(repo, path)
 
 
 # --- Phase D: self-status (read-only, autonomy L0) --------------------------
@@ -1120,19 +1030,21 @@ def _gh_write(method, path, body):
             "Authorization": "Bearer " + token.strip(),
         },
     )
-    # Short timeout + one transient retry (see _gh_api): a propose chain makes 5+
-    # of these calls, so any single stall must fail fast rather than blow the
-    # tool deadline. Writes are idempotent enough here (create-branch/put-file by
-    # path) that one retry on a timeout/5xx is safe.
+    # Short timeout + one transient retry (see argo_github.gh_api): a propose
+    # chain makes 5+ of these calls, so any single stall must fail fast rather
+    # than blow the tool deadline. Writes are idempotent enough here (create-
+    # branch/put-file by path) that one retry on a timeout/5xx is safe.
     last = None
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
+            with urllib.request.urlopen(
+                req, timeout=argo_github.GH_CALL_TIMEOUT, context=ctx
+            ) as r:
                 txt = r.read().decode("utf-8", errors="replace")
                 return True, (json.loads(txt) if txt else {})
         except Exception as exc:
             last = exc
-            if not _gh_retryable(exc):
+            if not argo_github.gh_retryable(exc):
                 break
     detail = ""
     try:
