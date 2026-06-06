@@ -8,7 +8,8 @@ Flips Argo from reactive to proactive. On a schedule (GitHub Actions cron,
      items are considered,
   3. runs an LLM judge: "would a frontier builder want to know this today?",
      keeping only real launches/models/tools/capabilities (not routine papers),
-  4. texts Yiya up to MAX_ALERTS short alerts + links, in Argo's plain-text voice,
+  4. texts Yiya the items that clear that bar (no fixed count — strength decides;
+     only ALERT_SAFETY_CAP bounds a runaway run), in Argo's plain-text voice,
   5. records everything seen (whether alerted or not) so it won't repeat.
 
 Runs as a batch job, NOT in the webhook, so it can't slow chat. Reuses
@@ -19,7 +20,6 @@ Run:  python src/argo_watch.py            (fetch, judge, send, record)
       python src/argo_watch.py --no-send  (dry run: print what it would alert)
 """
 
-import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -31,13 +31,25 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 import argo_observe as observe
+import argo_paths
+import argo_store
 import fetch_signals
 import send_telegram
+from argo_log import get_logger
 from argo_webhook import _clean_reply
 
-SEEN_PATH = ROOT / "data" / "argo_seen.json"
+log = get_logger(__name__)
+
+# Re-exported from argo_paths so this stays the module-level name tests patch
+# (mock.patch.object(argo_watch, "SEEN_PATH", tmp)); load_seen/save_seen read it
+# by bare name at call time, so the override still bites.
+SEEN_PATH = argo_paths.SEEN_PATH
 PER_FEED = 10          # consider this many recent items per feed
-MAX_ALERTS = 3         # cap alerts per run so the phone doesn't blow up
+# Strength, not count, decides how many alerts fire: the judge keeps every item
+# that genuinely clears the "a frontier builder must know this today" bar and
+# nothing else. This is only a safety backstop so a pathological feed day can't
+# blow up the phone — it is NOT a target and is not shown to the judge.
+ALERT_SAFETY_CAP = 8
 SEEN_CAP = 2000        # keep the seen-store bounded
 MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
@@ -53,12 +65,7 @@ def load_seen():
     Backward-compatible: the old format was a flat list of ids. We read those as
     already-settled (attempts == MAX_ATTEMPTS) so they're never re-judged.
     """
-    if not SEEN_PATH.exists():
-        return {}
-    try:
-        data = json.loads(SEEN_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return {}
+    data = argo_store.load_json(SEEN_PATH, {})
     if isinstance(data, list):
         return {i: MAX_ATTEMPTS for i in data}
     return data
@@ -70,7 +77,7 @@ def save_seen(seen):
     dict preserves insertion order, so slicing the items keeps the newest.
     """
     bounded = dict(list(seen.items())[-SEEN_CAP:])
-    SEEN_PATH.write_text(json.dumps(bounded, indent=2) + "\n")
+    argo_store.save_json(SEEN_PATH, bounded)
 
 
 def collect_new(seen):
@@ -99,8 +106,13 @@ NEVER miss a flagship launch from a major lab (OpenAI, Anthropic, Google
 DeepMind, Meta, xAI/Grok, Mistral, DeepSeek) or a tool builders will adopt
 widely. If a major lab ships a new model or product, that always clears the bar.
 
+Keep EVERY item that genuinely clears this bar, and NO others. There is no target
+number: most days that is 0 to 2, a big launch day might be 5 or more. Do NOT pad
+to hit a count, and do NOT drop a must-know item just to stay short. Strength is
+the only filter.
+
 For each item you keep, write ONE short plain-text line (no markdown) saying what
-it is and why it matters, then the link on its own. Keep at most {max_alerts}.
+it is and why it matters, then the link on its own.
 If nothing clears the bar, output exactly: NONE
 
 Format per kept item:
@@ -113,7 +125,9 @@ Items:
 
 
 def judge(new_items):
-    """LLM judge -> list of {text, link} alerts (<= MAX_ALERTS). [] if none."""
+    """LLM judge -> list of alert lines, one per item that cleared the strength
+    bar (no fixed count). Trimmed to ALERT_SAFETY_CAP only as a runaway backstop.
+    [] if nothing qualifies."""
     if not new_items:
         return []
 
@@ -121,28 +135,38 @@ def judge(new_items):
         f"- {it['title']}\n  {it.get('summary','')[:200]}\n  {it.get('link','')}"
         for it in new_items[:60]  # cap prompt size
     )
-    prompt = JUDGE_INSTRUCTIONS.format(max_alerts=MAX_ALERTS, items=listing)
+    prompt = JUDGE_INSTRUCTIONS.format(items=listing)
 
     # Use the configured chat model (Claude if available, else gpt-4o fallback).
+    # `or` not `.get(k, default)`: an empty ARGO_CHAT_MODEL (a set-but-unset CI var)
+    # would otherwise win as "" and defeat the Sonnet default, routing to ARGO_MODEL.
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + observe.resolve_models()
          if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
     )
     if model is None:
-        print("No API key available for the judge — skipping.")
+        log.warning("no API key available for the judge -- skipping run")
         return []
 
-    # temperature=0: a deterministic verdict so the same items don't flip
-    # between runs (the bug that re-sent already-delivered drops).
-    if observe.provider_for(model)["name"] == "anthropic":
-        raw = observe.chat_with_mcp(
-            "You are Argo, a terse frontier scout.",
-            [{"role": "user", "content": prompt}], model, temperature=0,
-        )
-    else:
-        raw = observe.generate_observations(prompt, model, temperature=0)
+    # temperature=0: a deterministic verdict so the same items don't flip between
+    # runs (the bug that re-sent already-delivered drops). argo_observe omits the
+    # param for models that reject a custom temperature (gpt-5/o-series, opus-4-8).
+    try:
+        if observe.provider_for(model)["name"] == "anthropic":
+            raw = observe.chat_with_mcp(
+                "You are Argo, a terse frontier scout.",
+                [{"role": "user", "content": prompt}], model, temperature=0,
+            )
+        else:
+            raw = observe.generate_observations(prompt, model, temperature=0)
+    except Exception:
+        # Log the judge failure from the watcher's own logger (the scheduler's outer
+        # net also logs it) and re-raise: main() aborts before the seen-store update,
+        # so items aren't penalized (attempt-bumped) for an infrastructure failure.
+        log.error("watch judge failed on model %s", model, exc_info=True)
+        raise
 
     raw = _clean_reply(raw.strip())
     if not raw or raw.strip().upper() == "NONE":
@@ -160,7 +184,7 @@ def judge(new_items):
         block.append(line)
     if block:
         alerts.append(" ".join(block))
-    return alerts[:MAX_ALERTS]
+    return alerts[:ALERT_SAFETY_CAP]
 
 
 def _was_alerted(item, alerts):
@@ -180,6 +204,7 @@ def main():
     print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
     alerts = judge(new_items)
+    log.info("watch run: %d eligible, %d cleared the bar", len(new_items), len(alerts))
 
     if not alerts:
         print("Nothing cleared the frontier-builder bar this run.")

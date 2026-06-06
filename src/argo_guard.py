@@ -22,6 +22,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # --- tunables (conservative on purpose) ---
@@ -61,8 +65,8 @@ def retry(fn, *, max_retries=MAX_RETRIES, label="call"):
                 raise
             delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
             delay += random.uniform(0, delay * 0.25)  # jitter
-            print(f"[guard] {label}: transient {type(exc).__name__}, "
-                  f"retry {attempt}/{max_retries} in {delay:.1f}s")
+            log.warning("%s: transient %s, retry %d/%d in %.1fs",
+                        label, type(exc).__name__, attempt, max_retries, delay)
             time.sleep(delay)
 
 
@@ -95,12 +99,12 @@ class CircuitBreaker:
             self.failures += 1
             if self.failures >= self.threshold:
                 self.opened_at = time.monotonic()
-                print(f"[guard] circuit '{self.name}' OPENED after "
-                      f"{self.failures} failures")
+                log.warning("circuit '%s' OPENED after %d failures",
+                            self.name, self.failures)
             raise
         # success: reset
         if self.failures or self.opened_at:
-            print(f"[guard] circuit '{self.name}' recovered, closing")
+            log.info("circuit '%s' recovered, closing", self.name)
         self.failures = 0
         self.opened_at = None
         return result
@@ -135,6 +139,8 @@ class DailyBudget:
         if state.get("day") != today:
             state = {"day": today, "count": 0}  # new day -> reset
         if state["count"] >= self.cap:
+            log.warning("daily budget exhausted: %d call cap reached for %s",
+                        self.cap, today)
             raise self.BudgetExceeded(
                 f"daily call cap of {self.cap} reached for {today}")
         state["count"] += 1

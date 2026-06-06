@@ -7,8 +7,8 @@
 Date: 2026-06-02
 Status: Plan only. No code, no file changes. V1 stays in production untouched.
 
-Companion to: [ARGO_V2.md](ARGO_V2.md) (approved). V1 reference:
-[ARGO_ARCHITECTURE.md](ARGO_ARCHITECTURE.md), [src/argo.py](src/argo.py).
+Companion to: [ARGO_V2.md](../architecture/ARGO_V2.md) (approved). V1 reference:
+[ARGO_ARCHITECTURE.md](../architecture/ARGO_ARCHITECTURE.md), [src/argo.py](../../src/argo.py).
 
 ## Strategy in one line
 

@@ -6,6 +6,12 @@ __pycache__/
 # Transient runtime data: refreshed each run by src/fetch_signals.py
 data/signals.json
 
+# Runtime taste store (populated as Yiya teaches it; like signals.json)
+data/taste_signals.json
+
+# Local backup of the project log from the 2026-06-05 reindex (recovery only)
+data/argo_projects.backup-20260605.json
+
 # Transient Telegram bot read-offset (argo_rate.py)
 argo/telegram_offset.json
 
@@ -15,14 +21,31 @@ data/argo_chat.json
 # Private / trade-secret — never commit
 COST_PLAYBOOK.md
 
+# Strategy / vision / design docs — keep local, not in the repo
+BRAND.md
+VISION.md
+argo-v3-deck.html
+build-log/2026-06-05-report.html
+docs/DESIGN_dispatch_to_coder.md
+
 # Transient daily-budget counter (argo_guard)
 data/argo_budget.json
 
 # Transient pending self-heal action (argo_mcp_server L1)
 data/argo_pending_heal.json
 
+# Argo's self-model: beliefs about itself + reflection state (argo_self).
+# Per-deploy runtime state; schema documented in data/argo_self.example.json.
+data/argo_self.json
+
 # Transient schedule dedupe state (argo_scheduled)
 data/schedule_state.json
 
 # Local Claude Code agent config (not project code)
 .claude/
+data/profile.json
+
+# Rehearse blueprints + the full debate transcript (transcripts.jsonl) are
+# generated per-rehearsal output: large, may quote sources, kept local for
+# eval/research. On Railway, ARGO_REHEARSE_LOG can point at the mounted volume.
+argo/rehearsals/
