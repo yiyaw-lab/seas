@@ -20,7 +20,6 @@ Run:  python src/argo_watch.py            (fetch, judge, send, record)
       python src/argo_watch.py --no-send  (dry run: print what it would alert)
 """
 
-import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 import argo_observe as observe
+import argo_store
 import fetch_signals
 import send_telegram
 from argo_webhook import _clean_reply
@@ -58,12 +58,7 @@ def load_seen():
     Backward-compatible: the old format was a flat list of ids. We read those as
     already-settled (attempts == MAX_ATTEMPTS) so they're never re-judged.
     """
-    if not SEEN_PATH.exists():
-        return {}
-    try:
-        data = json.loads(SEEN_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return {}
+    data = argo_store.load_json(SEEN_PATH, {})
     if isinstance(data, list):
         return {i: MAX_ATTEMPTS for i in data}
     return data
@@ -75,7 +70,7 @@ def save_seen(seen):
     dict preserves insertion order, so slicing the items keeps the newest.
     """
     bounded = dict(list(seen.items())[-SEEN_CAP:])
-    SEEN_PATH.write_text(json.dumps(bounded, indent=2) + "\n")
+    argo_store.save_json(SEEN_PATH, bounded)
 
 
 def collect_new(seen):
