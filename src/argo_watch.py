@@ -8,7 +8,8 @@ Flips Argo from reactive to proactive. On a schedule (GitHub Actions cron,
      items are considered,
   3. runs an LLM judge: "would a frontier builder want to know this today?",
      keeping only real launches/models/tools/capabilities (not routine papers),
-  4. texts Yiya up to MAX_ALERTS short alerts + links, in Argo's plain-text voice,
+  4. texts Yiya the items that clear that bar (no fixed count — strength decides;
+     only ALERT_SAFETY_CAP bounds a runaway run), in Argo's plain-text voice,
   5. records everything seen (whether alerted or not) so it won't repeat.
 
 Runs as a batch job, NOT in the webhook, so it can't slow chat. Reuses
@@ -37,7 +38,11 @@ from argo_webhook import _clean_reply
 
 SEEN_PATH = ROOT / "data" / "argo_seen.json"
 PER_FEED = 10          # consider this many recent items per feed
-MAX_ALERTS = 3         # cap alerts per run so the phone doesn't blow up
+# Strength, not count, decides how many alerts fire: the judge keeps every item
+# that genuinely clears the "a frontier builder must know this today" bar and
+# nothing else. This is only a safety backstop so a pathological feed day can't
+# blow up the phone — it is NOT a target and is not shown to the judge.
+ALERT_SAFETY_CAP = 8
 SEEN_CAP = 2000        # keep the seen-store bounded
 MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
@@ -99,8 +104,13 @@ NEVER miss a flagship launch from a major lab (OpenAI, Anthropic, Google
 DeepMind, Meta, xAI/Grok, Mistral, DeepSeek) or a tool builders will adopt
 widely. If a major lab ships a new model or product, that always clears the bar.
 
+Keep EVERY item that genuinely clears this bar, and NO others. There is no target
+number: most days that is 0 to 2, a big launch day might be 5 or more. Do NOT pad
+to hit a count, and do NOT drop a must-know item just to stay short. Strength is
+the only filter.
+
 For each item you keep, write ONE short plain-text line (no markdown) saying what
-it is and why it matters, then the link on its own. Keep at most {max_alerts}.
+it is and why it matters, then the link on its own.
 If nothing clears the bar, output exactly: NONE
 
 Format per kept item:
@@ -113,7 +123,9 @@ Items:
 
 
 def judge(new_items):
-    """LLM judge -> list of {text, link} alerts (<= MAX_ALERTS). [] if none."""
+    """LLM judge -> list of alert lines, one per item that cleared the strength
+    bar (no fixed count). Trimmed to ALERT_SAFETY_CAP only as a runaway backstop.
+    [] if nothing qualifies."""
     if not new_items:
         return []
 
@@ -121,7 +133,7 @@ def judge(new_items):
         f"- {it['title']}\n  {it.get('summary','')[:200]}\n  {it.get('link','')}"
         for it in new_items[:60]  # cap prompt size
     )
-    prompt = JUDGE_INSTRUCTIONS.format(max_alerts=MAX_ALERTS, items=listing)
+    prompt = JUDGE_INSTRUCTIONS.format(items=listing)
 
     # Use the configured chat model (Claude if available, else gpt-4o fallback).
     model = next(
@@ -160,7 +172,7 @@ def judge(new_items):
         block.append(line)
     if block:
         alerts.append(" ".join(block))
-    return alerts[:MAX_ALERTS]
+    return alerts[:ALERT_SAFETY_CAP]
 
 
 def _was_alerted(item, alerts):
