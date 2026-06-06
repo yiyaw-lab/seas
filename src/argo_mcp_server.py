@@ -30,6 +30,8 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
+import argo_http
+import argo_paths
 import fetch_signals
 import profile
 
@@ -432,10 +434,10 @@ def github_list(repo: str, path: str = "") -> str:
 # Tools that let Argo report its OWN health. Read-only: they observe, never act
 # (self-heal actions are Phase E). Argo can diagnose and tell you what to do.
 
-ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
-SIGNALS_PATH = ROOT / "data" / "signals.json"
-FINDINGS_DIR = ROOT / "findings"
+ROOT = argo_paths.ROOT
+PROJECTS_LOG = argo_paths.PROJECTS_LOG
+SIGNALS_PATH = argo_paths.SIGNALS_PATH
+FINDINGS_DIR = argo_paths.FINDINGS_DIR
 
 
 @mcp.tool()
@@ -445,17 +447,12 @@ def get_webhook_health() -> str:
     update count, and the last delivery error (if any). Use when asked 'are you
     healthy / is the bot working / why might messages be dropping'."""
     import json as _json
-    import ssl
     import urllib.request
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         return "TELEGRAM_BOT_TOKEN not set, can't check webhook."
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
     # Railway's outbound to api.telegram.org is sometimes slow; a short timeout
     # with one retry keeps us well under the @with_deadline(20) cap with margin.
     url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
@@ -1105,18 +1102,13 @@ def _gh_write(method, path, body):
     """Authenticated GitHub API call for the PROPOSE path. Uses the dedicated
     PR-only token (ARGO_PROPOSE_TOKEN); never the serving token. Returns
     (ok, parsed_json_or_text)."""
-    import ssl
     import urllib.request
 
     token = os.environ.get("ARGO_PROPOSE_TOKEN")
     if not token:
         return False, ("ARGO_PROPOSE_TOKEN not set. Self-create is disabled until "
                        "a PR-only GitHub token is configured.")
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
 
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(

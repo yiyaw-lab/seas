@@ -27,13 +27,17 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+import argo_paths
 import argo_store
 from argo_log import get_logger
 
 log = get_logger(__name__)
 
-SCHEDULE_PATH = ROOT / "data" / "schedule.json"
-STATE_PATH = ROOT / "data" / "schedule_state.json"
+# Re-exported from argo_paths; kept as module-level names so the scheduler tests
+# can patch them (mock.patch.object(argo_scheduled, "SCHEDULE_PATH", tmp)) and
+# main() reads the override at call time.
+SCHEDULE_PATH = argo_paths.SCHEDULE_PATH
+STATE_PATH = argo_paths.STATE_PATH
 
 # command name -> (module, callable). Importing lazily keeps startup cheap and
 # avoids pulling Flask/MCP for a watch-only run.

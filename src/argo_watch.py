@@ -31,12 +31,16 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 import argo_observe as observe
+import argo_paths
 import argo_store
 import fetch_signals
 import send_telegram
 from argo_webhook import _clean_reply
 
-SEEN_PATH = ROOT / "data" / "argo_seen.json"
+# Re-exported from argo_paths so this stays the module-level name tests patch
+# (mock.patch.object(argo_watch, "SEEN_PATH", tmp)); load_seen/save_seen read it
+# by bare name at call time, so the override still bites.
+SEEN_PATH = argo_paths.SEEN_PATH
 PER_FEED = 10          # consider this many recent items per feed
 # Strength, not count, decides how many alerts fire: the judge keeps every item
 # that genuinely clears the "a frontier builder must know this today" bar and

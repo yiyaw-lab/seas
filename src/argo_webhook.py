@@ -50,11 +50,16 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
 
+import argo_http
 import argo_observe as observe
+import argo_paths
 import profile
 import send_telegram
 
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
+# Re-exported from argo_paths; kept as a module-level name so the project-state
+# helpers (and the tests that patch wh.PROJECTS_LOG) read the override at call
+# time. The rating/project-state helpers themselves live in argo_rating.
+PROJECTS_LOG = argo_paths.PROJECTS_LOG
 
 # Optional shared-secret check: Telegram sends this header if you set it on the
 # webhook (set_webhook.py does). Blocks randoms POSTing to your endpoint.
@@ -613,7 +618,6 @@ def _download_telegram_photo(msg):
     """Download the largest photo in a Telegram message. Returns (bytes,
     media_type) or (None, None). Telegram sends photos in two steps: getFile to
     resolve a file_path, then download from the file CDN — both need the token."""
-    import ssl
     import urllib.request
 
     # Telegram delivers an image two ways:
@@ -633,11 +637,7 @@ def _download_telegram_photo(msg):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not file_id or not token:
         return None, None
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
     try:
         api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
         with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
@@ -867,7 +867,6 @@ def self_register_webhook():
     bot-token change can't silently leave the bot deaf. No-op if WEBHOOK_URL is
     unset (e.g. local dev behind a tunnel you register manually).
     """
-    import ssl
     import urllib.parse
     import urllib.request
 
@@ -882,11 +881,7 @@ def self_register_webhook():
     if WEBHOOK_SECRET:
         params["secret_token"] = WEBHOOK_SECRET
 
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
 
     api = (f"https://api.telegram.org/bot{token}/setWebhook?"
            + urllib.parse.urlencode(params))
