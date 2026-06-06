@@ -1,15 +1,16 @@
 """
-Taste signals — what Yiya likes, learned from her feed, to shape what Argo builds.
+Taste signals — what the user likes, learned from their feed, to shape what Argo
+builds. (Whose taste: the active profile; see profile.py.)
 
-When she texts Argo a screenshot of an app/design/product she likes, the lesson
-shouldn't evaporate after one reply. This store captures the DURABLE lesson — the
-pattern she responded to and why — so it can fold into project generation and
-measurably pull future bets toward her taste. A screenshot becomes evidence about
-taste, the same way a finding becomes a belief.
+When the user texts Argo a screenshot of an app/design/product they like, the
+lesson shouldn't evaporate after one reply. This store captures the DURABLE
+lesson — the pattern they responded to and why — so it can fold into project
+generation and measurably pull future bets toward their taste. A screenshot
+becomes evidence about taste, the same way a finding becomes a belief.
 
 Deliberately lightweight: a screenshot is a soft preference signal, not a
 falsifiable claim, so it does NOT go through the finding emission gate or the
-world model (those are for claims about what's TRUE; taste is about what she
+world model (those are for claims about what's TRUE; taste is about what the user
 LIKES). Separate store, separate purpose.
 
 Standard-library only. JSON store at data/taste_signals.json.
@@ -20,6 +21,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import argo_store
+import profile
+
 ROOT = Path(__file__).resolve().parent.parent
 TASTE_PATH = ROOT / "data" / "taste_signals.json"
 
@@ -28,37 +32,36 @@ RECENT_FOR_PROMPT = 8
 
 
 def _load():
-    if not TASTE_PATH.exists():
-        return []
-    try:
-        return json.loads(TASTE_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return []
+    return argo_store.load_json(TASTE_PATH, [])
 
 
 def _save(items):
     TASTE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TASTE_PATH.write_text(json.dumps(items, indent=2) + "\n")
+    argo_store.save_json(TASTE_PATH, items)
 
 
 # The extraction prompt: turn a screenshot into a structured taste signal. Asks
-# the vision model to name the PATTERN she likely responded to, not just describe
-# pixels — the transferable lesson is the point.
-EXTRACT_SYSTEM = (
-    "You study what a sharp frontier builder likes, from screenshots she sends. "
-    "You extract the transferable LESSON — the product/design/interaction pattern "
-    "worth stealing — not a pixel-by-pixel description."
-)
+# the vision model to name the PATTERN the user likely responded to, not just
+# describe pixels — the transferable lesson is the point. The user persona and
+# pronouns come from the active profile (see profile.py).
+def build_extract_system():
+    subj = profile.pronoun("subject")
+    return (
+        f"You study what {profile.one_liner()} likes, from screenshots {subj} sends. "
+        "You extract the transferable LESSON — the product/design/interaction pattern "
+        "worth stealing — not a pixel-by-pixel description."
+    )
 
-EXTRACT_PROMPT = """This is a screenshot the user sent because she liked
+
+EXTRACT_PROMPT = """This is a screenshot the user sent because {subj} liked
 something about it{caption_clause}. Look at it and return ONLY a JSON object:
 
 {{
   "what": "<the app/screen/thing, one phrase>",
-  "pattern": "<the transferable design/product/interaction pattern she likely responded to>",
+  "pattern": "<the transferable design/product/interaction pattern {subj} likely responded to>",
   "liked": "<the underlying quality that makes it good (e.g. low-friction capture, calm density, fast feedback)>",
-  "steal": "<how this could inform something SHE might build — concrete>",
-  "caption_echo": "<if she gave a caption, the intent you read from it; else empty>"
+  "steal": "<how this could inform something {Subj} might build — concrete>",
+  "caption_echo": "<if {subj} gave a caption, the intent you read from it; else empty>"
 }}
 
 Be specific and concrete. The 'pattern' and 'liked' fields are the durable
@@ -66,8 +69,11 @@ lesson; vague answers are useless. No prose outside the JSON."""
 
 
 def build_extract_prompt(caption=""):
-    clause = f' (her caption: "{caption}")' if caption else ""
-    return EXTRACT_PROMPT.format(caption_clause=clause)
+    subj = profile.pronoun("subject")
+    poss = profile.pronoun("possessive")
+    Subj = subj[:1].upper() + subj[1:]
+    clause = f' ({poss} caption: "{caption}")' if caption else ""
+    return EXTRACT_PROMPT.format(caption_clause=clause, subj=subj, Subj=Subj)
 
 
 def parse_and_store(extraction_text, caption="", source="telegram-screenshot"):
@@ -134,7 +140,7 @@ def save_signal(what, pattern, liked, steal, source, caption=""):
 # --- First-class learning: themes (so taste sharpens as it accumulates) ------
 # A flat list of signals is memory; THEMES are learning. Recurring 'liked'
 # qualities cluster into named taste-themes, so the profile gets sharper the more
-# Yiya teaches it. Lightweight keyword clustering (stdlib) — taste is a soft
+# the user teaches it. Lightweight keyword clustering (stdlib) — taste is a soft
 # preference, not a claim, so this stays heuristic, not a model call per read.
 
 _STOP = {"the", "a", "an", "of", "to", "and", "in", "on", "for", "with", "is",
@@ -164,13 +170,16 @@ def themes(min_count=2):
     return clustered
 
 
-def format_for_prompt(limit=RECENT_FOR_PROMPT):
+def format_for_prompt(limit=RECENT_FOR_PROMPT, p=None):
     """Compact recent taste signals + emergent themes for folding into project
-    generation. Empty string if none, so the caller can skip the section."""
+    generation. Empty string if none, so the caller can skip the section. The
+    intro line (whose taste this is) comes from the active profile; pass `p` to
+    format for a specific user."""
     items = _load()
     if not items:
         return ""
-    lines = ["Yiya's taste (learned from her feed — lean projects toward this):"]
+    p = p or profile.load()
+    lines = [p["taste_intro"]]
     th = themes()
     if th:
         lines.append("Recurring themes: "
@@ -185,7 +194,7 @@ def format_for_prompt(limit=RECENT_FOR_PROMPT):
 
 
 def format_profile():
-    """Human-readable taste profile for read_taste (what Yiya + Argo inspect).
+    """Human-readable taste profile for read_taste (what the user + Argo inspect).
     Shows themes first (the learning), then the signals (the evidence)."""
     items = _load()
     if not items:

@@ -30,7 +30,11 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
+import argo_github
+import argo_http
+import argo_paths
 import fetch_signals
+import profile
 
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
 
@@ -314,92 +318,17 @@ def list_feeds() -> str:
 
 
 # --- Phase C: repo/code read (GitHub) ---------------------------------------
-# Repos Argo may read. Comma-separated owner/repo in GITHUB_REPO_ALLOWLIST; "*"
-# (the default) allows ANY repo so Argo can read trending/other repos it surfaces.
-# Reads are read-only and size-capped (same risk class as web_fetch). Public
-# repos need no token; private repos require GITHUB_TOKEN. Set the env var to a
-# specific list if you ever want to restrict it.
-def _repo_allowlist():
-    raw = os.environ.get("GITHUB_REPO_ALLOWLIST", "*")
-    return {r.strip().lower() for r in raw.split(",") if r.strip()}
-
-
-def _repo_allowed(repo):
-    allow = _repo_allowlist()
-    return "*" in allow or repo.lower() in allow
-
-
-# Per-GitHub-call timeout (down from 20-25s). Kept short so one slow call fails
-# fast and retries once, instead of consuming a multi-call tool's whole deadline.
-GH_CALL_TIMEOUT = 10
-
-
-def _gh_retryable(exc):
-    """A transient stall worth one retry: timeouts and 5xx. NOT 4xx (a 404/403
-    will just repeat) — retrying those wastes the deadline."""
-    s = str(exc)
-    if isinstance(exc, TimeoutError) or "timed out" in s.lower():
-        return True
-    code = getattr(exc, "code", None)
-    if isinstance(code, int):
-        return 500 <= code < 600
-    return any(x in s for x in ("500", "502", "503", "504"))
-
-
-def _gh_api(path, raw=False):
-    """Call the GitHub REST API; return (ok, text). Uses GITHUB_TOKEN if set."""
-    import ssl
-    import urllib.request
-
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
-
-    headers = {
-        "User-Agent": "argo-mcp/1.0",
-        "Accept": "application/vnd.github.raw+json" if raw
-                  else "application/vnd.github+json",
-    }
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer " + token.strip()
-
-    req = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
-    # Short per-call timeout + one retry on a transient stall: a single slow call
-    # must not eat the tool's whole deadline. 404 etc. are not retried (the retry
-    # only helps timeouts/5xx; a 404 will just 404 again).
-    last = None
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
-                return True, r.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            last = exc
-            if not _gh_retryable(exc):
-                break
-    hint = ""
-    if "404" in str(last):
-        hint = " (private repo? needs GITHUB_TOKEN, or wrong path)"
-    return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
-
-
+# The GitHub read stack (allowlist + API call + read/list bodies) lives in
+# argo_github now. These @mcp.tool() wrappers must stay here -- they register on
+# the FastMCP instance at import -- so they're thin delegations. Their docstrings
+# are the model-facing tool spec; keep them.
 @mcp.tool()
 @with_deadline(20)
 def github_read_file(repo: str, path: str) -> str:
     """Read a file from a GitHub repo. `repo` is 'owner/name', `path` is the file
     path within it. Use this to read actual source/README/config of any project,
     especially a trending repo you just surfaced, instead of guessing."""
-    if "/" not in repo:
-        return "Refused: repo must be 'owner/name'."
-    if not _repo_allowed(repo):
-        return (f"Refused: '{repo}' is not on Argo's approved repo list "
-                f"({', '.join(sorted(_repo_allowlist()))}).")
-    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}", raw=True)
-    if not ok:
-        return body
-    return body[:MAX_FETCH_CHARS] or "(empty file)"
+    return argo_github.gh_read_file(repo, path, MAX_FETCH_CHARS)
 
 
 @mcp.tool()
@@ -408,33 +337,17 @@ def github_list(repo: str, path: str = "") -> str:
     """List files/dirs in a GitHub repo at `path` (default: root). `repo` is
     'owner/name'. Use to explore a repo's structure (e.g. a trending project you
     surfaced) before reading a specific file."""
-    import json as _json
-
-    if "/" not in repo:
-        return "Refused: repo must be 'owner/name'."
-    if not _repo_allowed(repo):
-        return (f"Refused: '{repo}' is not on Argo's approved repo list "
-                f"({', '.join(sorted(_repo_allowlist()))}).")
-    ok, body = _gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}")
-    if not ok:
-        return body
-    try:
-        entries = _json.loads(body)
-    except (ValueError, _json.JSONDecodeError):
-        return "(could not parse listing)"
-    if isinstance(entries, dict):  # a file path, not a dir
-        return f"{entries.get('name')} (file, {entries.get('size')} bytes)"
-    return "\n".join(f"{e['type']:4s}  {e['name']}" for e in entries) or "(empty)"
+    return argo_github.gh_list(repo, path)
 
 
 # --- Phase D: self-status (read-only, autonomy L0) --------------------------
 # Tools that let Argo report its OWN health. Read-only: they observe, never act
 # (self-heal actions are Phase E). Argo can diagnose and tell you what to do.
 
-ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
-SIGNALS_PATH = ROOT / "data" / "signals.json"
-FINDINGS_DIR = ROOT / "findings"
+ROOT = argo_paths.ROOT
+PROJECTS_LOG = argo_paths.PROJECTS_LOG
+SIGNALS_PATH = argo_paths.SIGNALS_PATH
+FINDINGS_DIR = argo_paths.FINDINGS_DIR
 
 
 @mcp.tool()
@@ -444,17 +357,12 @@ def get_webhook_health() -> str:
     update count, and the last delivery error (if any). Use when asked 'are you
     healthy / is the bot working / why might messages be dropping'."""
     import json as _json
-    import ssl
     import urllib.request
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         return "TELEGRAM_BOT_TOKEN not set, can't check webhook."
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
     # Railway's outbound to api.telegram.org is sometimes slow; a short timeout
     # with one retry keeps us well under the @with_deadline(20) cap with margin.
     url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
@@ -486,10 +394,10 @@ def get_webhook_health() -> str:
 @mcp.tool()
 @with_deadline(10)  # pure local read
 def get_latest_project() -> str:
-    """Re-send Yiya her most recent project, in full. Use when she asks 'where is
-    it / show me the project again / what did you suggest last / did I rate it'.
-    Does NOT generate a new one (that's new_project) — it re-shows the existing
-    latest. The project is sent to her directly; you just acknowledge."""
+    """Re-send the user their most recent project, in full. Use when they ask
+    'where is it / show me the project again / what did you suggest last / did I
+    rate it'. Does NOT generate a new one (that's new_project) — it re-shows the
+    existing latest. The project is sent to them directly; you just acknowledge."""
     import json as _json
     import argo_project
 
@@ -518,21 +426,21 @@ def _deliver(body):
     return a terse do-not-repeat note for the model.
 
     The chat model relays a tool's STRING result by composing its own message,
-    so it summarizes long content like a full project (the bug: Yiya got only the
-    invite line, not the bet). Sending directly from the tool guarantees she gets
-    it verbatim; the model just acknowledges instead of re-typing it."""
+    so it summarizes long content like a full project (the bug: the user got only
+    the invite line, not the bet). Sending directly from the tool guarantees they
+    get it verbatim; the model just acknowledges instead of re-typing it."""
     import send_telegram
     if send_telegram.try_send_message(body):
-        return ("[Already sent to Yiya verbatim. Do NOT repeat or summarize it; "
+        return ("[Already sent to the user verbatim. Do NOT repeat or summarize it; "
                 "just acknowledge briefly, e.g. 'sent'.]")
     # Delivery failed: return the body so the model relays it (and never falsely
     # claims 'sent'), rather than silently dropping it.
-    return body + "\n\n[Direct delivery failed; relay the above to her as your reply.]"
+    return body + "\n\n[Direct delivery failed; relay the above to them as your reply.]"
 
 
 def _mark_shown(project_id):
     """Stamp shown_at on a project when it's delivered, so a later bare
-    rating/SELECT in the webhook targets the project Yiya is actually looking at
+    rating/SELECT in the webhook targets the project the user is actually looking at
     (last shown), not whatever was generated most recently."""
     import json as _json
     if not PROJECTS_LOG.exists():
@@ -566,55 +474,55 @@ def _deliver_proposal(project_id, pitch, doc):
     # diagnosable from the server logs (pitch vs doc, which one failed).
     print(f"[deliver_proposal] {project_id} pitch_ok={pitch_ok} doc_ok={doc_ok}")
 
-    # Mark it SHOWN if anything reached her, so a later bare rating/SELECT targets
-    # THIS project (the one she's looking at), not whatever was generated last.
+    # Mark it SHOWN if anything reached them, so a later bare rating/SELECT targets
+    # THIS project (the one they're looking at), not whatever was generated last.
     if pitch_ok or doc_ok:
         _mark_shown(project_id)
 
     if pitch_ok and doc_ok:
-        return ("[Pitch + full proposal sent to Yiya. Do NOT repeat them; just "
+        return ("[Pitch + full proposal sent to the user. Do NOT repeat them; just "
                 "acknowledge briefly, e.g. 'sent'.]")
     if pitch_ok and not doc_ok:
         # Pitch landed but the doc didn't: have the model relay the doc as text.
         return ("[The pitch was sent but the proposal doc failed to deliver. "
-                "Send her the full proposal now as your reply:]\n\n" + doc)
+                "Send them the full proposal now as your reply:]\n\n" + doc)
     # Nothing landed: give the model everything to relay, and be honest.
     return (pitch + "\n\n" + doc
-            + "\n\n[Direct delivery failed; relay the above to her as your reply.]")
+            + "\n\n[Direct delivery failed; relay the above to them as your reply.]")
 
 
 @mcp.tool()
 @with_deadline(200)  # (possible) feed refresh + a full model call; under the 300s cap
 def new_project() -> str:
-    """Generate a FRESH weekly project on demand and send it to Yiya as a one-line
-    pitch plus an attached proposal doc (ratings, reasoning, real sources). Use
-    when she asks for a project, a new one, or 'give me another' / 'a different
-    one'. Logs a project she can accept by replying SELECT. Sent directly; you
-    just acknowledge."""
+    """Generate a FRESH weekly project on demand and send it to the user as a
+    one-line pitch plus an attached proposal doc (ratings, reasoning, real
+    sources). Use when they ask for a project, a new one, or 'give me another' /
+    'a different one'. Logs a project they can accept by replying SELECT. Sent
+    directly; you just acknowledge."""
     import argo_project
 
     made = argo_project.make_proposal(refresh=True)
     if made == "NO_SIGNALS":
         return ("Couldn't pull fresh signals to build a project from (the feeds "
-                "may be down). Tell Yiya plainly and suggest trying again "
-                "shortly, or that she can bring her own idea instead.")
+                "may be down). Tell the user plainly and suggest trying again "
+                "shortly, or that they can bring their own idea instead.")
     if made is None:
         return ("Couldn't generate a project right now (no model available). "
-                "Tell Yiya plainly and suggest trying again shortly.")
+                "Tell the user plainly and suggest trying again shortly.")
     project_id, pitch, _text, doc, _model = made
     return _deliver_proposal(project_id, pitch, doc)
 
 
 @mcp.tool()
 @with_deadline(200)  # taste signal + (possible) refresh + a full model call
-def project_too_complex(what_lost_her: str = "") -> str:
-    """Yiya says the latest project is over her head / too complex / she can't
-    follow it. Do TWO things: (1) save a durable taste signal so future projects
-    lean more approachable, and (2) generate another, simpler project. Pass a
-    short note of WHAT made it too complex if she said (e.g. 'assumed kernel/CUDA
-    knowledge'); leave blank if she just said it's too much. Use this instead of
-    plain new_project whenever the reason is difficulty, so Argo actually learns
-    to dial it down."""
+def project_too_complex(what_lost_them: str = "") -> str:
+    """The user says the latest project is over their head / too complex / they
+    can't follow it. Do TWO things: (1) save a durable taste signal so future
+    projects lean more approachable, and (2) generate another, simpler project.
+    Pass a short note of WHAT made it too complex if they said (e.g. 'assumed
+    kernel/CUDA knowledge'); leave blank if they just said it's too much. Use this
+    instead of plain new_project whenever the reason is difficulty, so Argo
+    actually learns to dial it down."""
     import json as _json
     import argo_project
     import taste_signals
@@ -629,13 +537,14 @@ def project_too_complex(what_lost_her: str = "") -> str:
         except (ValueError, _json.JSONDecodeError):
             pass
 
-    detail = f" ({what_lost_her.strip()})" if what_lost_her.strip() else ""
+    detail = f" ({what_lost_them.strip()})" if what_lost_them.strip() else ""
+    _name = profile.name()
     taste_signals.save_signal(
-        what=f"A weekly project was too complex for Yiya to follow{detail}.",
-        pattern=("prefer approachable projects Yiya can understand and start "
+        what=f"A weekly project was too complex for {_name} to follow{detail}.",
+        pattern=(f"prefer approachable projects {_name} can understand and start "
                  "without deep infra/ML/systems expertise; favor a clear, "
                  "explainable core over heavy machinery"),
-        liked="projects she can actually grasp and begin this weekend",
+        liked=f"projects {profile.pronoun('subject')} can actually grasp and begin this weekend",
         steal="keep the bet small and legible; assume no specialist background",
         source="telegram-feedback",
         caption=bet,
@@ -647,11 +556,11 @@ def project_too_complex(what_lost_her: str = "") -> str:
     made = argo_project.make_proposal(refresh=True)
     if made == "NO_SIGNALS":
         return ("Saved that it was too complex. But I couldn't pull fresh signals "
-                "to build a simpler one right now (feeds may be down). Tell Yiya "
+                "to build a simpler one right now (feeds may be down). Tell the user "
                 "to try again shortly.")
     if made is None:
         return ("Saved that it was too complex, but couldn't generate another "
-                "right now (no model available). Tell Yiya to try again shortly.")
+                "right now (no model available). Tell the user to try again shortly.")
     project_id, pitch, _text, doc, _model = made
     import send_telegram
     send_telegram.try_send_message(
@@ -661,19 +570,19 @@ def project_too_complex(what_lost_her: str = "") -> str:
 
 
 @mcp.tool()
-@with_deadline(200)  # (possible) refresh + a model call to shape her idea
+@with_deadline(200)  # (possible) refresh + a model call to shape the user's idea
 def add_project(idea: str) -> str:
-    """Capture a project idea YIYA brings (e.g. 'I want to build X', 'add my idea:
-    ...') as a candidate, shaped into Argo's bet format so it sits comparably
-    next to Argo's own suggestions. Use whenever she proposes her own project.
-    Returns the shaped bet. She can rate it, SELECT it, or ask what to ship."""
+    """Capture a project idea THE USER brings (e.g. 'I want to build X', 'add my
+    idea: ...') as a candidate, shaped into Argo's bet format so it sits comparably
+    next to Argo's own suggestions. Use whenever they propose their own project.
+    Returns the shaped bet. They can rate it, SELECT it, or ask what to ship."""
     if not idea or not idea.strip():
         return "Tell me the idea and I'll shape it into a bet you can weigh."
     import argo_project
 
     made = argo_project.make_proposal(refresh=True, seed=idea, source="yiya")
     if made is None:
-        return ("Couldn't shape that right now (no model available). Tell Yiya "
+        return ("Couldn't shape that right now (no model available). Tell the user "
                 "to try again shortly.")
     project_id, pitch, _text, doc, _model = made
     import send_telegram
@@ -685,10 +594,10 @@ def add_project(idea: str) -> str:
 @mcp.tool()
 @with_deadline(90)  # reads candidates + one model call to weigh them
 def recommend_project() -> str:
-    """When Yiya asks what to ship / build this week, weigh ALL open candidates
-    (her ideas AND Argo's, any not yet selected) and recommend ONE, with the
-    runner-up named. Judge on: can it realistically ship in a week, fit to her
-    learned taste, and any 1-10 energy ratings she gave. Use for 'what should I
+    """When the user asks what to ship / build this week, weigh ALL open candidates
+    (their ideas AND Argo's, any not yet selected) and recommend ONE, with the
+    runner-up named. Judge on: can it realistically ship in a week, fit to their
+    learned taste, and any 1-10 energy ratings they gave. Use for 'what should I
     build/ship this week', 'which one', 'help me decide'."""
     import json as _json
     import argo_observe as _observe
@@ -704,8 +613,9 @@ def recommend_project() -> str:
         return "Nothing open to weigh. Bring an idea or ask for a project."
     if len(candidates) == 1:
         c = candidates[0]
-        return (f"Only one candidate open ({c['id']}). Reply SELECT to lock it "
-                "in and get a kickoff plan, or bring another idea to compare.")
+        return (f"Only one candidate open ({c['id']}). Reply REHEARSE to stress-test "
+                "it, SELECT to lock it in and get a kickoff plan, or bring another "
+                "idea to compare.")
 
     taste = ""
     try:
@@ -714,29 +624,31 @@ def recommend_project() -> str:
     except Exception:
         pass
 
+    name = profile.name()
+    poss = profile.pronoun("possessive").capitalize()  # Her / His / Their
     listing = "\n\n".join(
-        f"{c['id']} (from {'Yiya' if c.get('source') == 'yiya' else 'Argo'}"
+        f"{c['id']} (from {name if c.get('source') == 'yiya' else 'Argo'}"
         + (f", energy {c['energy']}/10" if c.get("energy") is not None else "")
         + f"):\n{c.get('text', '')}"
         for c in candidates
     )
     prompt = (
-        "You are Argo, helping Yiya decide which ONE project to ship THIS WEEK. "
+        f"You are Argo, helping {name} decide which ONE project to ship THIS WEEK. "
         "Weigh the candidates below on: (1) can it realistically ship in a week, "
-        "(2) fit to her taste, (3) any energy ratings. Recommend exactly one, in "
+        f"(2) fit to {profile.pronoun('possessive')} taste, (3) any energy ratings. Recommend exactly one, in "
         "2-4 short plain-text lines (no markdown, no em dashes): name it, say why "
         "it wins, and name the runner-up in one line. Be decisive.\n\n"
-        + (f"Her taste:\n{taste}\n\n" if taste else "")
+        + (f"{poss} taste:\n{taste}\n\n" if taste else "")
         + f"Candidates:\n{listing}"
     )
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + _observe.resolve_models()
          if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
     )
     if model is None:
-        return "No model available to weigh them, tell Yiya to try again shortly."
+        return "No model available to weigh them, tell the user to try again shortly."
     if _observe.provider_for(model)["name"] == "anthropic":
         rec = _observe.chat_with_mcp(
             "You are Argo, a decisive frontier scout.",
@@ -745,7 +657,8 @@ def recommend_project() -> str:
     else:
         rec = _observe.generate_observations(prompt, model, temperature=0.2)
     return _deliver(rec.strip()
-                    + "\n\nReply SELECT to lock in my pick, or name another to go with.")
+                    + "\n\nReply REHEARSE to stress-test my pick, SELECT to lock it "
+                    "in, or name another to go with.")
 
 
 def _scaffold_plan(project_id=""):
@@ -771,8 +684,8 @@ def _scaffold_plan(project_id=""):
     project = entry.get("text", "")
 
     prompt = (
-        "You are Argo, helping Yiya actually START the project below this "
-        "weekend. Give her a concrete kickoff plan, plain text, no markdown, no "
+        f"You are Argo, helping {profile.name()} actually START the project below this "
+        f"weekend. Give {profile.pronoun('object')} a concrete kickoff plan, plain text, no markdown, no "
         "em dashes, Telegram-friendly. Cover, briefly:\n"
         "1. the repo skeleton to create (folders/files, one line each)\n"
         "2. the first 2-3 commands or files to write to get a skeleton running\n"
@@ -782,13 +695,13 @@ def _scaffold_plan(project_id=""):
     )
 
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + _observe.resolve_models()
          if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
     )
     if model is None:
-        return "No model available to draft the plan, tell Yiya to try again shortly."
+        return "No model available to draft the plan, tell the user to try again shortly."
     if _observe.provider_for(model)["name"] == "anthropic":
         return _observe.chat_with_mcp(
             "You are Argo, a terse frontier scout helping a builder start.",
@@ -800,13 +713,35 @@ def _scaffold_plan(project_id=""):
 @mcp.tool()
 @with_deadline(120)  # a full model call to draft the kickoff plan
 def scaffold_project(project_id: str = "") -> str:
-    """Produce a concrete kickoff plan so Yiya can start building this weekend:
+    """Produce a concrete kickoff plan so the user can start building this weekend:
     the repo skeleton to create, the first 2-3 files or commands, and the very
     first thing to build. Defaults to the LATEST project; pass a project_id (e.g.
-    'P-002') to scaffold a specific selected one. Use after she SELECTs a project
-    or asks 'how do I start / scaffold me / help me get going'. The plan is sent
-    to her directly; you just acknowledge. Writes no files."""
+    'P-002') to scaffold a specific selected one. Use after they SELECT a project
+    or ask 'how do I start / scaffold me / help me get going'. The plan is sent
+    to them directly; you just acknowledge. Writes no files."""
     return _deliver(_scaffold_plan(project_id))
+
+
+@mcp.tool()
+@with_deadline(120)  # 3 parallel adversary calls + 1 judge call, all guarded
+def rehearse_project(project_id: str = "") -> str:
+    """Stress-test a project before building: three adversaries (a red-team critic,
+    a skeptical user, an ops/failure simulator) attack the bet, then a judge issues
+    a verdict (SHIP / REVISE / KILL) and, if it survives, a hardened build-ready
+    blueprint with kill-criteria and concrete first steps. Defaults to the LATEST
+    project; pass a project_id (e.g. 'P-002'). Use when the user says 'stress-test
+    this / rehearse it / poke holes in it / red-team this' or before committing to
+    a build. The verdict summary is sent to them directly; you just acknowledge."""
+    import argo_rehearse
+    verdict, blueprint_path, summary = argo_rehearse.rehearse(project_id)
+    if verdict == "ERROR":
+        return summary  # an honest error for the model to relay; not delivered
+    body = summary
+    if blueprint_path is not None:
+        steps = argo_rehearse.build_steps(blueprint_path)
+        if steps:
+            body += "\n\nHere's where to start:\n" + steps
+    return _deliver(body)
 
 
 @mcp.tool()
@@ -876,13 +811,13 @@ def read_findings(name: str = "") -> str:
     return match.read_text()[:MAX_FETCH_CHARS]
 
 
-# --- Taste: first-class learning of what Yiya likes (parallel to findings) ---
-# Taste is a PREFERENCE (what she likes), not a falsifiable belief, so it lives
+# --- Taste: first-class learning of what the user likes (parallel to findings) ---
+# Taste is a PREFERENCE (what they like), not a falsifiable belief, so it lives
 # in its own store (data/taste_signals.json), NOT the world model. But it is
 # first-class learning: readable on demand, theme-clustered, and fed into project
-# generation + (via save_taste_signal) the study_url loop. read_taste lets Yiya
-# AND Argo inspect the accumulated profile; save_taste_signal lets Argo persist a
-# taste lesson from a source she pointed it at.
+# generation + (via save_taste_signal) the study_url loop. read_taste lets the
+# user AND Argo inspect the accumulated profile; save_taste_signal lets Argo
+# persist a taste lesson from a source they pointed it at.
 
 # What each expected env var GATES — so Argo can report a MISSING secret as a
 # concrete capability loss ("no GITHUB_TOKEN -> can't read private repos"),
@@ -937,11 +872,11 @@ def check_config() -> str:
 @mcp.tool()
 @with_deadline(10)
 def read_taste() -> str:
-    """Show Yiya's learned taste profile — the design/product patterns she's
-    liked (from screenshots and urls she's sent), with the recurring THEMES that
-    have emerged. Use when she asks 'what do you know about my taste / what have
-    you learned / show my taste profile', or to ground a project in what she
-    actually likes."""
+    """Show the user's learned taste profile — the design/product patterns they've
+    liked (from screenshots and urls they've sent), with the recurring THEMES that
+    have emerged. Use when they ask 'what do you know about my taste / what have
+    you learned / show my taste profile', or to ground a project in what they
+    actually like."""
     import taste_signals
     return taste_signals.format_profile()
 
@@ -950,13 +885,13 @@ def read_taste() -> str:
 @with_deadline(10)
 def save_taste_signal(what: str, pattern: str, liked: str, steal: str = "",
                       source: str = "url") -> str:
-    """Persist a TASTE lesson you extracted from a design/product/app source Yiya
-    pointed you at (e.g. after study_url on a product page she likes). Use this
-    ONLY for taste (what she'd like / how she builds), NOT for factual research
-    (that goes through findings). Fields: what (the thing), pattern (the
+    """Persist a TASTE lesson you extracted from a design/product/app source the
+    user pointed you at (e.g. after study_url on a product page they like). Use
+    this ONLY for taste (what they'd like / how they build), NOT for factual
+    research (that goes through findings). Fields: what (the thing), pattern (the
     transferable design/interaction pattern), liked (the underlying quality that
-    makes it good), steal (how it could inform something she builds). This makes
-    the lesson durable + part of her taste profile, not just this chat."""
+    makes it good), steal (how it could inform something they build). This makes
+    the lesson durable + part of their taste profile, not just this chat."""
     import taste_signals
     sig = taste_signals.save_signal(what, pattern, liked, steal, source=source)
     if sig is None:
@@ -964,6 +899,55 @@ def save_taste_signal(what: str, pattern: str, liked: str, steal: str = "",
     return (f"Saved taste {sig['id']}: {sig['pattern']}"
             + (f" (the win: {sig['liked']})" if sig['liked'] else "")
             + ". It's in your taste profile now and will nudge future projects.")
+
+
+# --- Self-model: what Argo knows/believes about ITSELF (argo_self) ----------
+
+@mcp.tool()
+@with_deadline(10)
+def read_self() -> str:
+    """Report what you've learned about YOURSELF across runs: confirmed capabilities,
+    known issues, and lessons -- the durable self-model that outlasts this chat's
+    ~12-turn memory. Use when asked 'what do you know about yourself / what have you
+    learned about how you work / any known issues / what are you bad at'. Read-only."""
+    import argo_self
+    return argo_self.format_self_for_prompt(limit=12) or "No self-beliefs recorded yet."
+
+
+@mcp.tool()
+@with_deadline(10)
+def note_self_lesson(claim: str, kind: str = "lesson") -> str:
+    """Record a durable lesson ABOUT YOURSELF so it survives past this chat's short
+    memory (e.g. 'tripwire judge 400'd on temperature with gpt-5; fixed'). kind is one
+    of: issue, lesson, capability, trait. This does NOT assert you're fixed -- a
+    belief's confidence only rises when evidence is added later. Use when you or the
+    user diagnose something about how you actually work."""
+    import argo_self
+    bid = argo_self.note_self_lesson(claim, kind=kind, source="chat")
+    if bid is None:
+        return "Need a non-empty claim to note a self-lesson."
+    return f"Noted as {bid}. It's in your self-model now and persists across runs."
+
+
+@mcp.tool()
+@with_deadline(120)
+def run_reflection() -> str:
+    """Take stock of your own performance: read your recent projects' energy ratings
+    and tripwire activity and, if there's anything new, distil at most a couple of
+    honest lessons into your self-model. Use when asked to 'reflect / take stock / how
+    are you doing / review yourself'. Cheap (Sonnet) and skips the model call entirely
+    when nothing has changed since last time."""
+    import argo_self
+    r = argo_self.reflect(force=False)
+    stats = r.get("stats", {})
+    head = (f"Looked at {stats.get('projects_rated', 0)} rated projects (mean energy "
+            f"{stats.get('mean_energy')}, recent {stats.get('recent_mean_energy')})")
+    if r.get("skipped"):
+        return head + ". Nothing new enough to reflect on since last time."
+    n = len(r.get("new_lessons", []))
+    if not n:
+        return head + ". No new lessons stood out this time."
+    return head + f". Recorded {n} new lesson(s); read_self to see them."
 
 
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
@@ -1079,18 +1063,13 @@ def _gh_write(method, path, body):
     """Authenticated GitHub API call for the PROPOSE path. Uses the dedicated
     PR-only token (ARGO_PROPOSE_TOKEN); never the serving token. Returns
     (ok, parsed_json_or_text)."""
-    import ssl
     import urllib.request
 
     token = os.environ.get("ARGO_PROPOSE_TOKEN")
     if not token:
         return False, ("ARGO_PROPOSE_TOKEN not set. Self-create is disabled until "
                        "a PR-only GitHub token is configured.")
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
 
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -1102,19 +1081,21 @@ def _gh_write(method, path, body):
             "Authorization": "Bearer " + token.strip(),
         },
     )
-    # Short timeout + one transient retry (see _gh_api): a propose chain makes 5+
-    # of these calls, so any single stall must fail fast rather than blow the
-    # tool deadline. Writes are idempotent enough here (create-branch/put-file by
-    # path) that one retry on a timeout/5xx is safe.
+    # Short timeout + one transient retry (see argo_github.gh_api): a propose
+    # chain makes 5+ of these calls, so any single stall must fail fast rather
+    # than blow the tool deadline. Writes are idempotent enough here (create-
+    # branch/put-file by path) that one retry on a timeout/5xx is safe.
     last = None
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=GH_CALL_TIMEOUT, context=ctx) as r:
+            with urllib.request.urlopen(
+                req, timeout=argo_github.GH_CALL_TIMEOUT, context=ctx
+            ) as r:
                 txt = r.read().decode("utf-8", errors="replace")
                 return True, (json.loads(txt) if txt else {})
         except Exception as exc:
             last = exc
-            if not _gh_retryable(exc):
+            if not argo_github.gh_retryable(exc):
                 break
     detail = ""
     try:

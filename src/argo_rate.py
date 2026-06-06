@@ -25,12 +25,14 @@ Run with:  python src/argo_rate.py
 import json
 import os
 import re
-import ssl
 import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+
+import argo_http
+import argo_store
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
@@ -52,12 +54,7 @@ def fail(message):
 
 
 def _ssl_context():
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    return argo_http.tls_context()
 
 
 def get_updates(token, offset):
@@ -114,7 +111,7 @@ def main():
         fail(f"No project log at {PROJECTS_LOG.relative_to(ROOT)}. "
              "Run src/argo_project.py first.")
 
-    log = json.loads(PROJECTS_LOG.read_text())
+    log = argo_store.load_json(PROJECTS_LOG, [])
 
     offset = load_offset()
     updates = get_updates(token, offset)
@@ -151,7 +148,7 @@ def main():
     rating = ratings[-1]
     target["energy"] = rating
     target["rated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
+    argo_store.save_json(PROJECTS_LOG, log)
 
     if len(ratings) > 1:
         print(f"Read {len(ratings)} ratings {ratings}; applied the newest.")

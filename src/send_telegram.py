@@ -14,7 +14,6 @@ not modify any existing file. Run with:  python src/send_telegram.py
 
 import json
 import os
-import ssl
 import sys
 import urllib.request
 import urllib.error
@@ -22,6 +21,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MESSAGE_PATH = ROOT / "demo" / "weekly_project_message.md"
+
+import argo_http
+from argo_log import get_logger
+
+log = get_logger(__name__)
 
 # Load .env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) if python-dotenv is
 # installed; otherwise fall back to the real environment. Never hard-depends
@@ -56,16 +60,12 @@ def try_send_message(text):
         API_URL.format(token=token), data=payload,
         headers={"Content-Type": "application/json"}, method="POST",
     )
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
     try:
         with urllib.request.urlopen(request, timeout=30, context=ctx) as resp:
             return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
-        print(f"try_send_message failed: {type(exc).__name__}: {exc}")
+        log.error("telegram sendMessage failed: %s: %s", type(exc).__name__, exc)
         return False
 
 
@@ -108,15 +108,7 @@ def send_message(text):
 
     print("📨 Sending message to Telegram...")
 
-    # Verify TLS against certifi's CA bundle when available (some Python builds,
-    # notably macOS framework Python, ship without trusted roots). Falls back to
-    # the system default context — verification stays ON either way.
-    try:
-        import certifi
-
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ssl_context = ssl.create_default_context()
+    ssl_context = argo_http.tls_context()
 
     try:
         with urllib.request.urlopen(
@@ -125,8 +117,10 @@ def send_message(text):
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
+        log.error("telegram sendMessage HTTP %s: %s", error.code, detail)
         fail(f"Telegram API returned HTTP {error.code}: {detail}")
     except urllib.error.URLError as error:
+        log.error("telegram sendMessage unreachable: %s", error.reason)
         fail(f"Could not reach Telegram API: {error.reason}")
 
     if not body.get("ok"):
@@ -175,17 +169,13 @@ def send_document(filename, content, caption=""):
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
+    ctx = argo_http.tls_context()
     try:
         with urllib.request.urlopen(request, timeout=30, context=ctx) as resp:
             ok = json.loads(resp.read().decode("utf-8")).get("ok", False)
         return bool(ok)
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
-        print(f"sendDocument failed: {type(exc).__name__}: {exc}")
+        log.error("telegram sendDocument failed: %s: %s", type(exc).__name__, exc)
         return False
 
 

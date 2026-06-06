@@ -18,7 +18,6 @@ Run:  python3 src/argo_scheduled.py            (fire what's due now)
       python3 src/argo_scheduled.py --dry-run  (print what WOULD fire)
 """
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,14 +27,24 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-SCHEDULE_PATH = ROOT / "data" / "schedule.json"
-STATE_PATH = ROOT / "data" / "schedule_state.json"
+import argo_paths
+import argo_store
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
+# Re-exported from argo_paths; kept as module-level names so the scheduler tests
+# can patch them (mock.patch.object(argo_scheduled, "SCHEDULE_PATH", tmp)) and
+# main() reads the override at call time.
+SCHEDULE_PATH = argo_paths.SCHEDULE_PATH
+STATE_PATH = argo_paths.STATE_PATH
 
 # command name -> (module, callable). Importing lazily keeps startup cheap and
 # avoids pulling Flask/MCP for a watch-only run.
 COMMANDS = {
     "project": ("argo_project", "main"),
     "watch": ("argo_watch", "main"),
+    "reflect": ("argo_self", "reflect_cli"),
 }
 
 
@@ -70,15 +79,6 @@ def _due_hour(sched, now):
     return max(candidates) if candidates else None
 
 
-def _load(path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return default
-
-
 def _fire_key(sched, now, target_hour):
     """Dedupe key: one fire per schedule per scheduled window per UTC day.
 
@@ -98,8 +98,8 @@ def run_command(command):
 def main():
     dry = "--dry-run" in sys.argv
     now = datetime.now(timezone.utc)
-    config = _load(SCHEDULE_PATH, {"schedules": []})
-    state = _load(STATE_PATH, {"fired": []})
+    config = argo_store.load_json(SCHEDULE_PATH, {"schedules": []})
+    state = argo_store.load_json(STATE_PATH, {"fired": []})
     fired = set(state.get("fired", []))
 
     due = []
@@ -110,8 +110,14 @@ def main():
         target_hour = _due_hour(sched, now)
         if target_hour is None:
             continue
-        if _fire_key(sched, now, target_hour) not in fired:
-            due.append((sched, target_hour))
+        key = _fire_key(sched, now, target_hour)
+        if key in fired:
+            # Record WHY a due window isn't sending, so a "missing delivery" can be
+            # told apart from a genuine drop without reverse-engineering it.
+            log.info("skipping %s: already fired this window (%s)",
+                     sched.get("name"), key)
+            continue
+        due.append((sched, target_hour))
 
     print(f"\n⏰ Argo schedule runner — {now:%Y-%m-%d %H:%M UTC}")
     if not due:
@@ -124,17 +130,22 @@ def main():
               + (" (dry-run)" if dry else ""))
         if dry:
             continue
+        log.info("firing %s [%s] target_hour=%02d",
+                 sched.get("name"), sched["command"], target_hour)
         try:
             run_command(sched["command"])
             fired.add(key)
         except Exception as exc:
-            print(f"     failed: {type(exc).__name__}: {exc}")
+            # Outermost net: one bad command must not skip the rest. Log with the
+            # traceback so the failure is diagnosable, never silently swallowed.
+            log.error("schedule command %s failed: %s",
+                      sched["command"], exc, exc_info=True)
 
     if not dry:
         # keep the dedupe file small: only retain today's keys
         today = f"{now:%Y-%m-%dT}"
         state["fired"] = [k for k in fired if today in k]
-        STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
+        argo_store.save_json(STATE_PATH, state)
     print("\n✅ Schedule run complete.\n")
 
 

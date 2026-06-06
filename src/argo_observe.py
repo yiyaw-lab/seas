@@ -240,14 +240,18 @@ def _call_openai(job, model, temperature=1.0):
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"].strip())
 
     def do_call():
-        return client.chat.completions.create(
-            model=model,
-            messages=[
+        kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": job},
             ],
-            temperature=temperature,  # default 1.0: observations want breadth
-        )
+        }
+        # Omit temperature for models that reject a custom value (gpt-5/o-series
+        # accept only the default); otherwise default 1.0 -- observations want breadth.
+        if temperature is not None and not _rejects_temperature(model):
+            kwargs["temperature"] = temperature
+        return client.chat.completions.create(**kwargs)
 
     response = _guarded("openai", do_call, f"openai/{model}")
     return response.choices[0].message.content
@@ -261,13 +265,16 @@ def _call_anthropic(job, model, temperature=1.0):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
 
     def do_call():
-        return client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": job}],
-            temperature=temperature,
-        )
+        kwargs = {
+            "model": model,
+            "max_tokens": 1024,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": job}],
+        }
+        # Omit temperature for models that reject a custom value (e.g. opus-4-8).
+        if temperature is not None and not _rejects_temperature(model):
+            kwargs["temperature"] = temperature
+        return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
     return "".join(
@@ -314,6 +321,19 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
 MCP_BETA = "mcp-client-2025-11-20"
 
 
+# Models that reject a custom `temperature` (the API 400s) -> we OMIT the param and
+# take the model default. claude-opus-4-8 rejects it outright; OpenAI reasoning models
+# (gpt-5, o1/o3/o4) accept ONLY the default (1), so passing 0 fails the same way.
+# Matched by prefix so a dated alias (claude-opus-4-8-20xxxxxx, gpt-5-mini) is covered.
+# Do NOT add gpt-4o / gpt-4.1 -- those accept a custom temperature (the watch judge
+# relies on temperature=0 there).
+_TEMPERATURE_REJECTING_PREFIXES = ("claude-opus-4-8", "gpt-5", "o1", "o3", "o4")
+
+
+def _rejects_temperature(model):
+    return any(model.startswith(p) for p in _TEMPERATURE_REJECTING_PREFIXES)
+
+
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                   temperature=1.0):
     """Claude chat call with structured messages and optional MCP tool servers.
@@ -335,8 +355,13 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         "max_tokens": max_tokens,
         "system": system,
         "messages": messages,
-        "temperature": temperature,
     }
+    # Some newer models reject `temperature` outright (the API 400s). Omit it for
+    # those, and whenever a caller passes None to take the model's default. This
+    # guards every caller (incl. the webhook's Opus-escalated chat turns), not
+    # just the ones that remember to pass None.
+    if temperature is not None and not _rejects_temperature(model):
+        kwargs["temperature"] = temperature
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
         # Each server must be referenced by exactly one mcp_toolset (2025-11-20).

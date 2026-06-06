@@ -59,7 +59,7 @@ in `data/world_model.json`; dead ends in `data/probes.json`. Needs
 
 > The legacy `Signal → Opportunity → Experiment` scripts and prose F-001 are
 > retained but superseded by the V3 gate-based pipeline. Inventory in
-> [AUDIT.md](AUDIT.md); full session history in [build-log/](build-log/).
+> [AUDIT.md](docs/audits/AUDIT.md); full session history in [build-log/](build-log/).
 
 ---
 
@@ -117,9 +117,11 @@ cs.SE feed), we reviewed and merged it.
 
 ### Design docs
 
-- [ARGO_ARCHITECTURE.md](ARGO_ARCHITECTURE.md) — V1 decision engine (frozen)
-- [ARGO_V2.md](ARGO_V2.md) — V2 insight engine (approved design)
-- [ARGO_V2_MIGRATION.md](ARGO_V2_MIGRATION.md) — V1 → V2 path
+- [docs/architecture/ARGO_ARCHITECTURE.md](docs/architecture/ARGO_ARCHITECTURE.md) — V1 decision engine (frozen)
+- [docs/architecture/ARGO_V2.md](docs/architecture/ARGO_V2.md) — V2 insight engine (approved design)
+- [docs/plans/ARGO_V2_MIGRATION.md](docs/plans/ARGO_V2_MIGRATION.md) — V1 → V2 path
+- [docs/plans/PHASE_1_PLAN.md](docs/plans/PHASE_1_PLAN.md) — codebase cleanup plan
+- [docs/audits/AUDIT.md](docs/audits/AUDIT.md) — codebase audit
 - [build-log/](build-log/) — dated session logs (newest first)
 - [docs/ARGO_WEBHOOK_SETUP.md](docs/ARGO_WEBHOOK_SETUP.md) — Railway + webhook setup
 - [docs/ARGO_LLM_SETUP.md](docs/ARGO_LLM_SETUP.md) — API key + model config
@@ -131,9 +133,12 @@ cs.SE feed), we reviewed and merged it.
 ```
 README.md                    ← you are here
 CLAUDE.md                    ← behavioral rules + project conventions for Claude Code
-ARGO_ARCHITECTURE.md         ← Argo V1 design
-ARGO_V2.md / ARGO_V2_MIGRATION.md  ← V2 insight-engine design + migration
-AUDIT.md / PHASE_1_PLAN.md   ← codebase audit + cleanup plan
+
+docs/
+  ARGO_WEBHOOK_SETUP.md, ARGO_LLM_SETUP.md, TELEGRAM_SETUP.md  ← setup guides
+  architecture/              ← ARGO_ARCHITECTURE.md (V1), ARGO_V2.md (V2 design)
+  plans/                     ← ARGO_V2_MIGRATION.md, PHASE_1_PLAN.md
+  audits/                    ← AUDIT.md (codebase audit)
 
 src/
   argo_webhook.py            ← two-way Telegram chat (ASGI: Flask + FastMCP)
@@ -143,14 +148,25 @@ src/
   argo_observe.py            ← LLM call layer (providers + chat_with_mcp + guardrails)
   argo_guard.py              ← resilience: retry/backoff, circuit breaker, daily budget
   argo_project.py            ← generate a fresh LLM project + send to Telegram
+  argo_rehearse.py           ← adversarial rehearsal: 3 critics + a judge, SHIP/REVISE/KILL
+  argo_rating.py             ← rating + project-state helpers (parse/target/record/select)
+  argo_github.py             ← GitHub read API (allowlist + gh_api; backs the github_* tools)
   argo_watch.py              ← tripwire: proactive frontier alerts
   argo_scheduled.py          ← hourly schedule runner (reads data/schedule.json)
   argo_rate.py               ← read Telegram replies for energy ratings
   fetch_signals.py           ← RSS ingestion (reads data/feeds.json)
+  profile.py                 ← active user's identity/persona/voice (data/profile.json)
   argo.py                    ← V1 weekly bet + energy (interactive)
   seas.py                    ← SEAS orchestrator
   send_telegram.py, set_webhook.py, seas_demo.py  ← delivery + utilities
-  (older SEAS scripts — see AUDIT.md)
+  (older SEAS scripts — see docs/audits/AUDIT.md)
+
+  shared-utils layer (the Argo core builds on these):
+  argo_paths.py              ← single source of truth for ROOT + named data paths
+  argo_store.py              ← load_json/save_json (indent=2 + trailing newline)
+  argo_http.py               ← tls_context() (certifi-backed TLS for all urllib calls)
+  argo_log.py                ← get_logger() (operator-facing logging)
+  (the older SEAS job scripts still use cwd-relative data/ paths — future work)
 
 data/
   feeds.json                 ← approved signal sources (data; Argo can propose edits)
@@ -179,6 +195,28 @@ experiments/  SEAS-00x experiment cards
 
 > Scheduling is now centralised in `data/schedule.json`. The hourly runner fires
 > whatever is due — new schedules are data edits, not workflow edits.
+
+## Testing
+
+```
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+Run under `python3` (3.11), not the 3.9 `.venv`. The suite is stdlib `unittest`
+(no extra dep) and covers the four regressions that kept recurring:
+
+- **scheduler** firing / grace-window / per-day dedupe (`argo_scheduled`)
+- **seen-store** dedup + legacy-list migration (`argo_watch`)
+- **rating prompt** + decimal ratings (`argo_project.project_invite`,
+  `argo_rating.parse_rating` via `argo_webhook._parse_rating`)
+- **project re-anchoring** / last-shown targeting (`argo_rating` via
+  `argo_webhook._target_project`, `_match_existing_project`)
+
+Tests are pure — no network, no LLM, no real `data/*.json`. They override the
+module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
+`STATE_PATH`) to a temp dir, which is why those stay plain module attributes even
+after the move to `argo_paths`. Rule: a bug fix in any of those four areas must
+add or extend a test that fails before the fix and passes after.
 
 ## Required env (Railway Variables)
 
