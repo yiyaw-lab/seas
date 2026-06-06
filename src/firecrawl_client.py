@@ -23,9 +23,10 @@ direct urllib fetch fails on a 403/JS page).
 
 import json
 import os
-import ssl
 import urllib.request
 from urllib.parse import urlparse
+
+import argo_http
 
 API_BASE = "https://api.firecrawl.dev/v2"
 DEFAULT_TIMEOUT = 25  # server-side scraping is slower than a raw fetch
@@ -39,11 +40,7 @@ def is_enabled():
 
 
 def _ctx():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    return argo_http.tls_context()
 
 
 def _post(path, body, timeout=DEFAULT_TIMEOUT):

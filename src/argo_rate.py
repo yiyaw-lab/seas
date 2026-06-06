@@ -25,12 +25,13 @@ Run with:  python src/argo_rate.py
 import json
 import os
 import re
-import ssl
 import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+
+import argo_http
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
@@ -52,12 +53,7 @@ def fail(message):
 
 
 def _ssl_context():
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    return argo_http.tls_context()
 
 
 def get_updates(token, offset):
