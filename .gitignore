@@ -41,5 +41,7 @@ data/schedule_state.json
 .claude/
 data/profile.json
 
-# Rehearse blueprints are generated per-rehearsal output (keep local)
+# Rehearse blueprints + the full debate transcript (transcripts.jsonl) are
+# generated per-rehearsal output: large, may quote sources, kept local for
+# eval/research. On Railway, ARGO_REHEARSE_LOG can point at the mounted volume.
 argo/rehearsals/
