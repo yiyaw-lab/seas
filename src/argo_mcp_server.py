@@ -522,34 +522,37 @@ def _deliver(body):
     invite line, not the bet). Sending directly from the tool guarantees she gets
     it verbatim; the model just acknowledges instead of re-typing it."""
     import send_telegram
-    try:
-        send_telegram.send_message(body)
+    if send_telegram.try_send_message(body):
         return ("[Already sent to Yiya verbatim. Do NOT repeat or summarize it; "
                 "just acknowledge briefly, e.g. 'sent'.]")
-    except Exception as exc:
-        # Delivery failed: fall back to returning the body so the model can relay
-        # it, rather than silently dropping the project.
-        return body + f"\n\n[Note: direct send failed ({type(exc).__name__}).]"
+    # Delivery failed: return the body so the model relays it (and never falsely
+    # claims 'sent'), rather than silently dropping it.
+    return body + "\n\n[Direct delivery failed; relay the above to her as your reply.]"
 
 
 def _deliver_proposal(project_id, pitch, doc):
     """Send the one-line pitch as a chat message and the full proposal as an
-    attached doc, so Yiya gets a clean pitch plus decision-grade detail (ratings,
-    reasoning, real sources) to open. Falls back to sending the doc as text if the
-    file upload fails. Returns the do-not-repeat note for the model."""
+    attached doc. Only tells the model 'sent' if delivery ACTUALLY succeeded; if
+    a send fails, returns the content so the model relays it instead of falsely
+    claiming 'sent' (the bug: Argo said 'sent' but nothing arrived)."""
     import send_telegram
-    try:
-        send_telegram.send_message(pitch)
-        sent = send_telegram.send_document(
-            f"{project_id}-proposal.md", doc,
-            caption="Full proposal: ratings, reasoning, sources.")
-        if not sent:
-            send_telegram.send_message(doc)  # fallback: proposal as text
-        return ("[Pitch + full proposal already sent to Yiya. Do NOT repeat or "
-                "summarize them; just acknowledge briefly, e.g. 'sent'.]")
-    except Exception as exc:
-        return (pitch + "\n\n" + doc
-                + f"\n\n[Note: direct send failed ({type(exc).__name__}).]")
+    pitch_ok = send_telegram.try_send_message(pitch)
+    doc_ok = send_telegram.send_document(
+        f"{project_id}-proposal.md", doc,
+        caption="Full proposal: ratings, reasoning, sources.")
+    if not doc_ok:
+        doc_ok = send_telegram.try_send_message(doc)  # fallback: proposal as text
+
+    if pitch_ok and doc_ok:
+        return ("[Pitch + full proposal sent to Yiya. Do NOT repeat them; just "
+                "acknowledge briefly, e.g. 'sent'.]")
+    if pitch_ok and not doc_ok:
+        # Pitch landed but the doc didn't: have the model relay the doc as text.
+        return ("[The pitch was sent but the proposal doc failed to deliver. "
+                "Send her the full proposal now as your reply:]\n\n" + doc)
+    # Nothing landed: give the model everything to relay, and be honest.
+    return (pitch + "\n\n" + doc
+            + "\n\n[Direct delivery failed; relay the above to her as your reply.]")
 
 
 @mcp.tool()
@@ -622,13 +625,10 @@ def project_too_complex(what_lost_her: str = "") -> str:
         return ("Saved that it was too complex, but couldn't generate another "
                 "right now (no model available). Tell Yiya to try again shortly.")
     project_id, pitch, _text, doc, _model = made
-    send_telegram_note = ("Got it, that one was over the bar. I'll keep projects "
-                          "more approachable from here.")
     import send_telegram
-    try:
-        send_telegram.send_message(send_telegram_note)
-    except Exception:
-        pass
+    send_telegram.try_send_message(
+        "Got it, that one was over the bar. I'll keep projects more "
+        "approachable from here.")
     return _deliver_proposal(project_id, pitch, doc)
 
 
@@ -649,11 +649,8 @@ def add_project(idea: str) -> str:
                 "to try again shortly.")
     project_id, pitch, _text, doc, _model = made
     import send_telegram
-    try:
-        send_telegram.send_message("Shaped your idea into a proposal, with my "
+    send_telegram.try_send_message("Shaped your idea into a proposal, with my "
                                    "honest take on it.")
-    except Exception:
-        pass
     return _deliver_proposal(project_id, pitch, doc)
 
 

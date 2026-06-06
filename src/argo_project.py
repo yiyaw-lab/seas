@@ -267,19 +267,53 @@ are your judgments, say so.>
 """
 
 
+def _recent_pitches(n=5):
+    """One-line summaries of the last `n` logged projects, so a new one can be
+    steered AWAY from them (no near-duplicate rerolls). Best-effort: [] if the
+    log is missing/unreadable."""
+    if not PROJECTS_LOG.exists():
+        return []
+    try:
+        log = json.loads(PROJECTS_LOG.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return []
+    out = []
+    for p in log[-n:]:
+        text = p.get("text", "")
+        # Prefer the bet name (line after "This week's bet:"), else first real line.
+        line = ""
+        low = text.lower()
+        if "this week's bet:" in low:
+            after = text[low.find("this week's bet:") + len("this week's bet:"):]
+            line = next((l.strip() for l in after.splitlines() if l.strip()), "")
+        if not line:
+            line = next((l.strip() for l in text.splitlines()
+                         if l.strip() and not l.startswith("⚓")), "")
+        if line:
+            out.append(line[:120])
+    return out
+
+
 def _build_proposal_prompt(seed=""):
     """Proposal prompt + the signals it draws on (so real source links can be
     appended to the doc). If `seed` is given, the proposal shapes HER idea (and
     rates it honestly, incl. feasibility); otherwise it picks from the signals.
 
     Signals are SHUFFLED each call so consecutive 'another' requests see a
-    different slice/order and don't converge on the same theme."""
+    different slice/order, and recent projects are listed as 'avoid these' so a
+    reroll is meaningfully different, not a near-duplicate."""
     import random
     signals = observe.load_signals(limit=max(PROJECT_SIGNALS * 2, 20))
     random.shuffle(signals)
     signals = signals[:PROJECT_SIGNALS]
     block = observe.format_signals(signals)
     prompt = f"{PROPOSAL_INSTRUCTIONS}\n---\n\n## Frontier signals\n\n{block}\n"
+    recent = _recent_pitches()
+    if recent and not seed.strip():
+        avoid = "\n".join(f"- {r}" for r in recent)
+        prompt += (f"\n---\n\nAVOID these recently proposed projects. Propose "
+                   f"something in a clearly DIFFERENT direction (different domain, "
+                   f"problem, or kind of artifact), not a variation on them:\n{avoid}\n")
     if seed.strip():
         prompt += (f"\n---\n\nIMPORTANT: build the proposal around YIYA'S OWN "
                    f"idea below; sharpen it, don't replace it. Rate it honestly, "

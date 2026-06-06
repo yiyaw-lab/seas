@@ -41,6 +41,34 @@ def fail(message):
     sys.exit(1)
 
 
+def try_send_message(text):
+    """Send `text` and return True on success, False on any failure — WITHOUT
+    exiting. Use inside the server (webhook/MCP tools), where send_message's
+    sys.exit(1) on failure would raise SystemExit, escape `except Exception`, and
+    die silently in a worker thread (the 'replied sent but nothing arrived' bug).
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id or not (text and text.strip()):
+        return False
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    request = urllib.request.Request(
+        API_URL.format(token=token), data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=ctx) as resp:
+            return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+        print(f"try_send_message failed: {type(exc).__name__}: {exc}")
+        return False
+
+
 def send_message(text):
     """Send `text` to the configured Telegram chat.
 
