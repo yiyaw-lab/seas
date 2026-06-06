@@ -299,6 +299,15 @@ def _recent_turns(chat_id, n=HISTORY_TURNS):
     return turns[-n:]
 
 
+# Words after a period that mean it's a filename/domain, NOT a sentence boundary,
+# so _clean_reply leaves "file.py", "docs.x.ai", "example.com" etc. unspaced.
+_NOT_SENTENCE_AFTER = frozenset((
+    "py", "js", "json", "md", "txt", "ai", "com", "io", "org", "net", "co",
+    "sh", "html", "css", "yml", "yaml", "toml", "env", "log", "csv", "png",
+    "jpg", "gif", "xml", "ts", "go", "rs", "pdf", "app", "dev", "xyz",
+))
+
+
 def _clean_reply(text):
     """Deterministically enforce the plain-text rules the prompt asks for, since
     the model doesn't always comply: strip em/en dashes and any markdown (bold,
@@ -316,12 +325,21 @@ def _clean_reply(text):
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
     text = re.sub(r"(?m)^\s{0,3}[-*+]\s+", "", text)
     # Repair a missing space after sentence-ending punctuation: the model
-    # sometimes glues "end.Next" together (more so after markdown stripping).
-    # Only when a .!? is followed directly by an uppercase letter (a sentence
-    # boundary) AND the char before the . isn't a lone capital (skip initialisms
-    # like U.S.A.). Lowercase-after-period is left alone, so URLs/filenames/
-    # decimals (docs.x.ai, argo_chat.json, 3.14) are untouched.
+    # sometimes glues sentences together ("work.good", "PR.got") -- more so after
+    # markdown stripping. Two cases:
+    #  1) .!? directly before an UPPERCASE letter (skip lone-capital initialisms
+    #     like U.S.A.).
     text = re.sub(r"(?<![A-Z])([.!?])([A-Z])", r"\1 \2", text)
+    #  2) .!? glued to a LOWERCASE word, where >=2 letters precede the punctuation
+    #     (so initialisms/decimals like U.S.A. / a.b / 3.14 are skipped) AND the
+    #     following word isn't a known file-ext / TLD (so docs.x.ai, file.py,
+    #     argo_chat.json, example.com stay intact).
+    text = re.sub(
+        r"([A-Za-z]{2})([.!?])([a-z]{2,})",
+        lambda m: m.group(0) if m.group(3) in _NOT_SENTENCE_AFTER
+        else f"{m.group(1)}{m.group(2)} {m.group(3)}",
+        text,
+    )
     # Tidy leftover double spaces.
     return re.sub(r"  +", " ", text)
 
