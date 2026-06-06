@@ -25,6 +25,8 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+import argo_http
+
 ROOT = Path(__file__).resolve().parent.parent
 SIGNALS_PATH = ROOT / "data" / "signals.json"
 
@@ -77,14 +79,7 @@ USER_AGENT = "argo-fetch-signals/1.0 (+https://github.com/yiyaw-lab/seas)"
 
 def _fetch_url(url, timeout=20):
     """Fetch raw bytes for a feed URL, verifying TLS via certifi when present."""
-    try:
-        import certifi
-        import ssl
-
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = None
-
+    ctx = argo_http.tls_context()
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         return resp.read()
