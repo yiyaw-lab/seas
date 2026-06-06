@@ -29,10 +29,11 @@ ROOT = Path(__file__).resolve().parent.parent
 SIGNALS_PATH = ROOT / "data" / "signals.json"
 
 # How many feed items to turn into signals for one run. The store is a shared
-# pool: the observation path takes the top 3, project generation takes ~10, so
-# keep enough here that project generation has real material to synthesize from
-# (too few signals is what made weekly projects thin and same-y).
-NUM_SIGNALS = 12
+# pool: the observation path takes the top 3, project generation shuffles and
+# samples ~10 from a wider set, so keep a generous pool here. More signals = more
+# variety, so consecutive "another" requests don't converge on one theme (too few
+# is what made weekly projects thin and same-y).
+NUM_SIGNALS = 24
 # Pull this many recent items per feed before selecting across feeds.
 PER_FEED = 8
 
