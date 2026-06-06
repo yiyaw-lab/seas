@@ -542,6 +542,9 @@ def _deliver_proposal(project_id, pitch, doc):
         caption="Full proposal: ratings, reasoning, sources.")
     if not doc_ok:
         doc_ok = send_telegram.try_send_message(doc)  # fallback: proposal as text
+    # Log the delivery outcome so a 'said sent but nothing arrived' report is
+    # diagnosable from the server logs (pitch vs doc, which one failed).
+    print(f"[deliver_proposal] {project_id} pitch_ok={pitch_ok} doc_ok={doc_ok}")
 
     if pitch_ok and doc_ok:
         return ("[Pitch + full proposal sent to Yiya. Do NOT repeat them; just "
@@ -556,7 +559,7 @@ def _deliver_proposal(project_id, pitch, doc):
 
 
 @mcp.tool()
-@with_deadline(120)  # refreshes signals + a full model call; give it room
+@with_deadline(200)  # (possible) feed refresh + a full model call; under the 300s cap
 def new_project() -> str:
     """Generate a FRESH weekly project on demand and send it to Yiya as a one-line
     pitch plus an attached proposal doc (ratings, reasoning, real sources). Use
@@ -578,7 +581,7 @@ def new_project() -> str:
 
 
 @mcp.tool()
-@with_deadline(120)  # saves a taste signal + a full model call to regenerate
+@with_deadline(200)  # taste signal + (possible) refresh + a full model call
 def project_too_complex(what_lost_her: str = "") -> str:
     """Yiya says the latest project is over her head / too complex / she can't
     follow it. Do TWO things: (1) save a durable taste signal so future projects
@@ -633,7 +636,7 @@ def project_too_complex(what_lost_her: str = "") -> str:
 
 
 @mcp.tool()
-@with_deadline(120)  # a model call to shape her idea into a comparable bet
+@with_deadline(200)  # (possible) refresh + a model call to shape her idea
 def add_project(idea: str) -> str:
     """Capture a project idea YIYA brings (e.g. 'I want to build X', 'add my idea:
     ...') as a candidate, shaped into Argo's bet format so it sits comparably

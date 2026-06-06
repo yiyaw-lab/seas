@@ -192,9 +192,31 @@ def generate_project(prompt):
     return None, errors
 
 
-def _refresh_signals():
+SIGNALS_FRESH_SECONDS = 2 * 60 * 60  # treat the store as fresh for 2 hours
+
+
+def _signals_fresh():
+    """True if the signal store exists and was written recently. Fetching 14 RSS
+    feeds is the slowest, most variable step and on a slow host can blow the
+    tool's deadline, so we skip it when the store is already fresh."""
+    try:
+        from pathlib import Path
+        p = observe.SIGNALS_PATH
+        if not p.exists():
+            return False
+        import time
+        return (time.time() - p.stat().st_mtime) < SIGNALS_FRESH_SECONDS
+    except Exception:
+        return False
+
+
+def _refresh_signals(force=False):
     """Refresh the signal store from the live feeds. Best-effort: never raises —
-    on failure we fall back to whatever's already in the store."""
+    on failure we fall back to whatever's already in the store. Skips the fetch
+    when the store is already fresh (force=True overrides), so an on-demand
+    'another' doesn't pay the full multi-feed fetch and risk the tool deadline."""
+    if not force and _signals_fresh():
+        return
     try:
         import fetch_signals
         fetch_signals.main()
