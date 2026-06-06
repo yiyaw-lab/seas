@@ -64,6 +64,11 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 # are set; otherwise None = no tools (pure chat, the Phase A behaviour).
 ARGO_MCP_TOKEN = os.environ.get("ARGO_MCP_TOKEN")
 
+# The repo Argo lives in (same default as argo_mcp_server.PROPOSE_REPO). Defined
+# here too so the system prompt can tell Argo its own repo, so it never asks Yiya
+# which repo it lives in.
+PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "yiyaw-lab/seas")
+
 
 def _build_mcp_servers():
     base = os.environ.get("WEBHOOK_URL")
@@ -187,6 +192,11 @@ SYSTEM_PROMPT = (
     "its structure and github_read_file(repo, path) reads a file. When you mention "
     "or surface a trending repo, actually read its README/key files and reason "
     "about what it does, instead of going off the title. "
+    f"YOUR OWN code lives in the repo '{PROPOSE_REPO}' — that is where you run "
+    "from and where propose_change opens PRs. NEVER ask Yiya which repo you live "
+    "in or what it's called; you already know it is "
+    f"'{PROPOSE_REPO}'. To read your own code (e.g. the pitch template, a prompt), "
+    f"call github_read_file('{PROPOSE_REPO}', '<path>') directly. "
     "After you study_url something, decide where the lesson belongs and ACT: a "
     "research/frontier source can support a finding (but one page is rarely enough "
     "on its own — note it needs corroboration); a design/product/app source is "
