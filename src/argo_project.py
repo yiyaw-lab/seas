@@ -224,14 +224,27 @@ def make_project(refresh=True):
 
 
 # A proposal = a one-line pitch (for chat) + a decision-grade doc (for an
-# attachment): the bet, the model's ratings with reasons, why this one, and the
-# REAL source links the signals came from (never invented).
+# attachment): the bet, ratings, what she'll gain, why this one, and the REAL
+# source links the signals came from (never invented).
 PROPOSAL_INSTRUCTIONS = """You are Argo. From the signals below, produce ONE
-project worth building this week, as a decision aid for Yiya. Output EXACTLY
-these labeled blocks, plain text, no markdown, no em dashes:
+project worth building this week for Yiya, as a decision aid.
 
-PITCH: <one vivid line naming the project and what it does, this is all she sees
-in chat first>
+What makes a GOOD project here:
+- IMPACT and REPUTATION first: something that, once shipped, makes her look good
+  and actually matters to people. A thing others will use, cite, or share, not a
+  throwaway toy. That is the north star.
+- Vary the angle. Do NOT keep proposing the same theme (e.g. agent-safety/trust
+  cards). Reach for a DIFFERENT corner of the signals than an obvious one. Mix it
+  up across runs: sometimes a serious tool, sometimes a sharp/playful build, as
+  long as it is impactful and reputation-building.
+- Concrete and buildable, not abstract enterprise jargon.
+
+Output EXACTLY these labeled blocks, plain text, no markdown, no em dashes:
+
+PITCH: <ONE plain-English line a smart non-specialist instantly gets. Say what it
+is and what it lets you do, like "a X that does Y so you can Z". NO jargon, no
+"ontology-grounded assurance dossier" type phrasing. If she can't picture it in
+one read, rewrite it.>
 
 PROJECT:
 <the full bet: 2-4 lines of insight, then the project, what to build, the
@@ -240,8 +253,13 @@ week)>
 
 RATINGS:
 Technical depth: <1-5>/5 - <one line: what skills/stack it demands>
-Impact: <1-5>/5 - <one line: why it matters or doesn't>
+Impact: <1-5>/5 - <one line: who uses it and why it matters to her reputation>
 Feasibility this week: <1-5>/5 - <one line: can she realistically ship it>
+
+WHAT YOU'LL GAIN:
+<2-3 concrete skills or capabilities she'll have AFTER building this (e.g. "ship
+a browser extension end to end", "fine-tune and serve a small model", "design an
+eval"). Make it motivating: why she'd be better off having built it.>
 
 WHY THIS ONE:
 <2-3 lines: the specific reason you picked this from the signals, honestly. These
@@ -252,8 +270,14 @@ are your judgments, say so.>
 def _build_proposal_prompt(seed=""):
     """Proposal prompt + the signals it draws on (so real source links can be
     appended to the doc). If `seed` is given, the proposal shapes HER idea (and
-    rates it honestly, incl. feasibility); otherwise it picks from the signals."""
-    signals = observe.load_signals(limit=PROJECT_SIGNALS)
+    rates it honestly, incl. feasibility); otherwise it picks from the signals.
+
+    Signals are SHUFFLED each call so consecutive 'another' requests see a
+    different slice/order and don't converge on the same theme."""
+    import random
+    signals = observe.load_signals(limit=max(PROJECT_SIGNALS * 2, 20))
+    random.shuffle(signals)
+    signals = signals[:PROJECT_SIGNALS]
     block = observe.format_signals(signals)
     prompt = f"{PROPOSAL_INSTRUCTIONS}\n---\n\n## Frontier signals\n\n{block}\n"
     if seed.strip():
