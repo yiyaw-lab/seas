@@ -15,6 +15,11 @@ data/argo_chat.json
 # Private / trade-secret — never commit
 COST_PLAYBOOK.md
 
+# Strategy / vision / design docs — keep local, not in the repo
+BRAND.md
+VISION.md
+docs/DESIGN_dispatch_to_coder.md
+
 # Transient daily-budget counter (argo_guard)
 data/argo_budget.json
 
