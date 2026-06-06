@@ -18,7 +18,6 @@ Run:  python3 src/argo_scheduled.py            (fire what's due now)
       python3 src/argo_scheduled.py --dry-run  (print what WOULD fire)
 """
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +27,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+import argo_store
 from argo_log import get_logger
 
 log = get_logger(__name__)
@@ -74,15 +74,6 @@ def _due_hour(sched, now):
     return max(candidates) if candidates else None
 
 
-def _load(path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return default
-
-
 def _fire_key(sched, now, target_hour):
     """Dedupe key: one fire per schedule per scheduled window per UTC day.
 
@@ -102,8 +93,8 @@ def run_command(command):
 def main():
     dry = "--dry-run" in sys.argv
     now = datetime.now(timezone.utc)
-    config = _load(SCHEDULE_PATH, {"schedules": []})
-    state = _load(STATE_PATH, {"fired": []})
+    config = argo_store.load_json(SCHEDULE_PATH, {"schedules": []})
+    state = argo_store.load_json(STATE_PATH, {"fired": []})
     fired = set(state.get("fired", []))
 
     due = []
@@ -149,7 +140,7 @@ def main():
         # keep the dedupe file small: only retain today's keys
         today = f"{now:%Y-%m-%dT}"
         state["fired"] = [k for k in fired if today in k]
-        STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
+        argo_store.save_json(STATE_PATH, state)
     print("\n✅ Schedule run complete.\n")
 
 

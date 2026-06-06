@@ -24,13 +24,13 @@ Run with:  python src/argo_project.py            (generate + send)
            python src/argo_project.py --no-send   (generate only, print)
 """
 
-import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import argo_observe as observe
+import argo_store
 import profile
 import send_telegram
 
@@ -56,9 +56,7 @@ def log_project(project_text, model, source="argo"):
 
     `source` is "argo" for a generated project or "yiya" for one she brought, so
     recommend_project can weigh both kinds as candidates side by side."""
-    log = []
-    if PROJECTS_LOG.exists():
-        log = json.loads(PROJECTS_LOG.read_text())
+    log = argo_store.load_json(PROJECTS_LOG, [])
 
     project_id = f"P-{len(log) + 1:03d}"
     log.append({
@@ -70,7 +68,7 @@ def log_project(project_text, model, source="argo"):
         "energy": None,   # filled by argo_rate.py when you reply on Telegram
         "rated_at": None,
     })
-    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
+    argo_store.save_json(PROJECTS_LOG, log)
     return project_id
 
 
@@ -298,12 +296,7 @@ def _recent_pitches(n=5):
     """One-line summaries of the last `n` logged projects, so a new one can be
     steered AWAY from them (no near-duplicate rerolls). Best-effort: [] if the
     log is missing/unreadable."""
-    if not PROJECTS_LOG.exists():
-        return []
-    try:
-        log = json.loads(PROJECTS_LOG.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return []
+    log = argo_store.load_json(PROJECTS_LOG, [])
     out = []
     for p in log[-n:]:
         text = p.get("text", "")

@@ -21,6 +21,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import argo_store
 import profile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,17 +32,12 @@ RECENT_FOR_PROMPT = 8
 
 
 def _load():
-    if not TASTE_PATH.exists():
-        return []
-    try:
-        return json.loads(TASTE_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return []
+    return argo_store.load_json(TASTE_PATH, [])
 
 
 def _save(items):
     TASTE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TASTE_PATH.write_text(json.dumps(items, indent=2) + "\n")
+    argo_store.save_json(TASTE_PATH, items)
 
 
 # The extraction prompt: turn a screenshot into a structured taste signal. Asks
