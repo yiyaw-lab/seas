@@ -35,7 +35,10 @@ import argo_paths
 import argo_store
 import fetch_signals
 import send_telegram
+from argo_log import get_logger
 from argo_webhook import _clean_reply
+
+log = get_logger(__name__)
 
 # Re-exported from argo_paths so this stays the module-level name tests patch
 # (mock.patch.object(argo_watch, "SEEN_PATH", tmp)); load_seen/save_seen read it
@@ -135,25 +138,35 @@ def judge(new_items):
     prompt = JUDGE_INSTRUCTIONS.format(items=listing)
 
     # Use the configured chat model (Claude if available, else gpt-4o fallback).
+    # `or` not `.get(k, default)`: an empty ARGO_CHAT_MODEL (a set-but-unset CI var)
+    # would otherwise win as "" and defeat the Sonnet default, routing to ARGO_MODEL.
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + observe.resolve_models()
          if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
     )
     if model is None:
-        print("No API key available for the judge — skipping.")
+        log.warning("no API key available for the judge -- skipping run")
         return []
 
-    # temperature=0: a deterministic verdict so the same items don't flip
-    # between runs (the bug that re-sent already-delivered drops).
-    if observe.provider_for(model)["name"] == "anthropic":
-        raw = observe.chat_with_mcp(
-            "You are Argo, a terse frontier scout.",
-            [{"role": "user", "content": prompt}], model, temperature=0,
-        )
-    else:
-        raw = observe.generate_observations(prompt, model, temperature=0)
+    # temperature=0: a deterministic verdict so the same items don't flip between
+    # runs (the bug that re-sent already-delivered drops). argo_observe omits the
+    # param for models that reject a custom temperature (gpt-5/o-series, opus-4-8).
+    try:
+        if observe.provider_for(model)["name"] == "anthropic":
+            raw = observe.chat_with_mcp(
+                "You are Argo, a terse frontier scout.",
+                [{"role": "user", "content": prompt}], model, temperature=0,
+            )
+        else:
+            raw = observe.generate_observations(prompt, model, temperature=0)
+    except Exception:
+        # Log the judge failure from the watcher's own logger (the scheduler's outer
+        # net also logs it) and re-raise: main() aborts before the seen-store update,
+        # so items aren't penalized (attempt-bumped) for an infrastructure failure.
+        log.error("watch judge failed on model %s", model, exc_info=True)
+        raise
 
     raw = _clean_reply(raw.strip())
     if not raw or raw.strip().upper() == "NONE":
@@ -191,6 +204,7 @@ def main():
     print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
     alerts = judge(new_items)
+    log.info("watch run: %d eligible, %d cleared the bar", len(new_items), len(alerts))
 
     if not alerts:
         print("Nothing cleared the frontier-builder bar this run.")

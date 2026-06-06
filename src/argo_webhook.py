@@ -93,8 +93,10 @@ MCP_SERVERS = _build_mcp_servers()
 
 # Chat model routing for token efficiency: Sonnet handles routine turns, Opus is
 # reserved for high-stakes ones. Overridable via env without code change.
-CHAT_MODEL_DEFAULT = os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")
-CHAT_MODEL_PREMIUM = os.environ.get("ARGO_CHAT_MODEL_PREMIUM", "claude-opus-4-8")
+# `or` not `.get(k, default)`: a set-but-empty CI var would otherwise win as "" and
+# defeat the default, leaving an unroutable model name.
+CHAT_MODEL_DEFAULT = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
+CHAT_MODEL_PREMIUM = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
 # Message looks high-stakes -> escalate to the premium model.
 PREMIUM_TRIGGERS = (
     "should i build", "worth building", "strategy", "strategic", "architecture",
@@ -163,7 +165,10 @@ def build_system_prompt(p=None):
     f"new_project, which would wrongly generate a different one. {Subj} locks one in by replying "
     f"SELECT (handled for you); on SELECT the project is automatically REHEARSED "
     f"(stress-tested by adversaries + a judge) and {subj} gets a hardened build "
-    f"plan. If {subj} asks to 'stress-test / rehearse / poke holes in / red-team' a "
+    f"plan. {Subj} can also reply REHEARSE (or REHEARSE P-00x) to stress-test a "
+    f"proposed bet WITHOUT locking it in -- that command is handled for you too. So "
+    f"when you propose a project, {subj} can rate it, REHEARSE it, or SELECT it. If "
+    f"{subj} asks to 'stress-test / rehearse / poke holes in / red-team' a "
     f"project on its own, call rehearse_project. If {subj} asks "
     "how to start / 'scaffold me' / 'help me get going', call scaffold_project "
     f"for a concrete plan to begin building this weekend. If the reason {subj} wants "
@@ -709,6 +714,27 @@ def handle_update(update):
                 send_telegram.send_message(
                     f"Selected {pid}, but I hit a snag ({type(exc).__name__}). "
                     "Ask me to scaffold it again in a sec.")
+        return
+
+    # REHEARSE gate: stress-test a PROPOSED bet WITHOUT committing to it. Bare
+    # "REHEARSE" rehearses the latest project; "REHEARSE P-00x" a specific one.
+    # Unlike SELECT it doesn't lock the project in or scaffold -- it just runs the
+    # adversaries + judge and reports the verdict, so the user can poke holes before
+    # deciding. Kept upstream of the model (like SELECT) so it works even when the
+    # MCP tools aren't wired and never depends on the LLM choosing the tool.
+    if word == "REHEARSE" or word.startswith("REHEARSE "):
+        requested = word.split(maxsplit=1)[1] if " " in word else ""
+        try:
+            import argo_rehearse
+            verdict, blueprint_path, summary = argo_rehearse.rehearse(requested)
+            send_telegram.send_message(summary)
+            if verdict not in ("KILL", "ERROR") and blueprint_path is not None:
+                steps = argo_rehearse.build_steps(blueprint_path)
+                if steps:
+                    send_telegram.send_message("Here's where to start:\n" + steps)
+        except Exception as exc:
+            send_telegram.send_message(
+                f"Couldn't rehearse that ({type(exc).__name__}). Try again in a sec.")
         return
 
     # Pasted-an-existing-project gate: if she pastes back a project Argo already

@@ -613,8 +613,9 @@ def recommend_project() -> str:
         return "Nothing open to weigh. Bring an idea or ask for a project."
     if len(candidates) == 1:
         c = candidates[0]
-        return (f"Only one candidate open ({c['id']}). Reply SELECT to lock it "
-                "in and get a kickoff plan, or bring another idea to compare.")
+        return (f"Only one candidate open ({c['id']}). Reply REHEARSE to stress-test "
+                "it, SELECT to lock it in and get a kickoff plan, or bring another "
+                "idea to compare.")
 
     taste = ""
     try:
@@ -641,7 +642,7 @@ def recommend_project() -> str:
         + f"Candidates:\n{listing}"
     )
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + _observe.resolve_models()
          if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
@@ -656,7 +657,8 @@ def recommend_project() -> str:
     else:
         rec = _observe.generate_observations(prompt, model, temperature=0.2)
     return _deliver(rec.strip()
-                    + "\n\nReply SELECT to lock in my pick, or name another to go with.")
+                    + "\n\nReply REHEARSE to stress-test my pick, SELECT to lock it "
+                    "in, or name another to go with.")
 
 
 def _scaffold_plan(project_id=""):
@@ -693,7 +695,7 @@ def _scaffold_plan(project_id=""):
     )
 
     model = next(
-        (m for m in [os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")]
+        (m for m in [(os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6")]
          + _observe.resolve_models()
          if (p := _observe.provider_for(m)) and os.environ.get(p["key_env"])),
         None,
