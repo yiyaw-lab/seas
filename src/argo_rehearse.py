@@ -35,9 +35,11 @@ Run:  python src/argo_rehearse.py P-001            (rehearse + print blueprint)
 """
 
 import os
+import json
 import sys
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_observe as observe
@@ -52,6 +54,69 @@ REHEARSAL_DIR = ROOT / "argo" / "rehearsals"
 # both in one place.
 ADVERSARY_MODEL = os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")
 JUDGE_MODEL = os.environ.get("ARGO_CHAT_MODEL_PREMIUM", "claude-opus-4-8")
+
+# Append-only transcript of every model turn (each adversary + the judge), one
+# JSON object per line. The point: a rehearsal makes ~4 paid model calls, and we
+# never want to pay for tokens we then throw away -- a turn is logged the INSTANT
+# it returns, so even if a later turn fails, the earlier responses are on disk for
+# eval / research / replay. Gitignored (can grow large, may quote sources); on
+# Railway point ARGO_REHEARSE_LOG at the mounted volume so it survives redeploys
+# (mirrors ARGO_CHAT_LOG). Full capture: prompt + response + model + timestamps.
+TRANSCRIPT_PATH = Path(
+    os.environ.get("ARGO_REHEARSE_LOG", str(REHEARSAL_DIR / "transcripts.jsonl"))
+)
+
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _append_jsonl(record):
+    """Append one record as a JSON line. Best-effort: a logging failure must never
+    sink a rehearsal (the model call already cost credit), so it swallows errors
+    after trying to surface them."""
+    try:
+        TRANSCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with TRANSCRIPT_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"[rehearse] transcript append failed ({type(exc).__name__}: {exc})")
+
+
+def _log_turn(run_id, project_id, role, model, system, prompt, response,
+              started_at, ok=True, error=None):
+    """Persist one model turn (an adversary or the judge) immediately after it
+    returns -- full prompt + response + metadata, so no paid output is ever lost."""
+    _append_jsonl({
+        "kind": "turn",
+        "run_id": run_id,
+        "project_id": project_id,
+        "role": role,
+        "model": model,
+        "ok": ok,
+        "error": error,
+        "started_at": started_at,
+        "ended_at": _now(),
+        "system": system,
+        "prompt": prompt,
+        "response": response,
+        "response_chars": len(response or ""),
+    })
+
+
+def _log_run(run_id, project_id, verdict, blueprint_path, models):
+    """Persist the per-run summary record after all turns, so a run is queryable
+    without reassembling its turns. Written even on KILL/ERROR."""
+    _append_jsonl({
+        "kind": "run",
+        "run_id": run_id,
+        "project_id": project_id,
+        "verdict": verdict,
+        "blueprint_path": (str(blueprint_path.relative_to(ROOT))
+                           if blueprint_path else None),
+        "models": models,
+        "ended_at": _now(),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -128,23 +193,31 @@ def _adversary_prompt(role_instructions, project_text):
     return f"{role_instructions}\n\nTHE BET:\n{project_text}\n"
 
 
-def run_adversaries(project_text):
+def run_adversaries(project_text, run_id="", project_id=""):
     """Run all three adversaries concurrently (wall-clock ~= one call) and return
     {role: critique_text}. A role that errors returns a short note instead of
-    sinking the whole rehearsal -- the judge can still work with two critiques."""
+    sinking the whole rehearsal -- the judge can still work with two critiques.
+    Each turn is logged to the transcript the moment it returns (success OR
+    failure), so a paid response is never lost even if another role or the judge
+    later fails."""
     model = _runnable(ADVERSARY_MODEL)
     if model is None:
         return None  # no key; caller reports
 
     def one(item):
         role, instr = item
+        prompt = _adversary_prompt(instr, project_text)
+        started = _now()
         try:
-            text = _call(ADVERSARY_SYSTEM,
-                         _adversary_prompt(instr, project_text),
-                         model, temperature=0.4)
-            return role, text.strip()
+            text = _call(ADVERSARY_SYSTEM, prompt, model, temperature=0.4).strip()
+            _log_turn(run_id, project_id, role, model, ADVERSARY_SYSTEM, prompt,
+                      text, started, ok=True)
+            return role, text
         except Exception as exc:
-            return role, f"(the {role} adversary could not run: {type(exc).__name__})"
+            note = f"(the {role} adversary could not run: {type(exc).__name__})"
+            _log_turn(run_id, project_id, role, model, ADVERSARY_SYSTEM, prompt,
+                      note, started, ok=False, error=f"{type(exc).__name__}: {exc}")
+            return role, note
 
     with ThreadPoolExecutor(max_workers=len(ADVERSARIES)) as pool:
         results = dict(pool.map(one, ADVERSARIES.items()))
@@ -214,20 +287,29 @@ coding agent.>
 """
 
 
-def run_judge(project_text, critiques):
-    """Return (verdict, judge_text) or (None, error_message)."""
+def run_judge(project_text, critiques, run_id="", project_id=""):
+    """Return (verdict, judge_text) or (None, error_message). The judge turn is
+    logged to the transcript on success or failure, so its (expensive Opus) output
+    is never lost."""
     model = _runnable(JUDGE_MODEL)
     if model is None:
         return None, "No model available to judge the rehearsal."
+    prompt = _judge_prompt(project_text, critiques)
+    started = _now()
     try:
         # temperature=None: the judge runs on Opus, which rejects the param.
         # max_tokens raised: the judge emits the full hardened plan (verdict +
         # why-it-holds + failure scenarios + kill-criteria + build steps).
-        text = _call(JUDGE_SYSTEM, _judge_prompt(project_text, critiques),
-                     model, temperature=None, max_tokens=3000).strip()
+        text = _call(JUDGE_SYSTEM, prompt, model,
+                     temperature=None, max_tokens=3000).strip()
     except Exception as exc:
+        _log_turn(run_id, project_id, "judge", model, JUDGE_SYSTEM, prompt, "",
+                  started, ok=False, error=f"{type(exc).__name__}: {exc}")
         return None, f"The judge could not run ({type(exc).__name__}: {exc})."
-    return _parse_verdict(text), text
+    verdict = _parse_verdict(text)
+    _log_turn(run_id, project_id, "judge", model, JUDGE_SYSTEM, prompt, text,
+              started, ok=True)
+    return verdict, text
 
 
 def _parse_verdict(judge_text):
@@ -349,13 +431,23 @@ def rehearse(project_id=""):
     if not project_text:
         return "ERROR", None, f"{pid} has no project text to rehearse."
 
-    critiques = run_adversaries(project_text)
+    # One id ties every turn of this rehearsal together in the transcript, so a
+    # re-run of the same project stays distinguishable (the blueprint .md is
+    # overwritten, but the transcript is append-only -- every debate is kept).
+    run_id = f"{pid}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
+    models = {"adversaries": ADVERSARY_MODEL, "judge": JUDGE_MODEL}
+
+    critiques = run_adversaries(project_text, run_id, pid)
     if critiques is None:
+        _log_run(run_id, pid, "ERROR", None, models)
         return "ERROR", None, ("No model available to rehearse right now. Tell the "
                                "user plainly and suggest trying again shortly.")
 
-    verdict, judge_text = run_judge(project_text, critiques)
+    verdict, judge_text = run_judge(project_text, critiques, run_id, pid)
     if verdict is None:
+        # The adversary turns are already on disk (logged as they returned), so
+        # their credit isn't wasted even though the judge failed.
+        _log_run(run_id, pid, "ERROR", None, models)
         return "ERROR", None, judge_text  # judge_text holds the error message
 
     doc = _blueprint_doc(pid, verdict, project_text, critiques, judge_text)
@@ -368,6 +460,7 @@ def rehearse(project_id=""):
     path = _write_blueprint(pid, doc)
     _stamp_project(pid, verdict, path)
     blueprint_path = None if verdict == "KILL" else path
+    _log_run(run_id, pid, verdict, path, models)
     return verdict, blueprint_path, summary
 
 
