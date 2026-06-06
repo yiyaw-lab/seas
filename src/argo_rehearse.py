@@ -52,8 +52,10 @@ REHEARSAL_DIR = ROOT / "argo" / "rehearsals"
 # Sonnet for the three adversaries (cheap, parallel), Opus for the single judge
 # (the high-stakes synthesis). Same env knobs as argo_webhook so a deploy tunes
 # both in one place.
-ADVERSARY_MODEL = os.environ.get("ARGO_CHAT_MODEL", "claude-sonnet-4-6")
-JUDGE_MODEL = os.environ.get("ARGO_CHAT_MODEL_PREMIUM", "claude-opus-4-8")
+# `or` not `.get(k, default)`: a set-but-empty CI var would otherwise win as "" and
+# defeat the default, leaving an unroutable model name (provider_for("") is None).
+ADVERSARY_MODEL = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
+JUDGE_MODEL = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
 
 # Append-only transcript of every model turn (each adversary + the judge), one
 # JSON object per line. The point: a rehearsal makes ~4 paid model calls, and we

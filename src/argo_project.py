@@ -47,8 +47,8 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 # text, no em dash (Argo voice).
 def project_invite(project_id):
     return (f"\n\nThat's {project_id}. Reply 1-10 to rate how much you want to "
-            "build it, SELECT to lock it in and get a kickoff plan, or ask for "
-            "another.")
+            "build it, REHEARSE to stress-test it, SELECT to lock it in and get a "
+            "kickoff plan, or ask for another.")
 
 
 def log_project(project_text, model, source="argo"):
@@ -403,7 +403,8 @@ def make_proposal(refresh=True, seed="", source="argo"):
     if sources:
         doc += f"\n\n{sources}"
     doc += ("\n\nRatings and 'why this one' are Argo's judgment, not measured "
-            "fact. Reply 1-10 to rate, SELECT to start, or ask for another.")
+            "fact. Reply 1-10 to rate, REHEARSE to stress-test, SELECT to start, "
+            "or ask for another.")
     if not pitch:
         pitch = f"{project_id}: a fresh project (full proposal attached)."
     return project_id, pitch, project_text, doc, model
