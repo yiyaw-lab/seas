@@ -1,0 +1,18 @@
+[
+  {
+    "id": "SB-001",
+    "kind": "issue",
+    "claim": "EXAMPLE: the tripwire judge 400'd on temperature=0 with gpt-5; fixed by a provider-agnostic temperature guard in argo_observe.",
+    "confidence": 0.35,
+    "evidence": ["src/argo_observe.py:_rejects_temperature"],
+    "refutations": [],
+    "status": "resolved",
+    "source": "operator",
+    "last_updated": "2026-06-06"
+  },
+  {
+    "id": "SB-META",
+    "rated_count": 0,
+    "last_reflected": "2026-06-06"
+  }
+]

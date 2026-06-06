@@ -901,6 +901,55 @@ def save_taste_signal(what: str, pattern: str, liked: str, steal: str = "",
             + ". It's in your taste profile now and will nudge future projects.")
 
 
+# --- Self-model: what Argo knows/believes about ITSELF (argo_self) ----------
+
+@mcp.tool()
+@with_deadline(10)
+def read_self() -> str:
+    """Report what you've learned about YOURSELF across runs: confirmed capabilities,
+    known issues, and lessons -- the durable self-model that outlasts this chat's
+    ~12-turn memory. Use when asked 'what do you know about yourself / what have you
+    learned about how you work / any known issues / what are you bad at'. Read-only."""
+    import argo_self
+    return argo_self.format_self_for_prompt(limit=12) or "No self-beliefs recorded yet."
+
+
+@mcp.tool()
+@with_deadline(10)
+def note_self_lesson(claim: str, kind: str = "lesson") -> str:
+    """Record a durable lesson ABOUT YOURSELF so it survives past this chat's short
+    memory (e.g. 'tripwire judge 400'd on temperature with gpt-5; fixed'). kind is one
+    of: issue, lesson, capability, trait. This does NOT assert you're fixed -- a
+    belief's confidence only rises when evidence is added later. Use when you or the
+    user diagnose something about how you actually work."""
+    import argo_self
+    bid = argo_self.note_self_lesson(claim, kind=kind, source="chat")
+    if bid is None:
+        return "Need a non-empty claim to note a self-lesson."
+    return f"Noted as {bid}. It's in your self-model now and persists across runs."
+
+
+@mcp.tool()
+@with_deadline(120)
+def run_reflection() -> str:
+    """Take stock of your own performance: read your recent projects' energy ratings
+    and tripwire activity and, if there's anything new, distil at most a couple of
+    honest lessons into your self-model. Use when asked to 'reflect / take stock / how
+    are you doing / review yourself'. Cheap (Sonnet) and skips the model call entirely
+    when nothing has changed since last time."""
+    import argo_self
+    r = argo_self.reflect(force=False)
+    stats = r.get("stats", {})
+    head = (f"Looked at {stats.get('projects_rated', 0)} rated projects (mean energy "
+            f"{stats.get('mean_energy')}, recent {stats.get('recent_mean_energy')})")
+    if r.get("skipped"):
+        return head + ". Nothing new enough to reflect on since last time."
+    n = len(r.get("new_lessons", []))
+    if not n:
+        return head + ". No new lessons stood out this time."
+    return head + f". Recorded {n} new lesson(s); read_self to see them."
+
+
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
 # L0 (default): report-only. The tools describe the fix and refuse to execute.
 # L1: the tool stages a pending action and tells the user to reply CONFIRM in

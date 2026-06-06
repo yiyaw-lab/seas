@@ -44,6 +44,7 @@ STATE_PATH = argo_paths.STATE_PATH
 COMMANDS = {
     "project": ("argo_project", "main"),
     "watch": ("argo_watch", "main"),
+    "reflect": ("argo_self", "reflect_cli"),
 }
 
 
