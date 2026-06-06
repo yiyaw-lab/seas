@@ -34,6 +34,10 @@ data/argo_budget.json
 # Transient pending self-heal action (argo_mcp_server L1)
 data/argo_pending_heal.json
 
+# Argo's self-model: beliefs about itself + reflection state (argo_self).
+# Per-deploy runtime state; schema documented in data/argo_self.example.json.
+data/argo_self.json
+
 # Transient schedule dedupe state (argo_scheduled)
 data/schedule_state.json
 

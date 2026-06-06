@@ -35,3 +35,6 @@ FINDINGS_DIR = ROOT / "findings"
 # survives redeploys; tests point the profile at a temp file.
 CHAT_LOG_PATH = Path(os.environ.get("ARGO_CHAT_LOG", str(DATA / "argo_chat.json")))
 PROFILE_PATH = Path(os.environ.get("ARGO_PROFILE_PATH", str(DATA / "profile.json")))
+# Argo's self-model. Env-overridable for the same reason as the chat log: point
+# ARGO_SELF_PATH at the Railway volume so self-beliefs survive redeploys.
+SELF_PATH = Path(os.environ.get("ARGO_SELF_PATH", str(DATA / "argo_self.json")))

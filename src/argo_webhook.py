@@ -112,6 +112,24 @@ def _route_model(user_text):
         return CHAT_MODEL_PREMIUM
     return CHAT_MODEL_DEFAULT
 
+
+def _self_capability_block():
+    """Argo's live tool inventory + durable self-beliefs, for the system prompt.
+    Returns '' when neither is available (argo_self can't read its registry), so the
+    prompt is unaffected and never bricks. Built at call time, so a newly added tool
+    or a fresh self-lesson shows up with no second edit -- the self-updating part."""
+    import argo_self
+    parts = []
+    caps = argo_self.format_capabilities_for_prompt()
+    if caps:
+        parts.append(caps)
+    beliefs = argo_self.format_self_for_prompt(limit=8)
+    if beliefs:
+        parts.append("WHAT YOU'VE LEARNED ABOUT YOURSELF (durable across runs, "
+                     "highest-confidence first):\n" + beliefs)
+    return ("\n".join(parts) + "\n\n") if parts else ""
+
+
 def build_system_prompt(p=None):
     """Argo's full system prompt, with the USER IDENTITY span (name, one-liner,
     persona/register) drawn from the active profile and the rest (self-knowledge,
@@ -150,10 +168,14 @@ def build_system_prompt(p=None):
     "sources, or the workflow around you. Your weekly project comes from a batch "
     "RSS pull (arXiv cs.AI/LG/CL, GitHub trending, and OpenAI/Hugging Face/"
     "GitHub-changelog/Google-AI feeds), but that is NOT your only window on the "
-    "world. You remember only about the last 12 turns of this chat; no long-term "
-    "memory beyond that. You send one project a week over Telegram and track a "
-    "1-10 'energy' rating per project. When asked how to improve you, answer "
-    "concretely from these facts; never invent generic optimization advice.\n"
+    "world. You remember only about the last 12 turns of this CHAT, but you DO keep "
+    "a durable self-model across runs: read it with read_self, and when you or "
+    f"{name} diagnose something about how you work, note_self_lesson it (it earns "
+    "confidence only from evidence, so noting it is not the same as claiming you "
+    "fixed it). You send one project a week over Telegram and track a 1-10 'energy' "
+    "rating per project; run_reflection takes stock of those ratings. When asked how "
+    "to improve you, answer concretely from these facts; never invent generic "
+    "optimization advice.\n"
     "PROJECTS ON DEMAND: project-producing tools (new_project, add_project, "
     "project_too_complex, recommend_project, rehearse_project, scaffold_project, "
     f"get_latest_project) send their content to {name} DIRECTLY; when one returns a "
@@ -265,7 +287,8 @@ def build_system_prompt(p=None):
     "say so plainly. If no tool is available this turn, then say what you can "
     "from memory rather than guessing at 'latest'.\n"
     "\n"
-    "ATTRIBUTION: when something you say came from what you read, name the source "
+    + _self_capability_block()
+    + "ATTRIBUTION: when something you say came from what you read, name the source "
     "in passing the way a person would ('their changelog says...', 'saw it on "
     "HN', 'the readme shows...'), and drop the link if it's worth checking. NEVER "
     "narrate the tooling or the act of looking it up ('I used web_fetch', 'based "
