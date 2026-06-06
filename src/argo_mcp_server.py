@@ -814,6 +814,28 @@ def scaffold_project(project_id: str = "") -> str:
 
 
 @mcp.tool()
+@with_deadline(120)  # 3 parallel adversary calls + 1 judge call, all guarded
+def rehearse_project(project_id: str = "") -> str:
+    """Stress-test a project before building: three adversaries (a red-team critic,
+    a skeptical user, an ops/failure simulator) attack the bet, then a judge issues
+    a verdict (SHIP / REVISE / KILL) and, if it survives, a hardened build-ready
+    blueprint with kill-criteria and concrete first steps. Defaults to the LATEST
+    project; pass a project_id (e.g. 'P-002'). Use when the user says 'stress-test
+    this / rehearse it / poke holes in it / red-team this' or before committing to
+    a build. The verdict summary is sent to them directly; you just acknowledge."""
+    import argo_rehearse
+    verdict, blueprint_path, summary = argo_rehearse.rehearse(project_id)
+    if verdict == "ERROR":
+        return summary  # an honest error for the model to relay; not delivered
+    body = summary
+    if blueprint_path is not None:
+        steps = argo_rehearse.build_steps(blueprint_path)
+        if steps:
+            body += "\n\nHere's where to start:\n" + steps
+    return _deliver(body)
+
+
+@mcp.tool()
 @with_deadline(10)  # pure local read
 def get_signal_freshness() -> str:
     """Report how fresh Argo's signal pool is: when signals.json was last
