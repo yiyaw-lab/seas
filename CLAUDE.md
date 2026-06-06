@@ -23,6 +23,32 @@ should trace to the request.
 success — compile, run, test. Report failures honestly with the output; never
 say something works that you haven't run.
 
+## Working alongside other agents
+
+Multiple Claude sessions edit this repo at once. The harness shows a peer's edits
+only as an anonymous "file was modified" notice — you cannot see who. So:
+
+- **Assume edits you didn't make are a peer's legitimate work, not lint noise.**
+  If a file you're touching grows a new import (`argo_store`, `argo_log`,
+  `argo_http`), a logging call, or a moved doc, treat it as concurrent work:
+  build *on top of* it, never revert or strip it to "clean up" your file. (Hard-won
+  this session: someone burned an hour trying to un-apply a peer's shared-utils
+  refactor out of "their" files.)
+- **Keep commits additive and per-file.** Stage with explicit `git add <path>`,
+  never `git add -A`/`git commit -a` — that's how concurrent edits stay un-swept
+  into the wrong commit. Re-read a file right before editing; it may have moved
+  under you.
+- **Don't reorganize the git index or rewrite history on a shared branch.** No
+  `reset`/`rebase`/`commit --amend` of commits you didn't make. If the working
+  tree is mid-flux from a peer, commit only your own files and leave the rest.
+- **Before a big refactor, check for a peer mid-flight in the same file**
+  (`git log --oneline -5`, `git status`); prefer a separate branch when scopes
+  overlap heavily, so two sessions don't thrash one file.
+- **Reuse the shared-utils layer** instead of re-rolling primitives:
+  `argo_store.load_json/save_json` (atomic JSON I/O), `argo_http.tls_context`
+  (certifi TLS), `argo_log.get_logger` (logging). Re-inlining `json.loads`/`ssl`
+  here is a merge-conflict magnet.
+
 ## This project
 
 **What it is.** Two systems: **SEAS** (research engine — "what is true?",
@@ -87,3 +113,8 @@ are gitignored — don't commit them.
 **Cost.** Default model is Sonnet; escalate to Opus only for architecture, a
 stalled bug, cross-cutting refactors, or high-stakes work — and flag it when you
 do (see memory: model-escalation-nudge).
+
+**Model gotcha.** `claude-opus-4-8` rejects the `temperature` param outright (the
+API 400s). `argo_observe.chat_with_mcp` already omits it for those models (and
+when a caller passes `temperature=None`); keep that guard if you touch the call
+path, and don't pass `temperature` to an Opus call elsewhere.
