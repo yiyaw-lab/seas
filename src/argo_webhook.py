@@ -147,14 +147,18 @@ def build_system_prompt(p=None):
     "1-10 'energy' rating per project. When asked how to improve you, answer "
     "concretely from these facts; never invent generic optimization advice.\n"
     "PROJECTS ON DEMAND: project-producing tools (new_project, add_project, "
-    "project_too_complex, recommend_project, scaffold_project, get_latest_project) "
-    f"send their content to {name} DIRECTLY; when one returns a 'already sent' note, "
-    f"do NOT repeat or re-type it, just acknowledge in a word. If {subj} asks for a "
+    "project_too_complex, recommend_project, rehearse_project, scaffold_project, "
+    f"get_latest_project) send their content to {name} DIRECTLY; when one returns a "
+    f"'already sent' note, do NOT repeat or re-type it, just acknowledge in a word. "
+    f"If {subj} asks for a "
     f"project, a new one, or 'give me another / a different one' ({subj} didn't like "
     f"the last), call new_project. But if {subj} asks WHERE a project is, to SHOW it "
     "again, or what you last suggested, call get_latest_project (re-show) — NEVER "
     f"new_project, which would wrongly generate a different one. {Subj} locks one in by replying "
-    f"SELECT (handled for you); once selected {subj} gets a kickoff plan. If {subj} asks "
+    f"SELECT (handled for you); on SELECT the project is automatically REHEARSED "
+    f"(stress-tested by adversaries + a judge) and {subj} gets a hardened build "
+    f"plan. If {subj} asks to 'stress-test / rehearse / poke holes in / red-team' a "
+    f"project on its own, call rehearse_project. If {subj} asks "
     "how to start / 'scaffold me' / 'help me get going', call scaffold_project "
     f"for a concrete plan to begin building this weekend. If the reason {subj} wants "
     f"another is that it's TOO COMPLEX / over {poss} head / {subj} can't follow it, call "
@@ -442,6 +446,7 @@ _TOOL_HINTS = (
     "project", "another", "different one", "build", "idea", "ship this",
     "what should i", "which one", "too complex", "over my head", "scaffold",
     "how do i start", "give me",
+    "rehearse", "stress-test", "stress test", "poke holes", "red-team", "red team",
 )
 
 
@@ -461,6 +466,9 @@ def _ack_text(text):
         return "on it, give me a sec."
     if any(h in t for h in ("latest", "what's new", "whats new", "search", "find")):
         return "looking now, one sec."
+    if any(h in t for h in ("rehearse", "stress-test", "stress test",
+                            "poke holes", "red-team", "red team")):
+        return "on it, stress-testing it now. takes a minute."
     if any(h in t for h in ("project", "another", "different one", "idea",
                             "too complex", "over my head", "scaffold",
                             "ship this", "which one", "build")):
@@ -727,9 +735,9 @@ def handle_update(update):
 
     # SELECT gate: the user commits to a project. Bare "SELECT" locks in the
     # latest; "SELECT P-00x" locks in a specific candidate (e.g. the one
-    # recommend_project named, which may not be the latest). Then they get a
-    # kickoff plan. Kept upstream of the model (like CONFIRM) so selection is
-    # deterministic.
+    # recommend_project named). Then Rehearse stress-tests the bet BEFORE handing
+    # over a build plan, so what ships is the hardened version. Kept upstream of
+    # the model (like CONFIRM) so selection is deterministic.
     if word == "SELECT" or word.startswith("SELECT "):
         requested = word.split(maxsplit=1)[1] if " " in word else None
         pid = _select_latest_project(requested)
@@ -739,15 +747,31 @@ def handle_update(update):
                 else "Nothing to select yet, ask me for a project first.")
             return
         import argo_mcp_server
-        send_telegram.send_message(f"Locked in {pid}. Let me get you a kickoff plan.")
+        send_telegram.send_message(
+            f"Locked in {pid}. Let me stress-test it before you build.")
         try:
-            # _scaffold_plan returns the text; the tool wrapper self-sends, which
-            # would double-deliver here. Use the internal that returns the plan.
-            send_telegram.send_message(argo_mcp_server._scaffold_plan(pid))
+            import argo_rehearse
+            verdict, blueprint_path, summary = argo_rehearse.rehearse(pid)
+            send_telegram.send_message(summary)
+            if verdict == "KILL":
+                # The gate refused to bless a weak bet: route it back into the
+                # loop (rate / another) instead of handing over build steps.
+                import argo_project
+                send_telegram.send_message(argo_project.project_invite(pid))
+            elif blueprint_path is not None:
+                steps = argo_rehearse.build_steps(blueprint_path)
+                if steps:
+                    send_telegram.send_message("Here's where to start:\n" + steps)
         except Exception as exc:
-            send_telegram.send_message(
-                f"Selected {pid}, but I hit a snag drafting the plan "
-                f"({type(exc).__name__}). Ask me to scaffold it again in a sec.")
+            # Rehearse failed: fall back to the plain kickoff plan so SELECT never
+            # leaves the user empty-handed. _scaffold_plan returns the text (the
+            # tool wrapper self-sends, which would double-deliver here).
+            try:
+                send_telegram.send_message(argo_mcp_server._scaffold_plan(pid))
+            except Exception:
+                send_telegram.send_message(
+                    f"Selected {pid}, but I hit a snag ({type(exc).__name__}). "
+                    "Ask me to scaffold it again in a sec.")
         return
 
     # Pasted-an-existing-project gate: if she pastes back a project Argo already

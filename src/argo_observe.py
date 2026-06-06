@@ -314,6 +314,15 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
 MCP_BETA = "mcp-client-2025-11-20"
 
 
+# Models that 400 if `temperature` is supplied at all. Matched by prefix so a
+# dated alias (claude-opus-4-8-20xxxxxx) is covered too. Extend as needed.
+_TEMPERATURE_REJECTING_PREFIXES = ("claude-opus-4-8",)
+
+
+def _rejects_temperature(model):
+    return any(model.startswith(p) for p in _TEMPERATURE_REJECTING_PREFIXES)
+
+
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                   temperature=1.0):
     """Claude chat call with structured messages and optional MCP tool servers.
@@ -335,8 +344,13 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         "max_tokens": max_tokens,
         "system": system,
         "messages": messages,
-        "temperature": temperature,
     }
+    # Some newer models reject `temperature` outright (the API 400s). Omit it for
+    # those, and whenever a caller passes None to take the model's default. This
+    # guards every caller (incl. the webhook's Opus-escalated chat turns), not
+    # just the ones that remember to pass None.
+    if temperature is not None and not _rejects_temperature(model):
+        kwargs["temperature"] = temperature
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
         # Each server must be referenced by exactly one mcp_toolset (2025-11-20).
