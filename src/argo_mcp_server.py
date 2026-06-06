@@ -530,6 +530,26 @@ def _deliver(body):
     return body + "\n\n[Direct delivery failed; relay the above to her as your reply.]"
 
 
+def _mark_shown(project_id):
+    """Stamp shown_at on a project when it's delivered, so a later bare
+    rating/SELECT in the webhook targets the project Yiya is actually looking at
+    (last shown), not whatever was generated most recently."""
+    import json as _json
+    if not PROJECTS_LOG.exists():
+        return
+    try:
+        log = _json.loads(PROJECTS_LOG.read_text())
+    except (ValueError, _json.JSONDecodeError):
+        return
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    for p in log:
+        if p.get("id") == project_id:
+            p["shown_at"] = stamp
+            PROJECTS_LOG.write_text(_json.dumps(log, indent=2) + "\n")
+            return
+
+
 def _deliver_proposal(project_id, pitch, doc):
     """Send the one-line pitch as a chat message and the full proposal as an
     attached doc. Only tells the model 'sent' if delivery ACTUALLY succeeded; if
@@ -545,6 +565,11 @@ def _deliver_proposal(project_id, pitch, doc):
     # Log the delivery outcome so a 'said sent but nothing arrived' report is
     # diagnosable from the server logs (pitch vs doc, which one failed).
     print(f"[deliver_proposal] {project_id} pitch_ok={pitch_ok} doc_ok={doc_ok}")
+
+    # Mark it SHOWN if anything reached her, so a later bare rating/SELECT targets
+    # THIS project (the one she's looking at), not whatever was generated last.
+    if pitch_ok or doc_ok:
+        _mark_shown(project_id)
 
     if pitch_ok and doc_ok:
         return ("[Pitch + full proposal sent to Yiya. Do NOT repeat them; just "
