@@ -39,6 +39,39 @@ build system; scripts run directly (`python3 src/<x>.py`).
 affected script; for Argo runtime changes, the live bot is on Railway behind a
 Telegram webhook.
 
+**Testing.** Tests live in `tests/` (stdlib `unittest`, no new dep). Run with
+`PYTHONPATH=src python3 -m unittest discover -s tests` (under `python3` / 3.11, not
+the 3.9 `.venv`). They cover the four regressions that kept recurring: scheduler
+firing/grace/dedupe (`argo_scheduled`), seen-store dedup and legacy-list migration
+(`argo_watch`), the rating prompt and decimal ratings
+(`argo_project.project_invite`, `argo_webhook._parse_rating`), and project
+re-anchoring / last-shown targeting (`argo_webhook._target_project`,
+`_match_existing_project`). Tests stay pure — no network, no LLM, no real
+`data/*.json`: override the module-level path constants (`SEEN_PATH`,
+`PROJECTS_LOG`, `SCHEDULE_PATH`/`STATE_PATH`) to a tmp dir. Rule: a bug fix in any
+of those four areas must add or extend a test that fails before the fix and passes
+after.
+
+**Observability.** Operational and error paths use `argo_log.get_logger(__name__)`,
+not bare `print` — scheduler firing decisions, seen-store outcomes, Telegram
+delivery failures, guard/breaker/budget events. User-facing Telegram text still
+goes through `_clean_reply` + `print`/return; logs are for the operator
+(Railway/Actions console), level set by `ARGO_LOG_LEVEL` (the format is plain text;
+a JSON `Formatter` is a small drop-in in `argo_log.py` if log search ever needs
+it). A broad `except Exception` safety net must log the exception
+(`exc_info=True`), never swallow it. `/` (health) returns a small JSON payload —
+status, time, the last few scheduler fires, signal-store age — from local files
+only, no network, so it can never hang.
+
+**Exceptions & module size.** Catch the specific type at I/O, network, and parse
+boundaries (`json.JSONDecodeError`/`ValueError`, `urllib.error.*`/`OSError`,
+`KeyError`); reserve broad `except Exception` for the outermost net that must not
+crash a thread or a chat turn, and make that net log. Target under 500 lines per
+module. `argo_mcp_server.py`, `argo_webhook.py`, and `argo_observe.py` exceed that
+today — don't split them speculatively, but when one next needs a substantive
+change, extract one cohesive seam as part of that work (e.g. the
+rating/project-state helpers out of `argo_webhook`).
+
 **Argo output rules** (already enforced in code via `_clean_reply`, keep them):
 plain text only — no markdown, no em dashes; sources cited like a human, never
 "I used <tool>"; Telegram-friendly.

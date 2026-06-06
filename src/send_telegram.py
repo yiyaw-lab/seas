@@ -23,6 +23,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MESSAGE_PATH = ROOT / "demo" / "weekly_project_message.md"
 
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
 # Load .env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) if python-dotenv is
 # installed; otherwise fall back to the real environment. Never hard-depends
 # on dotenv.
@@ -65,7 +69,7 @@ def try_send_message(text):
         with urllib.request.urlopen(request, timeout=30, context=ctx) as resp:
             return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
-        print(f"try_send_message failed: {type(exc).__name__}: {exc}")
+        log.error("telegram sendMessage failed: %s: %s", type(exc).__name__, exc)
         return False
 
 
@@ -125,8 +129,10 @@ def send_message(text):
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
+        log.error("telegram sendMessage HTTP %s: %s", error.code, detail)
         fail(f"Telegram API returned HTTP {error.code}: {detail}")
     except urllib.error.URLError as error:
+        log.error("telegram sendMessage unreachable: %s", error.reason)
         fail(f"Could not reach Telegram API: {error.reason}")
 
     if not body.get("ok"):
@@ -185,7 +191,7 @@ def send_document(filename, content, caption=""):
             ok = json.loads(resp.read().decode("utf-8")).get("ok", False)
         return bool(ok)
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
-        print(f"sendDocument failed: {type(exc).__name__}: {exc}")
+        log.error("telegram sendDocument failed: %s: %s", type(exc).__name__, exc)
         return False
 
 
