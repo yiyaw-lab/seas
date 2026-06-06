@@ -169,6 +169,12 @@ SYSTEM_PROMPT = (
     "own bets. When she asks what to ship / build this week or 'which one / help "
     "me decide', call recommend_project to weigh ALL open candidates (hers and "
     "yours) and recommend one. So you help her DECIDE, not just generate.\n"
+    "DON'T GENERATE WHEN UNSURE: generating a NEW project is disruptive (it "
+    "becomes the new current one). If her message is ambiguous, especially if she "
+    "might be referring to a project you ALREADY sent (e.g. she pastes its text, "
+    "says 'this one', or clarifies a rating), do NOT call new_project or "
+    "add_project. ASK first: 'do you mean the one I just sent, or a new one?' Only "
+    "generate when she clearly wants a new/another project.\n"
     "\n"
     "TOOLS: If Yiya pastes or names ANY specific url for you to read or study — "
     "even one off your usual sources (a product page, a random blog, conductor."
@@ -404,8 +410,16 @@ def _llm_reply(chat_id, user_text):
 
 
 def _parse_rating(text):
-    m = re.match(r"\s*(10|[1-9])\s*$", (text or "").strip())
-    return int(m.group(1)) if m else None
+    """A bare number 1-10 (integers or decimals like 7.5) is an energy rating.
+    Returns a float in [1, 10], or None. Must be the WHOLE message so prose like
+    'build 3 things' isn't misread as a rating."""
+    m = re.match(r"\s*(\d{1,2}(?:\.\d+)?)\s*$", (text or "").strip())
+    if not m:
+        return None
+    val = float(m.group(1))
+    if 1 <= val <= 10:
+        return int(val) if val.is_integer() else val
+    return None
 
 
 # --- Responsiveness: instant ack + "still working" heartbeat ----------------
@@ -516,12 +530,52 @@ def _reply_with_progress(chat_id, text):
         hb.stop()
 
 
-def _record_rating(value):
-    """Apply a 1-10 to the latest unrated project. Returns a status string."""
+def _target_project(log, project_id=None):
+    """The project a bare rating/SELECT refers to: an explicit id if given, else
+    the one most recently SHOWN to Yiya (delivered, marked shown_at), else the
+    last in the log. Using 'last shown' not 'last generated' keeps a rating/SELECT
+    attached to the project she's actually looking at, even if a newer one was
+    generated after."""
+    if project_id:
+        return next((p for p in log if p.get("id") == project_id), None)
+    shown = [p for p in log if p.get("shown_at")]
+    if shown:
+        return max(shown, key=lambda p: p["shown_at"])
+    return log[-1] if log else None
+
+
+def _match_existing_project(text):
+    """If `text` looks like a paste of an EXISTING logged project (its pitch or a
+    chunk of its body), return that project; else None. Stops a paste of a project
+    Argo already sent from being misread as a brand-new idea (add_project)."""
+    t = " ".join((text or "").split()).lower()
+    if len(t) < 25:  # too short to confidently match; let the LLM handle it
+        return None
+    if not PROJECTS_LOG.exists():
+        return None
+    try:
+        log = json.loads(PROJECTS_LOG.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    for p in reversed(log):  # prefer the most recent match
+        body = " ".join(p.get("text", "").split()).lower()
+        if not body:
+            continue
+        # Match if the pasted text is contained in the project (a paste of part of
+        # it), or the project's distinctive first line is contained in the paste.
+        first_line = body.split(".")[0]
+        if (t in body) or (len(first_line) >= 25 and first_line in t):
+            return p
+    return None
+
+
+def _record_rating(value, project_id=None):
+    """Apply a rating to the project Yiya is responding to (last shown), or a
+    specific id. Returns a status string."""
     if not PROJECTS_LOG.exists():
         return None
     log = json.loads(PROJECTS_LOG.read_text())
-    target = next((e for e in reversed(log) if e.get("energy") is None), None)
+    target = _target_project(log, project_id)
     if target is None:
         return None
     target["energy"] = value
@@ -532,21 +586,17 @@ def _record_rating(value):
 
 
 def _select_latest_project(project_id=None):
-    """Mark a project as selected. With no id, marks the most recent (bare
-    SELECT); with an id (e.g. 'SELECT P-002'), marks that specific candidate, so
-    she can lock in a recommended one that isn't the latest. Returns its id, or
-    None if there's nothing/no match to select."""
+    """Mark a project as selected. With no id, marks the one most recently SHOWN
+    to Yiya (not just the last generated); with an id (e.g. 'SELECT P-002'), marks
+    that specific candidate. Returns its id, or None if there's nothing/no match."""
     if not PROJECTS_LOG.exists():
         return None
     log = json.loads(PROJECTS_LOG.read_text())
     if not log:
         return None
-    if project_id:
-        target = next((p for p in log if p.get("id") == project_id), None)
-        if target is None:
-            return None
-    else:
-        target = log[-1]
+    target = _target_project(log, project_id)
+    if target is None:
+        return None
     from datetime import datetime, timezone
     target["selected"] = True
     target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -700,6 +750,20 @@ def handle_update(update):
             send_telegram.send_message(
                 f"Selected {pid}, but I hit a snag drafting the plan "
                 f"({type(exc).__name__}). Ask me to scaffold it again in a sec.")
+        return
+
+    # Pasted-an-existing-project gate: if she pastes back a project Argo already
+    # sent (e.g. to say "I meant THIS one"), treat it as REFERRING to that project
+    # and re-anchor on it, instead of letting the LLM turn it into a new idea.
+    existing = _match_existing_project(text)
+    if existing is not None:
+        import argo_mcp_server
+        argo_mcp_server._mark_shown(existing["id"])  # so a following rating/SELECT targets it
+        energy = existing.get("energy")
+        rated = f" You rated it {energy}/10." if energy is not None else ""
+        send_telegram.send_message(
+            f"That's {existing['id']}, the one I sent you earlier.{rated} "
+            "Reply 1-10 to rate it, SELECT to lock it in, or ask for another.")
         return
 
     reply = _reply_with_progress(chat_id, text)
