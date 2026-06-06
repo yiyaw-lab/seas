@@ -39,3 +39,4 @@ data/schedule_state.json
 
 # Local Claude Code agent config (not project code)
 .claude/
+data/profile.json

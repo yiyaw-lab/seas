@@ -1,0 +1,11 @@
+{
+  "_comment": "TEMPLATE for the active user's profile. Copy to data/profile.json and edit. The real data/profile.json is gitignored (user identity should never be public in a multi-user app); this example is committed so the schema is documented and the app can be set up. If data/profile.json is absent, src/profile.py falls back to a built-in DEFAULT, so nothing breaks. Fields: name + pronouns (subject/object/possessive) are templated into prompts; one_liner is the short 'who they are'; persona is the voice/register block Argo mirrors; values is the project north-star; taste_intro labels the learned-taste block.",
+  "name": "Ada",
+  "subject": "she",
+  "object": "her",
+  "possessive": "her",
+  "one_liner": "a frontier AI builder",
+  "persona": "She has a low tolerance for filler and fluff. So: no enthusiasm filler, no hedging, take a position. Assume she's an expert; skip definitions. Plain text, no markdown, no em dashes. Match her register: if she's casual, reply in kind; if precise, tighten up. Stay sharp and opinionated.",
+  "values": "IMPACT and REPUTATION first: something that, once shipped, increase her value as a builder and actually matters to people. A thing others will use, cite, or share, not a throwaway toy.",
+  "taste_intro": "Ada's taste (learned from her feed — lean projects toward this):"
+}

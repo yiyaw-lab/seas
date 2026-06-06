@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 import argo_observe as observe
+import profile
 import send_telegram
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,7 +140,7 @@ def build_project_prompt():
     signals = observe.load_signals(limit=PROJECT_SIGNALS)
     signals_block = observe.format_signals(signals)
 
-    # Fold in recent taste signals (lessons from screenshots Yiya sent) so the
+    # Fold in recent taste signals (lessons from screenshots the user sent) so the
     # project leans toward what she actually likes, not just what's in the feed.
     taste_block = ""
     try:
@@ -246,15 +247,19 @@ def make_project(refresh=True):
 
 
 # A proposal = a one-line pitch (for chat) + a decision-grade doc (for an
-# attachment): the bet, ratings, what she'll gain, why this one, and the REAL
-# source links the signals came from (never invented).
-PROPOSAL_INSTRUCTIONS = """You are Argo. From the signals below, produce ONE
-project worth building this week for Yiya, as a decision aid.
+# attachment): the bet, ratings, what they'll gain, why this one, and the REAL
+# source links the signals came from (never invented). The user's name, pronouns,
+# and value system come from the active profile (see profile.py).
+def build_proposal_instructions(p=None):
+    p = p or profile.load()
+    name = p["name"]
+    subj = p.get("subject", "she")
+    poss = p.get("possessive", "her")
+    return f"""You are Argo. From the signals below, produce ONE
+project worth building this week for {name}, as a decision aid.
 
 What makes a GOOD project here:
-- IMPACT and REPUTATION first: something that, once shipped, makes her look good
-  and actually matters to people. A thing others will use, cite, or share, not a
-  throwaway toy. That is the north star.
+- {p['values']}
 - Vary the angle. Do NOT keep proposing the same theme (e.g. agent-safety/trust
   cards). Reach for a DIFFERENT corner of the signals than an obvious one. Mix it
   up across runs: sometimes a serious tool, sometimes a sharp/playful build, as
@@ -265,7 +270,7 @@ Output EXACTLY these labeled blocks, plain text, no markdown, no em dashes:
 
 PITCH: <ONE plain-English line a smart non-specialist instantly gets. Say what it
 is and what it lets you do, like "a X that does Y so you can Z". NO jargon, no
-"ontology-grounded assurance dossier" type phrasing. If she can't picture it in
+"ontology-grounded assurance dossier" type phrasing. If {subj} can't picture it in
 one read, rewrite it.>
 
 PROJECT:
@@ -275,13 +280,13 @@ week)>
 
 RATINGS:
 Technical depth: <1-5>/5 - <one line: what skills/stack it demands>
-Impact: <1-5>/5 - <one line: who uses it and why it matters to her reputation>
-Feasibility this week: <1-5>/5 - <one line: can she realistically ship it>
+Impact: <1-5>/5 - <one line: who uses it and why it matters to {poss} reputation>
+Feasibility this week: <1-5>/5 - <one line: can {subj} realistically ship it>
 
 WHAT YOU'LL GAIN:
-<2-3 concrete skills or capabilities she'll have AFTER building this (e.g. "ship
+<2-3 concrete skills or capabilities {subj}'ll have AFTER building this (e.g. "ship
 a browser extension end to end", "fine-tune and serve a small model", "design an
-eval"). Make it motivating: why she'd be better off having built it.>
+eval"). Make it motivating: why {subj}'d be better off having built it.>
 
 WHY THIS ONE:
 <2-3 lines: the specific reason you picked this from the signals, honestly. These
@@ -329,7 +334,7 @@ def _build_proposal_prompt(seed=""):
     random.shuffle(signals)
     signals = signals[:PROJECT_SIGNALS]
     block = observe.format_signals(signals)
-    prompt = f"{PROPOSAL_INSTRUCTIONS}\n---\n\n## Frontier signals\n\n{block}\n"
+    prompt = f"{build_proposal_instructions()}\n---\n\n## Frontier signals\n\n{block}\n"
     recent = _recent_pitches()
     if recent and not seed.strip():
         avoid = "\n".join(f"- {r}" for r in recent)
@@ -337,10 +342,12 @@ def _build_proposal_prompt(seed=""):
                    f"something in a clearly DIFFERENT direction (different domain, "
                    f"problem, or kind of artifact), not a variation on them:\n{avoid}\n")
     if seed.strip():
-        prompt += (f"\n---\n\nIMPORTANT: build the proposal around YIYA'S OWN "
+        name = profile.name()
+        poss = profile.pronoun("possessive")  # her / his / their
+        prompt += (f"\n---\n\nIMPORTANT: build the proposal around {name.upper()}'S OWN "
                    f"idea below; sharpen it, don't replace it. Rate it honestly, "
                    f"including whether it's really feasible this week.\n\n"
-                   f"Her idea: {seed.strip()}\n")
+                   f"{poss.capitalize()} idea: {seed.strip()}\n")
     return prompt, signals
 
 
@@ -380,7 +387,7 @@ def make_proposal(refresh=True, seed="", source="argo"):
     `pitch` is the one chat line; `doc` is the full proposal (bet + ratings +
     reasoning + real source links) for an attachment. The logged/selectable
     project is `project_text`, so SELECT/scaffold/ratings keep working. With a
-    `seed`, the proposal is built around Yiya's own idea (logged source 'yiya')."""
+    `seed`, the proposal is built around the user's own idea (logged source 'yiya')."""
     if refresh:
         _refresh_signals()
     prompt, signals = _build_proposal_prompt(seed)

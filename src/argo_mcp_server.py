@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 
 import fetch_signals
+import profile
 
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
 
@@ -486,10 +487,10 @@ def get_webhook_health() -> str:
 @mcp.tool()
 @with_deadline(10)  # pure local read
 def get_latest_project() -> str:
-    """Re-send Yiya her most recent project, in full. Use when she asks 'where is
-    it / show me the project again / what did you suggest last / did I rate it'.
-    Does NOT generate a new one (that's new_project) — it re-shows the existing
-    latest. The project is sent to her directly; you just acknowledge."""
+    """Re-send the user their most recent project, in full. Use when they ask
+    'where is it / show me the project again / what did you suggest last / did I
+    rate it'. Does NOT generate a new one (that's new_project) — it re-shows the
+    existing latest. The project is sent to them directly; you just acknowledge."""
     import json as _json
     import argo_project
 
@@ -518,21 +519,21 @@ def _deliver(body):
     return a terse do-not-repeat note for the model.
 
     The chat model relays a tool's STRING result by composing its own message,
-    so it summarizes long content like a full project (the bug: Yiya got only the
-    invite line, not the bet). Sending directly from the tool guarantees she gets
-    it verbatim; the model just acknowledges instead of re-typing it."""
+    so it summarizes long content like a full project (the bug: the user got only
+    the invite line, not the bet). Sending directly from the tool guarantees they
+    get it verbatim; the model just acknowledges instead of re-typing it."""
     import send_telegram
     if send_telegram.try_send_message(body):
-        return ("[Already sent to Yiya verbatim. Do NOT repeat or summarize it; "
+        return ("[Already sent to the user verbatim. Do NOT repeat or summarize it; "
                 "just acknowledge briefly, e.g. 'sent'.]")
     # Delivery failed: return the body so the model relays it (and never falsely
     # claims 'sent'), rather than silently dropping it.
-    return body + "\n\n[Direct delivery failed; relay the above to her as your reply.]"
+    return body + "\n\n[Direct delivery failed; relay the above to them as your reply.]"
 
 
 def _mark_shown(project_id):
     """Stamp shown_at on a project when it's delivered, so a later bare
-    rating/SELECT in the webhook targets the project Yiya is actually looking at
+    rating/SELECT in the webhook targets the project the user is actually looking at
     (last shown), not whatever was generated most recently."""
     import json as _json
     if not PROJECTS_LOG.exists():
@@ -566,55 +567,55 @@ def _deliver_proposal(project_id, pitch, doc):
     # diagnosable from the server logs (pitch vs doc, which one failed).
     print(f"[deliver_proposal] {project_id} pitch_ok={pitch_ok} doc_ok={doc_ok}")
 
-    # Mark it SHOWN if anything reached her, so a later bare rating/SELECT targets
-    # THIS project (the one she's looking at), not whatever was generated last.
+    # Mark it SHOWN if anything reached them, so a later bare rating/SELECT targets
+    # THIS project (the one they're looking at), not whatever was generated last.
     if pitch_ok or doc_ok:
         _mark_shown(project_id)
 
     if pitch_ok and doc_ok:
-        return ("[Pitch + full proposal sent to Yiya. Do NOT repeat them; just "
+        return ("[Pitch + full proposal sent to the user. Do NOT repeat them; just "
                 "acknowledge briefly, e.g. 'sent'.]")
     if pitch_ok and not doc_ok:
         # Pitch landed but the doc didn't: have the model relay the doc as text.
         return ("[The pitch was sent but the proposal doc failed to deliver. "
-                "Send her the full proposal now as your reply:]\n\n" + doc)
+                "Send them the full proposal now as your reply:]\n\n" + doc)
     # Nothing landed: give the model everything to relay, and be honest.
     return (pitch + "\n\n" + doc
-            + "\n\n[Direct delivery failed; relay the above to her as your reply.]")
+            + "\n\n[Direct delivery failed; relay the above to them as your reply.]")
 
 
 @mcp.tool()
 @with_deadline(200)  # (possible) feed refresh + a full model call; under the 300s cap
 def new_project() -> str:
-    """Generate a FRESH weekly project on demand and send it to Yiya as a one-line
-    pitch plus an attached proposal doc (ratings, reasoning, real sources). Use
-    when she asks for a project, a new one, or 'give me another' / 'a different
-    one'. Logs a project she can accept by replying SELECT. Sent directly; you
-    just acknowledge."""
+    """Generate a FRESH weekly project on demand and send it to the user as a
+    one-line pitch plus an attached proposal doc (ratings, reasoning, real
+    sources). Use when they ask for a project, a new one, or 'give me another' /
+    'a different one'. Logs a project they can accept by replying SELECT. Sent
+    directly; you just acknowledge."""
     import argo_project
 
     made = argo_project.make_proposal(refresh=True)
     if made == "NO_SIGNALS":
         return ("Couldn't pull fresh signals to build a project from (the feeds "
-                "may be down). Tell Yiya plainly and suggest trying again "
-                "shortly, or that she can bring her own idea instead.")
+                "may be down). Tell the user plainly and suggest trying again "
+                "shortly, or that they can bring their own idea instead.")
     if made is None:
         return ("Couldn't generate a project right now (no model available). "
-                "Tell Yiya plainly and suggest trying again shortly.")
+                "Tell the user plainly and suggest trying again shortly.")
     project_id, pitch, _text, doc, _model = made
     return _deliver_proposal(project_id, pitch, doc)
 
 
 @mcp.tool()
 @with_deadline(200)  # taste signal + (possible) refresh + a full model call
-def project_too_complex(what_lost_her: str = "") -> str:
-    """Yiya says the latest project is over her head / too complex / she can't
-    follow it. Do TWO things: (1) save a durable taste signal so future projects
-    lean more approachable, and (2) generate another, simpler project. Pass a
-    short note of WHAT made it too complex if she said (e.g. 'assumed kernel/CUDA
-    knowledge'); leave blank if she just said it's too much. Use this instead of
-    plain new_project whenever the reason is difficulty, so Argo actually learns
-    to dial it down."""
+def project_too_complex(what_lost_them: str = "") -> str:
+    """The user says the latest project is over their head / too complex / they
+    can't follow it. Do TWO things: (1) save a durable taste signal so future
+    projects lean more approachable, and (2) generate another, simpler project.
+    Pass a short note of WHAT made it too complex if they said (e.g. 'assumed
+    kernel/CUDA knowledge'); leave blank if they just said it's too much. Use this
+    instead of plain new_project whenever the reason is difficulty, so Argo
+    actually learns to dial it down."""
     import json as _json
     import argo_project
     import taste_signals
@@ -629,13 +630,14 @@ def project_too_complex(what_lost_her: str = "") -> str:
         except (ValueError, _json.JSONDecodeError):
             pass
 
-    detail = f" ({what_lost_her.strip()})" if what_lost_her.strip() else ""
+    detail = f" ({what_lost_them.strip()})" if what_lost_them.strip() else ""
+    _name = profile.name()
     taste_signals.save_signal(
-        what=f"A weekly project was too complex for Yiya to follow{detail}.",
-        pattern=("prefer approachable projects Yiya can understand and start "
+        what=f"A weekly project was too complex for {_name} to follow{detail}.",
+        pattern=(f"prefer approachable projects {_name} can understand and start "
                  "without deep infra/ML/systems expertise; favor a clear, "
                  "explainable core over heavy machinery"),
-        liked="projects she can actually grasp and begin this weekend",
+        liked=f"projects {profile.pronoun('subject')} can actually grasp and begin this weekend",
         steal="keep the bet small and legible; assume no specialist background",
         source="telegram-feedback",
         caption=bet,
@@ -647,11 +649,11 @@ def project_too_complex(what_lost_her: str = "") -> str:
     made = argo_project.make_proposal(refresh=True)
     if made == "NO_SIGNALS":
         return ("Saved that it was too complex. But I couldn't pull fresh signals "
-                "to build a simpler one right now (feeds may be down). Tell Yiya "
+                "to build a simpler one right now (feeds may be down). Tell the user "
                 "to try again shortly.")
     if made is None:
         return ("Saved that it was too complex, but couldn't generate another "
-                "right now (no model available). Tell Yiya to try again shortly.")
+                "right now (no model available). Tell the user to try again shortly.")
     project_id, pitch, _text, doc, _model = made
     import send_telegram
     send_telegram.try_send_message(
@@ -661,19 +663,19 @@ def project_too_complex(what_lost_her: str = "") -> str:
 
 
 @mcp.tool()
-@with_deadline(200)  # (possible) refresh + a model call to shape her idea
+@with_deadline(200)  # (possible) refresh + a model call to shape the user's idea
 def add_project(idea: str) -> str:
-    """Capture a project idea YIYA brings (e.g. 'I want to build X', 'add my idea:
-    ...') as a candidate, shaped into Argo's bet format so it sits comparably
-    next to Argo's own suggestions. Use whenever she proposes her own project.
-    Returns the shaped bet. She can rate it, SELECT it, or ask what to ship."""
+    """Capture a project idea THE USER brings (e.g. 'I want to build X', 'add my
+    idea: ...') as a candidate, shaped into Argo's bet format so it sits comparably
+    next to Argo's own suggestions. Use whenever they propose their own project.
+    Returns the shaped bet. They can rate it, SELECT it, or ask what to ship."""
     if not idea or not idea.strip():
         return "Tell me the idea and I'll shape it into a bet you can weigh."
     import argo_project
 
     made = argo_project.make_proposal(refresh=True, seed=idea, source="yiya")
     if made is None:
-        return ("Couldn't shape that right now (no model available). Tell Yiya "
+        return ("Couldn't shape that right now (no model available). Tell the user "
                 "to try again shortly.")
     project_id, pitch, _text, doc, _model = made
     import send_telegram
@@ -685,10 +687,10 @@ def add_project(idea: str) -> str:
 @mcp.tool()
 @with_deadline(90)  # reads candidates + one model call to weigh them
 def recommend_project() -> str:
-    """When Yiya asks what to ship / build this week, weigh ALL open candidates
-    (her ideas AND Argo's, any not yet selected) and recommend ONE, with the
-    runner-up named. Judge on: can it realistically ship in a week, fit to her
-    learned taste, and any 1-10 energy ratings she gave. Use for 'what should I
+    """When the user asks what to ship / build this week, weigh ALL open candidates
+    (their ideas AND Argo's, any not yet selected) and recommend ONE, with the
+    runner-up named. Judge on: can it realistically ship in a week, fit to their
+    learned taste, and any 1-10 energy ratings they gave. Use for 'what should I
     build/ship this week', 'which one', 'help me decide'."""
     import json as _json
     import argo_observe as _observe
@@ -714,19 +716,21 @@ def recommend_project() -> str:
     except Exception:
         pass
 
+    name = profile.name()
+    poss = profile.pronoun("possessive").capitalize()  # Her / His / Their
     listing = "\n\n".join(
-        f"{c['id']} (from {'Yiya' if c.get('source') == 'yiya' else 'Argo'}"
+        f"{c['id']} (from {name if c.get('source') == 'yiya' else 'Argo'}"
         + (f", energy {c['energy']}/10" if c.get("energy") is not None else "")
         + f"):\n{c.get('text', '')}"
         for c in candidates
     )
     prompt = (
-        "You are Argo, helping Yiya decide which ONE project to ship THIS WEEK. "
+        f"You are Argo, helping {name} decide which ONE project to ship THIS WEEK. "
         "Weigh the candidates below on: (1) can it realistically ship in a week, "
-        "(2) fit to her taste, (3) any energy ratings. Recommend exactly one, in "
+        f"(2) fit to {profile.pronoun('possessive')} taste, (3) any energy ratings. Recommend exactly one, in "
         "2-4 short plain-text lines (no markdown, no em dashes): name it, say why "
         "it wins, and name the runner-up in one line. Be decisive.\n\n"
-        + (f"Her taste:\n{taste}\n\n" if taste else "")
+        + (f"{poss} taste:\n{taste}\n\n" if taste else "")
         + f"Candidates:\n{listing}"
     )
     model = next(
@@ -736,7 +740,7 @@ def recommend_project() -> str:
         None,
     )
     if model is None:
-        return "No model available to weigh them, tell Yiya to try again shortly."
+        return "No model available to weigh them, tell the user to try again shortly."
     if _observe.provider_for(model)["name"] == "anthropic":
         rec = _observe.chat_with_mcp(
             "You are Argo, a decisive frontier scout.",
@@ -771,8 +775,8 @@ def _scaffold_plan(project_id=""):
     project = entry.get("text", "")
 
     prompt = (
-        "You are Argo, helping Yiya actually START the project below this "
-        "weekend. Give her a concrete kickoff plan, plain text, no markdown, no "
+        f"You are Argo, helping {profile.name()} actually START the project below this "
+        f"weekend. Give {profile.pronoun('object')} a concrete kickoff plan, plain text, no markdown, no "
         "em dashes, Telegram-friendly. Cover, briefly:\n"
         "1. the repo skeleton to create (folders/files, one line each)\n"
         "2. the first 2-3 commands or files to write to get a skeleton running\n"
@@ -788,7 +792,7 @@ def _scaffold_plan(project_id=""):
         None,
     )
     if model is None:
-        return "No model available to draft the plan, tell Yiya to try again shortly."
+        return "No model available to draft the plan, tell the user to try again shortly."
     if _observe.provider_for(model)["name"] == "anthropic":
         return _observe.chat_with_mcp(
             "You are Argo, a terse frontier scout helping a builder start.",
@@ -800,12 +804,12 @@ def _scaffold_plan(project_id=""):
 @mcp.tool()
 @with_deadline(120)  # a full model call to draft the kickoff plan
 def scaffold_project(project_id: str = "") -> str:
-    """Produce a concrete kickoff plan so Yiya can start building this weekend:
+    """Produce a concrete kickoff plan so the user can start building this weekend:
     the repo skeleton to create, the first 2-3 files or commands, and the very
     first thing to build. Defaults to the LATEST project; pass a project_id (e.g.
-    'P-002') to scaffold a specific selected one. Use after she SELECTs a project
-    or asks 'how do I start / scaffold me / help me get going'. The plan is sent
-    to her directly; you just acknowledge. Writes no files."""
+    'P-002') to scaffold a specific selected one. Use after they SELECT a project
+    or ask 'how do I start / scaffold me / help me get going'. The plan is sent
+    to them directly; you just acknowledge. Writes no files."""
     return _deliver(_scaffold_plan(project_id))
 
 
@@ -876,13 +880,13 @@ def read_findings(name: str = "") -> str:
     return match.read_text()[:MAX_FETCH_CHARS]
 
 
-# --- Taste: first-class learning of what Yiya likes (parallel to findings) ---
-# Taste is a PREFERENCE (what she likes), not a falsifiable belief, so it lives
+# --- Taste: first-class learning of what the user likes (parallel to findings) ---
+# Taste is a PREFERENCE (what they like), not a falsifiable belief, so it lives
 # in its own store (data/taste_signals.json), NOT the world model. But it is
 # first-class learning: readable on demand, theme-clustered, and fed into project
-# generation + (via save_taste_signal) the study_url loop. read_taste lets Yiya
-# AND Argo inspect the accumulated profile; save_taste_signal lets Argo persist a
-# taste lesson from a source she pointed it at.
+# generation + (via save_taste_signal) the study_url loop. read_taste lets the
+# user AND Argo inspect the accumulated profile; save_taste_signal lets Argo
+# persist a taste lesson from a source they pointed it at.
 
 # What each expected env var GATES — so Argo can report a MISSING secret as a
 # concrete capability loss ("no GITHUB_TOKEN -> can't read private repos"),
@@ -937,11 +941,11 @@ def check_config() -> str:
 @mcp.tool()
 @with_deadline(10)
 def read_taste() -> str:
-    """Show Yiya's learned taste profile — the design/product patterns she's
-    liked (from screenshots and urls she's sent), with the recurring THEMES that
-    have emerged. Use when she asks 'what do you know about my taste / what have
-    you learned / show my taste profile', or to ground a project in what she
-    actually likes."""
+    """Show the user's learned taste profile — the design/product patterns they've
+    liked (from screenshots and urls they've sent), with the recurring THEMES that
+    have emerged. Use when they ask 'what do you know about my taste / what have
+    you learned / show my taste profile', or to ground a project in what they
+    actually like."""
     import taste_signals
     return taste_signals.format_profile()
 
@@ -950,13 +954,13 @@ def read_taste() -> str:
 @with_deadline(10)
 def save_taste_signal(what: str, pattern: str, liked: str, steal: str = "",
                       source: str = "url") -> str:
-    """Persist a TASTE lesson you extracted from a design/product/app source Yiya
-    pointed you at (e.g. after study_url on a product page she likes). Use this
-    ONLY for taste (what she'd like / how she builds), NOT for factual research
-    (that goes through findings). Fields: what (the thing), pattern (the
+    """Persist a TASTE lesson you extracted from a design/product/app source the
+    user pointed you at (e.g. after study_url on a product page they like). Use
+    this ONLY for taste (what they'd like / how they build), NOT for factual
+    research (that goes through findings). Fields: what (the thing), pattern (the
     transferable design/interaction pattern), liked (the underlying quality that
-    makes it good), steal (how it could inform something she builds). This makes
-    the lesson durable + part of her taste profile, not just this chat."""
+    makes it good), steal (how it could inform something they build). This makes
+    the lesson durable + part of their taste profile, not just this chat."""
     import taste_signals
     sig = taste_signals.save_signal(what, pattern, liked, steal, source=source)
     if sig is None:
