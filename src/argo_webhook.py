@@ -53,6 +53,7 @@ except ImportError:
 import argo_http
 import argo_observe as observe
 import argo_paths
+import argo_rating
 import profile
 import send_telegram
 
@@ -415,17 +416,19 @@ def _llm_reply(chat_id, user_text):
     return f"(Argo hit an error reaching the model: {last_error})"
 
 
-def _parse_rating(text):
-    """A bare number 1-10 (integers or decimals like 7.5) is an energy rating.
-    Returns a float in [1, 10], or None. Must be the WHOLE message so prose like
-    'build 3 things' isn't misread as a rating."""
-    m = re.match(r"\s*(\d{1,2}(?:\.\d+)?)\s*$", (text or "").strip())
-    if not m:
-        return None
-    val = float(m.group(1))
-    if 1 <= val <= 10:
-        return int(val) if val.is_integer() else val
-    return None
+# Rating / project-state helpers live in argo_rating now (one cohesive seam out
+# of this 900-line server). These thin wrappers keep the exact names handle_update
+# and the tests use, and forward PROJECTS_LOG (this module's global) so a test
+# patching wh.PROJECTS_LOG still drives the read/write at call time.
+_parse_rating = argo_rating.parse_rating
+
+
+def _target_project(log, project_id=None):
+    return argo_rating.target_project(log, project_id)
+
+
+def _match_existing_project(text):
+    return argo_rating.match_existing_project(text, PROJECTS_LOG)
 
 
 # --- Responsiveness: instant ack + "still working" heartbeat ----------------
@@ -540,78 +543,12 @@ def _reply_with_progress(chat_id, text):
         hb.stop()
 
 
-def _target_project(log, project_id=None):
-    """The project a bare rating/SELECT refers to: an explicit id if given, else
-    the one most recently SHOWN to Yiya (delivered, marked shown_at), else the
-    last in the log. Using 'last shown' not 'last generated' keeps a rating/SELECT
-    attached to the project she's actually looking at, even if a newer one was
-    generated after."""
-    if project_id:
-        return next((p for p in log if p.get("id") == project_id), None)
-    shown = [p for p in log if p.get("shown_at")]
-    if shown:
-        return max(shown, key=lambda p: p["shown_at"])
-    return log[-1] if log else None
-
-
-def _match_existing_project(text):
-    """If `text` looks like a paste of an EXISTING logged project (its pitch or a
-    chunk of its body), return that project; else None. Stops a paste of a project
-    Argo already sent from being misread as a brand-new idea (add_project)."""
-    t = " ".join((text or "").split()).lower()
-    if len(t) < 25:  # too short to confidently match; let the LLM handle it
-        return None
-    if not PROJECTS_LOG.exists():
-        return None
-    try:
-        log = json.loads(PROJECTS_LOG.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return None
-    for p in reversed(log):  # prefer the most recent match
-        body = " ".join(p.get("text", "").split()).lower()
-        if not body:
-            continue
-        # Match if the pasted text is contained in the project (a paste of part of
-        # it), or the project's distinctive first line is contained in the paste.
-        first_line = body.split(".")[0]
-        if (t in body) or (len(first_line) >= 25 and first_line in t):
-            return p
-    return None
-
-
 def _record_rating(value, project_id=None):
-    """Apply a rating to the project Yiya is responding to (last shown), or a
-    specific id. Returns a status string."""
-    if not PROJECTS_LOG.exists():
-        return None
-    log = json.loads(PROJECTS_LOG.read_text())
-    target = _target_project(log, project_id)
-    if target is None:
-        return None
-    target["energy"] = value
-    from datetime import datetime, timezone
-    target["rated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
-    return f"Logged energy {value}/10 for {target['id']}. 👍"
+    return argo_rating.record_rating(value, PROJECTS_LOG, project_id)
 
 
 def _select_latest_project(project_id=None):
-    """Mark a project as selected. With no id, marks the one most recently SHOWN
-    to Yiya (not just the last generated); with an id (e.g. 'SELECT P-002'), marks
-    that specific candidate. Returns its id, or None if there's nothing/no match."""
-    if not PROJECTS_LOG.exists():
-        return None
-    log = json.loads(PROJECTS_LOG.read_text())
-    if not log:
-        return None
-    target = _target_project(log, project_id)
-    if target is None:
-        return None
-    from datetime import datetime, timezone
-    target["selected"] = True
-    target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
-    return target.get("id")
+    return argo_rating.select_latest_project(PROJECTS_LOG, project_id)
 
 
 def _download_telegram_photo(msg):
