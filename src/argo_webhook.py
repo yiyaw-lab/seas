@@ -397,6 +397,12 @@ _TOOL_HINTS = (
     "fetch", "read", "look up", "search", "latest", "what's new", "whats new",
     "add ", "feed", "propose", "pr ", "open a", "repo", "github", "check",
     "health", "status", "verify", "find", "investigate",
+    # Project flow: generation always refetches signals + a model call, so it's
+    # always slow. Ack instantly or Yiya gets silence (the gen finishes under the
+    # 90s first heartbeat, so the heartbeat alone won't cover it).
+    "project", "another", "different one", "build", "idea", "ship this",
+    "what should i", "which one", "too complex", "over my head", "scaffold",
+    "how do i start", "give me",
 )
 
 
@@ -416,6 +422,10 @@ def _ack_text(text):
         return "on it, give me a sec."
     if any(h in t for h in ("latest", "what's new", "whats new", "search", "find")):
         return "looking now, one sec."
+    if any(h in t for h in ("project", "another", "different one", "idea",
+                            "too complex", "over my head", "scaffold",
+                            "ship this", "which one", "build")):
+        return "on it, putting a project together. takes a minute."
     return "on it."
 
 
