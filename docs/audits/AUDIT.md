@@ -87,9 +87,9 @@ Nothing in `seas.py` or the workflow touches any of these.
 
 | File | Status |
 |------|--------|
-| [src/ledger.py](src/ledger.py) | 0 bytes |
-| [src/scan.py](src/scan.py) | 0 bytes |
-| [data/ledger.json](data/ledger.json) | 0 bytes — referenced by nothing |
+| [src/ledger.py](../../src/ledger.py) | 0 bytes |
+| [src/scan.py](../../src/scan.py) | 0 bytes |
+| [data/ledger.json](../../data/ledger.json) | 0 bytes — referenced by nothing |
 | `src/__pycache__/` | build artifact, should be gitignored |
 
 ### 2b. Orphaned but functional (never imported, never invoked by `seas.py` or CI)
@@ -97,30 +97,30 @@ Nothing in `seas.py` or the workflow touches any of these.
 These all *work*, but nothing calls them. They are vestiges of Gen 1 (manual scoring) and Gen 2 (capability engine):
 
 **Gen 1 manual-scoring leftovers (superseded by auto-scored `signals.json`):**
-- [src/add_signal.py](src/add_signal.py) — interactive `input()` signal entry
-- [src/score_signals.py](src/score_signals.py) — interactive scoring
-- [src/import_scores.py](src/import_scores.py) — interactive scoring
-- [src/apply_score.py](src/apply_score.py) — applies `runs/llm_scores/latest.json`
-- [src/auto_score.py](src/auto_score.py) — builds a scoring job from a prompt
-- [src/enrich_signal.py](src/enrich_signal.py) + [src/apply_enrichment.py](src/apply_enrichment.py)
-- [src/classify_signal.py](src/classify_signal.py)
+- [src/add_signal.py](../../src/add_signal.py) — interactive `input()` signal entry
+- [src/score_signals.py](../../src/score_signals.py) — interactive scoring
+- [src/import_scores.py](../../src/import_scores.py) — interactive scoring
+- [src/apply_score.py](../../src/apply_score.py) — applies `runs/llm_scores/latest.json`
+- [src/auto_score.py](../../src/auto_score.py) — builds a scoring job from a prompt
+- [src/enrich_signal.py](../../src/enrich_signal.py) + [src/apply_enrichment.py](../../src/apply_enrichment.py)
+- [src/classify_signal.py](../../src/classify_signal.py)
 
 **Gen 2 capability engine (concept removed from north star entirely):**
-- [src/frontier_brief.py](src/frontier_brief.py)
-- [src/capability_analysis_job.py](src/capability_analysis_job.py)
-- [src/ingest_capability_analysis.py](src/ingest_capability_analysis.py)
-- [src/add_capability.py](src/add_capability.py)
-- [src/capability_inventory.py](src/capability_inventory.py)
-- [src/link_experiment.py](src/link_experiment.py)
-- [src/link_artifact.py](src/link_artifact.py)
-- [src/update_capability_status.py](src/update_capability_status.py)
-- [src/recommend_next_capability.py](src/recommend_next_capability.py)
+- [src/frontier_brief.py](../../src/frontier_brief.py)
+- [src/capability_analysis_job.py](../../src/capability_analysis_job.py)
+- [src/ingest_capability_analysis.py](../../src/ingest_capability_analysis.py)
+- [src/add_capability.py](../../src/add_capability.py)
+- [src/capability_inventory.py](../../src/capability_inventory.py)
+- [src/link_experiment.py](../../src/link_experiment.py)
+- [src/link_artifact.py](../../src/link_artifact.py)
+- [src/update_capability_status.py](../../src/update_capability_status.py)
+- [src/recommend_next_capability.py](../../src/recommend_next_capability.py)
 
 **Gen 2 experiment-flow leftovers (superseded by `main.py`/`experiment.py`):**
-- [src/generate_experiment_job.py](src/generate_experiment_job.py)
-- [src/opportunity_job.py](src/opportunity_job.py) — reads `runs/test_signal.md`
-- [src/build_plan.py](src/build_plan.py)
-- [src/choose_experiment.py](src/choose_experiment.py)
+- [src/generate_experiment_job.py](../../src/generate_experiment_job.py)
+- [src/opportunity_job.py](../../src/opportunity_job.py) — reads `runs/test_signal.md`
+- [src/build_plan.py](../../src/build_plan.py)
+- [src/choose_experiment.py](../../src/choose_experiment.py)
 
 **Count:** of 31 `src/*.py` files, only **6 are live** (`seas.py`, `week.py`, `opportunities.py`, `score.py`, `main.py`, `experiment.py`). ~80% of the Python is dead or orphaned.
 
@@ -137,10 +137,10 @@ all 9 `*capability*` / capability-linking scripts in §2b, plus `data/capabiliti
 - `opportunity_job.py` / `runs/test_signal.md` — single-signal prototype of the opportunity step, replaced by `opportunities.py`.
 
 **Obsolete docs (describe abandoned architectures):**
-- [runs/SEAS_V2_ARCHITECTURE.md](runs/SEAS_V2_ARCHITECTURE.md) — Gen 2 "Frontier Brief → Capability Analysis" pipeline.
-- [runs/SEAS_NORTH_STAR.md](runs/SEAS_NORTH_STAR.md) — says "SEAS is a **capability acquisition engine**." **Directly contradicts the current north star.**
-- [runs/CAPABILITY_PIPELINE.md](runs/CAPABILITY_PIPELINE.md), [runs/CAPABILITY_SCHEMA.md](runs/CAPABILITY_SCHEMA.md)
-- [runs/ARCHITECTURE_REVIEW.md](runs/ARCHITECTURE_REVIEW.md) — Gen 1 pipeline review.
+- [runs/SEAS_V2_ARCHITECTURE.md](../../runs/SEAS_V2_ARCHITECTURE.md) — Gen 2 "Frontier Brief → Capability Analysis" pipeline.
+- [runs/SEAS_NORTH_STAR.md](../../runs/SEAS_NORTH_STAR.md) — says "SEAS is a **capability acquisition engine**." **Directly contradicts the current north star.**
+- [runs/CAPABILITY_PIPELINE.md](../../runs/CAPABILITY_PIPELINE.md), [runs/CAPABILITY_SCHEMA.md](../../runs/CAPABILITY_SCHEMA.md)
+- [runs/ARCHITECTURE_REVIEW.md](../../runs/ARCHITECTURE_REVIEW.md) — Gen 1 pipeline review.
 
 **Stale run artifacts (outputs, not source):** everything matching `runs/2026-06-01-*.md` and `runs/*/latest.json`. These are *logs*, not architecture. Keep for history or move to an `archive/` — they shouldn't sit next to schema docs.
 
