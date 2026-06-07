@@ -54,7 +54,7 @@ only as an anonymous "file was modified" notice — you cannot see who. So:
 **What it is.** Two systems: **SEAS** (research engine — "what is true?",
 signals → opportunities → findings → theories) and **Argo** (decision/insight
 engine — "what should I do next?", a live agentic Telegram scout). See README.md
-and build-log/ for the full picture.
+and docs/build-log/ for the full picture.
 
 **Stack.** Python 3.11, **standard-library-first** — only the deps in
 requirements.txt (openai, anthropic, python-dotenv, certifi, feedparser, flask,
