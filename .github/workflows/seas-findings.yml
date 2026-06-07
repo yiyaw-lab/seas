@@ -32,16 +32,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Fetch fresh frontier signals
-        run: python src/fetch_signals.py
-
-      - name: Run SEAS Stage 1 synthesis
+      - name: Run SEAS V3 pipeline (fetch + score + rank + synthesize)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ARGO_MODEL: ${{ vars.ARGO_MODEL }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
-        run: python src/seas_finding.py
+        run: python src/seas.py
 
       - name: Commit findings, beliefs, and probes
         run: |
