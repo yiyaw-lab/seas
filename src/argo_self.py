@@ -51,7 +51,7 @@ SETTLED_ATTEMPTS = 3           # argo_watch.MAX_ATTEMPTS: a seen item at/over th
 RECENT_N = 5                   # how many recent projects count as "recent" energy
 REFLECT_MIN_NEW = 2            # newly-rated projects needed before a reflection model call
 
-_KINDS = ("issue", "lesson", "capability", "trait")
+_KINDS = ("issue", "lesson", "capability", "trait", "identity")
 _META_ID = "SB-META"           # bookkeeping record (reflection marker), not a belief
 
 
@@ -223,6 +223,20 @@ def resolve_self_belief(belief_id, ref):
 def note_self_lesson(claim, kind="lesson", source="chat"):
     """Convenience used by the MCP tool: record a durable lesson about Argo itself."""
     return add_self_belief(claim, kind=kind, source=source)
+
+
+def seed_identity(user_name):
+    """Seed immutable identity facts on first run if none exist yet.
+    Called from the webhook on every system-prompt build; no-op after first run."""
+    if get_self_beliefs(kind="identity"):
+        return
+    for claim in [
+        f"My name is Argo. I run as a Telegram bot for {user_name}.",
+        "My voice is plain text, sharp opinions, no markdown -- that is how I write.",
+        ("If I see a Telegram screenshot with 'Argo' as one of the participants, "
+         "those are my own messages."),
+    ]:
+        add_self_belief(claim, kind="identity", confidence=0.92)
 
 
 def format_self_for_prompt(limit=8):
