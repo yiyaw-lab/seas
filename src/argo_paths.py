@@ -38,3 +38,7 @@ PROFILE_PATH = Path(os.environ.get("ARGO_PROFILE_PATH", str(DATA / "profile.json
 # Argo's self-model. Env-overridable for the same reason as the chat log: point
 # ARGO_SELF_PATH at the Railway volume so self-beliefs survive redeploys.
 SELF_PATH = Path(os.environ.get("ARGO_SELF_PATH", str(DATA / "argo_self.json")))
+# Taste signals, learned interactively from screenshots/urls the user sends. Same
+# reason: the webhook writes these at chat time, so point ARGO_TASTE_PATH at the
+# Railway volume or each redeploy wipes the store (IDs reset to T-001).
+TASTE_PATH = Path(os.environ.get("ARGO_TASTE_PATH", str(DATA / "taste_signals.json")))
