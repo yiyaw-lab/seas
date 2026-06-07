@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+import argo_memory
 import argo_observe as observe
 import argo_paths
 import argo_store
@@ -213,7 +214,17 @@ def main():
         for a in alerts:
             print(f"  • {a}")
             if not no_send:
-                send_telegram.send_message(f"🛰️ Argo spotted something:\n\n{a}")
+                msg = f"🛰️ Argo spotted something:\n\n{a}"
+                send_telegram.send_message(msg)
+                # Record the push into chat memory so a follow-up about this alert
+                # ("is this a counter to X?") sees it -- proactive sends used to
+                # bypass the log and Argo looked amnesiac. Best-effort: a memory
+                # write must never block delivery.
+                try:
+                    argo_memory.record(os.environ.get("TELEGRAM_CHAT_ID"), "Argo", msg)
+                except Exception:
+                    log.warning("could not record watch alert to chat memory",
+                                exc_info=True)
 
     if no_send:
         print("\n(--no-send: nothing sent, seen-store NOT updated)")
