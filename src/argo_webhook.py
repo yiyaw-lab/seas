@@ -51,6 +51,7 @@ except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
 
 import argo_http
+import argo_memory
 import argo_observe as observe
 import argo_paths
 import argo_rating
@@ -119,6 +120,7 @@ def _self_capability_block():
     prompt is unaffected and never bricks. Built at call time, so a newly added tool
     or a fresh self-lesson shows up with no second edit -- the self-updating part."""
     import argo_self
+    argo_self.seed_identity(profile.name())  # no-op after the first successful call
     parts = []
     caps = argo_self.format_capabilities_for_prompt()
     if caps:
@@ -147,9 +149,10 @@ def build_system_prompt(p=None):
     poss = p.get("possessive", "her")     # her / his / their
     Subj = subj[:1].upper() + subj[1:]    # sentence-initial form
     return (
-    f"You are Argo. You talk with {name} — {p['one_liner']} — over text about "
-    "what's worth building and what's actually happening at the edge of the "
-    "field.\n"
+    f"You are Argo. {name} is your person — the one human you work hardest for. "
+    f"You've been talking with {name} over Telegram about what's worth building and "
+    "what's actually happening at the frontier. You're not a general assistant; "
+    f"you're {name}'s scout, advisor, and thinking partner. {name} is {p['one_liner']}.\n"
     "\n"
     f"{p['persona']}\n"
     "\n"
@@ -176,6 +179,10 @@ def build_system_prompt(p=None):
     "rating per project; run_reflection takes stock of those ratings. When asked how "
     "to improve you, answer concretely from these facts; never invent generic "
     "optimization advice.\n"
+    "SELF-RECOGNITION: If you see a screenshot of a Telegram conversation where one "
+    "participant is named 'Argo' — that is you. Read your own messages in it as "
+    "yours. Do not treat them as a third party or an external document. Reference "
+    "them the way you would remember something you said.\n"
     "PROJECTS ON DEMAND: project-producing tools (new_project, add_project, "
     "project_too_complex, recommend_project, rehearse_project, scaffold_project, "
     f"get_latest_project) send their content to {name} DIRECTLY; when one returns a "
@@ -224,6 +231,11 @@ def build_system_prompt(p=None):
     "x.ai/news blocks bots so try docs.x.ai or a github/HN link instead. If the "
     "user asks about something current or points you at a "
     "URL on those sources, USE the tool and answer from what you actually read. "
+    "If asked about something current or a named release/product you don't "
+    "recognize (e.g. a new launch like 'Mythos'), do NOT just say you've never "
+    "heard of it: web_fetch the likely source first (for an Anthropic thing, "
+    "https://www.anthropic.com/news; otherwise call list_feeds) and answer from "
+    "what you find. Only say it's not out there if you looked and still can't find it. "
     "For 'what's new on X' questions, prefer the RSS feed (call list_feeds to get "
     "the URLs) over scraping HTML pages, since many sites (e.g. openai.com) block "
     "automated page fetches but serve their feed fine. "
@@ -242,6 +254,15 @@ def build_system_prompt(p=None):
     "taste — call save_taste_signal(what, pattern, liked, steal) so the lesson "
     f"becomes part of {poss} durable taste profile, not just this chat. You can show "
     f"{obj} that profile any time with read_taste (themes + signals {subj}'s liked). "
+    "IMAGES: when "
+    f"{name} sends a screenshot or photo, you can SEE it -- respond to what {subj} "
+    "actually wants: discuss it, identify it, react, or brainstorm from it (a tweet "
+    "about an idea, riff a project from it; a screenshot of an article you pushed "
+    "earlier, talk about the article, it's in your memory). Do NOT reflexively turn "
+    "every image into a 'taste lesson'. ONLY when the image is genuinely a design / "
+    f"product / interaction pattern {subj} likes, call save_taste_signal(what, "
+    "pattern, liked, steal) to capture the durable lesson -- that's a judgment call, "
+    "not the default reaction to an image. "
     "You can check your OWN health with get_webhook_health, get_latest_project, "
     "and get_signal_freshness. When asked 'are you working / what did you suggest "
     "last / how current are your signals', use these and report the real status. "
@@ -297,46 +318,19 @@ def build_system_prompt(p=None):
     "usually make replies shorter, not longer."
     )
 
-# Persisted, append-only chat log. This is durable conversation data (for
-# analysis) AND the source of the LLM's short-term memory. On Railway, point
-# ARGO_CHAT_LOG at a mounted volume (e.g. /data/argo_chat.json) so it survives
-# redeploys; locally it defaults to data/argo_chat.json.
-HISTORY_TURNS = 12  # how many recent turns to feed the model as context
-CHAT_LOG_PATH = Path(
-    os.environ.get("ARGO_CHAT_LOG", str(ROOT / "data" / "argo_chat.json"))
-)
+# The append-only chat log -- both the LLM's short-term memory AND durable data --
+# now lives in argo_memory, shared with the proactive senders (argo_watch /
+# argo_project) so what Argo PUSHES is remembered too, not just what it's asked.
+# These thin wrappers keep the names handle_update/_handle_photo already use.
+HISTORY_TURNS = argo_memory.HISTORY_TURNS
 
 
 def _append_turn(chat_id, role, text):
-    """Append one turn to the durable log (creates the file/dir if needed)."""
-    from datetime import datetime, timezone
-
-    CHAT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    log = []
-    if CHAT_LOG_PATH.exists():
-        try:
-            log = json.loads(CHAT_LOG_PATH.read_text())
-        except (json.JSONDecodeError, ValueError):
-            log = []  # never lose a reply over a corrupt read
-    log.append({
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "chat_id": chat_id,
-        "role": role,
-        "text": text,
-    })
-    CHAT_LOG_PATH.write_text(json.dumps(log, indent=2) + "\n")
+    argo_memory.record(chat_id, role, text)
 
 
 def _recent_turns(chat_id, n=HISTORY_TURNS):
-    """Read the last n turns for this chat from the durable log."""
-    if not CHAT_LOG_PATH.exists():
-        return []
-    try:
-        log = json.loads(CHAT_LOG_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return []
-    turns = [t for t in log if t.get("chat_id") == chat_id]
-    return turns[-n:]
+    return argo_memory.recent(chat_id, n)
 
 
 # Words after a period that mean it's a filename/domain, NOT a sentence boundary,
@@ -384,11 +378,22 @@ def _clean_reply(text):
     return re.sub(r"  +", " ", text)
 
 
-def _llm_reply(chat_id, user_text):
-    """Generate Argo's reply with short conversation memory."""
-    # Prefer the routed Claude model for chat (Sonnet default, Opus on triggers);
-    # fall back to whatever resolve_models() yields (e.g. gpt-4o escape hatch).
-    candidates = [_route_model(user_text)] + observe.resolve_models()
+def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
+                    anthropic_only=False):
+    """Run Argo's reply over the runnable models and persist both turns.
+
+    `final_content` is the user's turn content: a plain string for a text message,
+    or a list of Anthropic content blocks for an image (so a screenshot goes through
+    the SAME history-aware, MCP-tool-enabled brain as text -- Argo can react to it,
+    look things up, and decide for itself whether it's a taste signal worth saving,
+    instead of every image being force-fed to the taste extractor).
+    `anthropic_only` restricts to Claude models: image turns need vision, and the
+    gpt-4o fallback (a string prompt) can't take image blocks.
+    Returns the cleaned reply string, or None if no usable model is configured (the
+    caller picks the user-facing wording)."""
+    route_text = route_text if route_text is not None else (
+        final_content if isinstance(final_content, str) else "")
+    candidates = [_route_model(route_text)] + observe.resolve_models()
     seen = set()
     runnable = []
     for m in candidates:
@@ -396,10 +401,13 @@ def _llm_reply(chat_id, user_text):
             continue
         seen.add(m)
         p = observe.provider_for(m)
-        if p and os.environ.get(p["key_env"]):
-            runnable.append(m)
+        if not (p and os.environ.get(p["key_env"])):
+            continue
+        if anthropic_only and p["name"] != "anthropic":
+            continue
+        runnable.append(m)
     if not runnable:
-        return "(Argo can't think right now, no API key configured.)"
+        return None
 
     hist = _recent_turns(chat_id)
 
@@ -407,32 +415,34 @@ def _llm_reply(chat_id, user_text):
     for model in runnable:
         try:
             if observe.provider_for(model)["name"] == "anthropic":
-                # Claude path: structured messages + (later) MCP tools. The
-                # assistant turns are labeled "Argo"; anything else (the user's
-                # name, or a legacy "Yiya" label) maps to the user role.
+                # Claude path: structured messages + MCP tools. Assistant turns are
+                # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
+                # label) maps to the user role. The final turn carries `final_content`
+                # (string or image-block list).
                 messages = [
                     {
                         "role": "assistant" if t["role"] == "Argo" else "user",
                         "content": t["text"],
                     }
                     for t in hist
-                ] + [{"role": "user", "content": user_text}]
+                ] + [{"role": "user", "content": final_content}]
                 raw = observe.chat_with_mcp(
                     build_system_prompt(), messages, model, mcp_servers=MCP_SERVERS
                 )
             else:
-                # Fallback path (gpt-4o): the original single string prompt.
+                # Fallback path (gpt-4o): the original single string prompt. Only
+                # reached for text turns (anthropic_only guards images away).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
                     f"{build_system_prompt()}\n\n"
                     f"Conversation so far:\n{convo}\n\n"
-                    f"{profile.name()}: {user_text}\n\nArgo:"
+                    f"{profile.name()}: {final_content}\n\nArgo:"
                 )
                 raw = observe.generate_observations(prompt, model)
 
             reply = _clean_reply(raw.strip())
             # Persist both turns so memory survives restarts and is analysable.
-            _append_turn(chat_id, profile.name(), user_text)
+            _append_turn(chat_id, profile.name(), log_user_text)
             _append_turn(chat_id, "Argo", reply)
             return reply
         except observe.argo_guard.DailyBudget.BudgetExceeded:
@@ -442,6 +452,12 @@ def _llm_reply(chat_id, user_text):
         except Exception as exc:
             last_error = exc
     return f"(Argo hit an error reaching the model: {last_error})"
+
+
+def _llm_reply(chat_id, user_text):
+    """Generate Argo's reply to a text message with short conversation memory."""
+    reply = _generate_reply(chat_id, user_text, user_text)
+    return reply if reply is not None else "(Argo can't think right now, no API key configured.)"
 
 
 # Rating / project-state helpers live in argo_rating now (one cohesive seam out
@@ -622,10 +638,13 @@ def _download_telegram_photo(msg):
 
 
 def _handle_photo(chat_id, msg):
-    """A screenshot from Yiya's feed: SEE it, extract the durable taste lesson,
-    persist it (so it shapes future projects), and reply in voice. Argo no longer
-    silently drops images."""
-    import taste_signals
+    """A screenshot/image: SEE it inside the conversation and respond to what the
+    user actually wants. The image goes through Argo's normal tool-enabled brain
+    (history + MCP tools), so it can react, identify, brainstorm, look things up --
+    and, when it JUDGES the image is genuinely design/product inspiration, call
+    save_taste_signal itself. No longer force-converted into a 'taste lesson'; no
+    longer silently dropped."""
+    import base64
 
     caption = msg.get("caption", "") or ""
     img, media = _download_telegram_photo(msg)
@@ -633,26 +652,30 @@ def _handle_photo(chat_id, msg):
         send_telegram.send_message(
             "got an image but couldn't pull it down, mind resending?")
         return
+
+    # Anthropic image block + a text block carrying the caption (or a neutral note
+    # so the model knows there was none). Mirrors observe.describe_image's shape.
+    content = [
+        {"type": "image", "source": {
+            "type": "base64", "media_type": media,
+            "data": base64.b64encode(img).decode(),
+        }},
+        {"type": "text",
+         "text": caption or "[the user sent this image with no caption]"},
+    ]
+    log_user_text = f"[image]{(' ' + caption) if caption else ''}"
     try:
-        extraction = observe.describe_image(
-            img, media, taste_signals.build_extract_prompt(caption),
-            system=taste_signals.build_extract_system())
+        reply = _generate_reply(chat_id, content, log_user_text,
+                                route_text=caption, anthropic_only=True)
     except Exception as exc:
         send_telegram.send_message(f"saw the image but couldn't process it: {exc}")
         return
-
-    sig, summary = taste_signals.parse_and_store(extraction, caption=caption)
-    if sig is None:
-        # Vision worked but extraction didn't parse — still reply with what it saw
-        # rather than drop it, just don't persist a malformed taste signal.
-        send_telegram.send_message(_clean_reply(extraction[:600]))
+    if reply is None:
+        # No vision-capable (Anthropic) model configured this turn.
+        send_telegram.send_message(
+            "got an image but can't see it right now (no vision model configured). "
+            "mind describing it, or resending in a bit?")
         return
-    # Log the turn so it lives in chat memory too, then reply.
-    _append_turn(chat_id, profile.name(), f"[screenshot]{(' ' + caption) if caption else ''}")
-    reply = _clean_reply(
-        f"noted. what's worth stealing here: {summary}. logged it to your taste "
-        f"so it nudges future projects ({sig['id']}).")
-    _append_turn(chat_id, "Argo", reply)
     send_telegram.send_message(reply)
 
 
