@@ -29,6 +29,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import argo_memory
 import argo_observe as observe
 import argo_store
 import profile
@@ -475,7 +476,15 @@ def main():
         return
 
     # Invite a rating reply (argo_rate.py reads it back), plus select/another.
-    send_telegram.send_message(project_text + project_invite(project_id))
+    sent = project_text + project_invite(project_id)
+    send_telegram.send_message(sent)
+    # Record the push into chat memory so a chat follow-up about this project
+    # (rate it, "remind me what you sent", REHEARSE it) has it in context --
+    # proactive sends used to bypass the log. Best-effort, never block delivery.
+    try:
+        argo_memory.record(os.environ.get("TELEGRAM_CHAT_ID"), "Argo", sent)
+    except Exception:
+        print("(could not record project to chat memory)")
     print()
 
 

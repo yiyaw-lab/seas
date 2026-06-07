@@ -19,16 +19,31 @@ Standard-library only. JSON store at data/taste_signals.json.
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
+import argo_paths
 import argo_store
 import profile
 
-ROOT = Path(__file__).resolve().parent.parent
-TASTE_PATH = ROOT / "data" / "taste_signals.json"
+# Sourced from argo_paths (env-overridable ARGO_TASTE_PATH -> Railway volume) so the
+# store survives redeploys; without that the webhook's writes were wiped each deploy
+# and IDs reset to T-001. Kept as a module global so tests can patch it
+# (mock.patch.object(taste_signals, "TASTE_PATH", tmp)); _load/_save read this name
+# at call time so the override bites.
+TASTE_PATH = argo_paths.TASTE_PATH
 
 # How many recent taste signals to fold into a generation prompt.
 RECENT_FOR_PROMPT = 8
+
+
+def _next_id(items):
+    """Next 'T-NNN' id, derived from the max existing numeric id (not len), so a
+    deleted signal never causes a collision and a re-loaded store keeps counting."""
+    nums = []
+    for s in items:
+        sid = str(s.get("id", ""))
+        if sid.startswith("T-") and sid[2:].isdigit():
+            nums.append(int(sid[2:]))
+    return f"T-{(max(nums) if nums else 0) + 1:03d}"
 
 
 def _load():
@@ -84,7 +99,7 @@ def parse_and_store(extraction_text, caption="", source="telegram-screenshot"):
         return None, None
     items = _load()
     sig = {
-        "id": f"T-{len(items) + 1:03d}",
+        "id": _next_id(items),
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "source": source,
         "caption": caption,
@@ -123,7 +138,7 @@ def save_signal(what, pattern, liked, steal, source, caption=""):
         return None
     items = _load()
     sig = {
-        "id": f"T-{len(items) + 1:03d}",
+        "id": _next_id(items),
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "source": source,
         "caption": caption,
