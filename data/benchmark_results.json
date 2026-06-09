@@ -1,0 +1,34 @@
+{
+  "claude-opus-4-8": {
+    "trials": 4,
+    "findings": 1,
+    "overclaims": 0,
+    "probes": 3,
+    "errors": 0,
+    "gate_pass_rate": 1.0,
+    "avg_sources_cited": 2.0,
+    "avg_quote_verifiable": 1.0,
+    "avg_latency_s": 6.578808486461639,
+    "avg_cost_usd": 0.1200834375,
+    "total_cost_usd": 0.48033375,
+    "throttled_calls": 0,
+    "error_calls": 0,
+    "cost_per_finding": 0.48033375
+  },
+  "claude-sonnet-4-6": {
+    "trials": 4,
+    "findings": 1,
+    "overclaims": 0,
+    "probes": 3,
+    "errors": 0,
+    "gate_pass_rate": 1.0,
+    "avg_sources_cited": 2.0,
+    "avg_quote_verifiable": 1.0,
+    "avg_latency_s": 9.844557464122772,
+    "avg_cost_usd": 0.025449187499999998,
+    "total_cost_usd": 0.10179674999999999,
+    "throttled_calls": 0,
+    "error_calls": 0,
+    "cost_per_finding": 0.10179674999999999
+  }
+}

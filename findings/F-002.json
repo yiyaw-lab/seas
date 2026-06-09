@@ -1,0 +1,30 @@
+{
+  "id": "F-002",
+  "claim": "Across two independent 2025-2026 studies, proposed agentic pathology systems report higher accuracy than the compared multimodal/pathology baselines on complex evaluation tasks such as visual question answering and multiple-choice diagnosis.",
+  "method": "synthesis",
+  "evidence": [
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/abs/2606.07549",
+      "quote": "Experiments show that PathoSage effectively mitigates VQA hallucinations and classifier disagreement, outperforming strong pathology MLLM and agentic baselines.",
+      "stance": "supports"
+    },
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/abs/2508.02258",
+      "quote": "Experiments show that Patho-AgenticRAG significantly outperforms existing multimodal models in complex pathology tasks like multiple-choice diagnosis and visual question answering.",
+      "stance": "supports"
+    }
+  ],
+  "prediction": {
+    "claim": "By 2026-07-15, each paper\u2019s results section will show at least one table or figure where the proposed agentic method exceeds all listed baselines on a visual question answering or multiple-choice diagnosis task.",
+    "resolves": "2026-07-15",
+    "checkable": "Open the PDFs and verify that the reported results include metrics where the proposed methods outperform all compared baselines on VQA or multiple-choice diagnosis."
+  },
+  "refutation_condition": "If detailed results in either paper do not show the proposed method exceeding the compared baselines on VQA or multiple-choice diagnosis, or independent re-runs on those tasks fail to reproduce such an advantage, the claim is false.",
+  "extends": [],
+  "contradicts": [],
+  "confidence": 0.3,
+  "status": "unverified",
+  "date": "2026-06-08"
+}

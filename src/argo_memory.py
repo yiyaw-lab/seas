@@ -40,18 +40,27 @@ def record(chat_id, role, text):
     No-op if chat_id is falsy (e.g. TELEGRAM_CHAT_ID unset on a proactive call)
     so we never write a turn that can't be keyed back to a conversation.
     """
-    if not chat_id:
+    record_many(chat_id, [(role, text)])
+
+
+def record_many(chat_id, turns):
+    """Append multiple turns in a single read-write cycle. `turns` is a list of
+    (role, text) pairs. Use instead of calling record() N times back-to-back to
+    halve the I/O for the common user+Argo two-turn write per chat message."""
+    if not chat_id or not turns:
         return
     CHAT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log = argo_store.load_json(CHAT_LOG_PATH, [])
-    if not isinstance(log, list):  # never lose a turn over a corrupt/odd file
+    if not isinstance(log, list):
         log = []
-    log.append({
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "chat_id": str(chat_id),
-        "role": role,
-        "text": text,
-    })
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for role, text in turns:
+        log.append({
+            "ts": ts,
+            "chat_id": str(chat_id),
+            "role": role,
+            "text": text,
+        })
     argo_store.save_json(CHAT_LOG_PATH, log)
 
 

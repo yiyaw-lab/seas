@@ -1,0 +1,41 @@
+{
+  "probes": [
+    {
+      "id": "PR-001",
+      "signal": "signal:mempalace-mempalace",
+      "investigated": "2026-06-09",
+      "outcome": "inconclusive",
+      "sources_read": [
+        "https://github.com/MemPalace/mempalace",
+        "https://github.com/mempalace/mempalace",
+        "https://github.com/MemPalace/mempalace/issues",
+        "https://github.com/MemPalace",
+        "https://github.com/NousResearch/hermes-agent/issues/6323",
+        "https://github.com/MemPalace/mempalace/issues/101"
+      ],
+      "why": "model claimed a finding but it failed the emission gate: evidence[2] quote not found in its source (possible fabrication): \"All write tools fail (diary_write / add_drawer / e...\"",
+      "revisit_after": null,
+      "cost": {
+        "fetches": 6,
+        "model_calls": 1
+      }
+    },
+    {
+      "id": "PR-002",
+      "signal": "signal:sensitivity-analysis-white-paper",
+      "investigated": "2026-06-09",
+      "outcome": "premature",
+      "sources_read": [
+        "https://arxiv.org/abs/2606.07809",
+        "https://arxiv.org/html/2606.07809v1"
+      ],
+      "why": "Both provided URLs point to the same newly posted arXiv white paper with no independent corroborating or contrasting sources, so no cross-source claim can be defended.",
+      "revisit_after": "2026-06-23",
+      "cost": {
+        "fetches": 2,
+        "model_calls": 1
+      }
+    }
+  ],
+  "ledger": {}
+}

@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 import argo_github
 import argo_http
 import argo_paths
+import argo_store
 import fetch_signals
 import profile
 
@@ -398,15 +399,11 @@ def get_latest_project() -> str:
     'where is it / show me the project again / what did you suggest last / did I
     rate it'. Does NOT generate a new one (that's new_project) — it re-shows the
     existing latest. The project is sent to them directly; you just acknowledge."""
-    import json as _json
     import argo_project
 
-    if not PROJECTS_LOG.exists():
+    log = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(log, list):
         return "No projects logged yet."
-    try:
-        log = _json.loads(PROJECTS_LOG.read_text())
-    except (ValueError, _json.JSONDecodeError):
-        return "Project log is unreadable."
     if not log:
         return "No projects logged yet."
     p = log[-1]
@@ -442,19 +439,15 @@ def _mark_shown(project_id):
     """Stamp shown_at on a project when it's delivered, so a later bare
     rating/SELECT in the webhook targets the project the user is actually looking at
     (last shown), not whatever was generated most recently."""
-    import json as _json
-    if not PROJECTS_LOG.exists():
-        return
-    try:
-        log = _json.loads(PROJECTS_LOG.read_text())
-    except (ValueError, _json.JSONDecodeError):
+    log = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(log, list):
         return
     from datetime import datetime, timezone
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     for p in log:
         if p.get("id") == project_id:
             p["shown_at"] = stamp
-            PROJECTS_LOG.write_text(_json.dumps(log, indent=2) + "\n")
+            argo_store.save_json(PROJECTS_LOG, log)
             return
 
 
@@ -523,19 +516,14 @@ def project_too_complex(what_lost_them: str = "") -> str:
     kernel/CUDA knowledge'); leave blank if they just said it's too much. Use this
     instead of plain new_project whenever the reason is difficulty, so Argo
     actually learns to dial it down."""
-    import json as _json
     import argo_project
     import taste_signals
 
     # Anchor the lesson to the actual project so it's concrete, not generic.
     bet = ""
-    if PROJECTS_LOG.exists():
-        try:
-            log = _json.loads(PROJECTS_LOG.read_text())
-            if log:
-                bet = log[-1].get("text", "")[:200]
-        except (ValueError, _json.JSONDecodeError):
-            pass
+    _log = argo_store.load_json(PROJECTS_LOG, [])
+    if isinstance(_log, list) and _log:
+        bet = _log[-1].get("text", "")[:200]
 
     detail = f" ({what_lost_them.strip()})" if what_lost_them.strip() else ""
     _name = profile.name()
@@ -602,12 +590,9 @@ def recommend_project() -> str:
     import json as _json
     import argo_observe as _observe
 
-    if not PROJECTS_LOG.exists():
+    log = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(log, list):
         return "No candidates yet. Bring me an idea or ask me for a project first."
-    try:
-        log = _json.loads(PROJECTS_LOG.read_text())
-    except (ValueError, _json.JSONDecodeError):
-        return "Project log is unreadable."
     candidates = [p for p in log if not p.get("selected")]
     if not candidates:
         return "Nothing open to weigh. Bring an idea or ask for a project."
@@ -664,16 +649,10 @@ def recommend_project() -> str:
 def _scaffold_plan(project_id=""):
     """Draft a kickoff plan for a project and return the text. Shared by the
     SELECT gate (which sends it verbatim itself) and the scaffold_project tool."""
-    import json as _json
     import argo_observe as _observe
 
-    if not PROJECTS_LOG.exists():
-        return "No project to scaffold yet, generate one first."
-    try:
-        log = _json.loads(PROJECTS_LOG.read_text())
-    except (ValueError, _json.JSONDecodeError):
-        return "Project log is unreadable."
-    if not log:
+    log = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(log, list) or not log:
         return "No project to scaffold yet, generate one first."
     if project_id:
         entry = next((p for p in log if p.get("id") == project_id), None)
@@ -972,10 +951,10 @@ def _stage_pending(action):
     """Record a single pending heal action for the CONFIRM shortcut to pick up."""
     from datetime import datetime, timezone
     PENDING_HEAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PENDING_HEAL_PATH.write_text(json.dumps({
+    argo_store.save_json(PENDING_HEAL_PATH, {
         "action": action,
         "staged_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }))
+    })
 
 
 def _heal(action):
@@ -1053,7 +1032,9 @@ def clear_pending_heal():
 #      the default branch, and we cap file count/size.
 # This is the safe closed loop: Argo proposes, you merge, Railway deploys.
 
-PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "yiyaw-lab/seas")
+# Set ARGO_PROPOSE_REPO to your own "owner/repo". The placeholder default is
+# intentionally non-real so a fork can't open PRs against the upstream repo.
+PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 PROPOSE_BASE = os.environ.get("ARGO_PROPOSE_BASE", "main")
 MAX_PROPOSE_FILES = 5
 MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable

@@ -134,12 +134,13 @@ def main():
                  sched.get("name"), sched["command"], target_hour)
         try:
             run_command(sched["command"])
-            fired.add(key)
         except Exception as exc:
             # Outermost net: one bad command must not skip the rest. Log with the
             # traceback so the failure is diagnosable, never silently swallowed.
             log.error("schedule command %s failed: %s",
                       sched["command"], exc, exc_info=True)
+        finally:
+            fired.add(key)
 
     if not dry:
         # keep the dedupe file small: only retain today's keys

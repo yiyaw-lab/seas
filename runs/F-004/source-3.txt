@@ -1,0 +1,111 @@
+https://arxiv.org/pdf/2606.06614
+
+arXiv:2606.06614v1 \[cs.CL\] 4 Jun 2026
+
+Re-Centering Humans in LLM Personalization
+
+† ♯ †
+Lechen Zhang Jiarui Liu Tal August
+† ♯
+University of Illinois Urbana-Champaign Carnegie Mellon University
+{lechenz3, taugust}@illinois.edu [jiaruil5@andrew.cmu.edu](mailto:jiaruil5@andrew.cmu.edu)
+
+Abstract
+
+Despite growing interest, most evaluations of
+large language models’ (LLMs’) personalization abilities have relied on synthetic data. It
+remains unclear how well current personalization systems work for real users. In this paper, we study the gap in LLM personalization
+performance when using synthetic versus human data. We collect human conversations
+(550 conversations) and judgments across three
+stages of personalization: extracting user attributes from conversations (5,949 judgments),
+pairing relevant attributes with new prompts
+(11,919), and incorporating relevant attributes
+into a personalized response (1,101). Incorporating human data reveals system limitations
+at each stage. Models struggle to extract attributes from human conversations, disagree
+with human judgments on relevant attributes,
+and generate personalized responses that humans judge no better than generic responses
+(though that LLM judges widely rate as better).
+We introduce two lightweight training-based
+interventions that shift automated personalization evaluation closer to human data in our first
+two stages. However, in our third stage we
+find that learned reward models achieve only
+modest correlation with human ratings, suggesting that human-aligned personalization quality
+arXiv:2606.06614v1 \[cs.CL\] 4 Jun 2026judgments are difficult to model directly. Our
+collected data provides a foundation for studying how models should extract, select, and incorporate user information in ways that humans
+find useful.
+
+1 Introduction
+
+Large language models’ (LLMs’) ability to personalize responses to different users is becoming
+increasingly sought-after as models are deployed
+to more people across more domains (Shaikh et al.,
+2025). Despite growing interest, it remains unclear
+how well current personalization systems work for
+real users. Past efforts evaluating models’ personalization abilities have predominantly relied on
+
+synthetic data: user personas (Jiang et al.,2025),
+simulated conversations (Kim et al.,2025), and
+LLM-based evaluations (Zhao et al.,2025b). While
+synthetic data enables large-scale experimentation,
+synthetic responses deviate significantly from human ones (Naous et al.,2026;Mehri et al.,2026b).
+It is not clear if model performance on synthetic
+data maps neatly to real human experience. This
+tension highlights the central difficulty of personalization: the target of personalization is a human
+user, whose attributes and judgments on system
+effectiveness are often implicit, noisy, incomplete,
+and context-dependent (Hu et al.,2008;Shaikh
+et al.,2025).
+In this paper, we study the gap between synthetic
+
+et al.,2025).
+In this paper, we study the gap between synthetic
+and human data for evaluating LLM personalization. We frame personalization as a three-stage
+pipeline based on prior evaluations: models must
+(1) infer stable user attributes from prior conversations (user attribute extraction), (2) select the
+attributes relevant to a specific response (attribute
+relevance matching), and (3) incorporate relevant
+attributes to produce a response that improves over
+a generic one (personalized response generation).
+For each stage of our pipeline, we compare human and synthetic data. Our dataset contains 50
+real users and 550 conversations drawn from exarXiv:2606.06614v1 \[cs.CL\] 4 Jun 2026
+isting conversational datasets, paired with human
+judgments for all three stages: 5,949 judgments
+on extracted user attributes, 11,919 on attribute–
+prompt pairings, and 1,101 on response preference
+judgments for personalized generation. Using our
+dataset, we compare model performance and alignment with human data and judgments.
+We find that incorporating human data reveals difficulties in pairing attributes with prompts: despite strong inter-LLM agreement, LLMs are misaligned with humans on relevance matching, overidentifying 20–40% more attributes as relevant. Finally, even when relevant attributes are provided,
+humans disagree with models on what constitutes
+an effective personalized response: as generators,
+LLMs produce personalized responses that humans
+judge as no better than generic ones in 54.6% of
+cases, while as judges, LLMs assign inflated scores
+that remain poorly aligned with human preferences.
+We introduce two lightweight interventions that
+
+that remain poorly aligned with human preferences.
+We introduce two lightweight interventions that
+shift automated personalization evaluation closer to
+human data in our first two stages. For attribute extraction, a lightweight RoBERTa (Liu et al.,2020)
+verifier trained on human annotations can serve as
+an effective safeguard before extracted attributes
+are used downstream. For relevance matching,
+training-based methods, including supervised classification and GRPO (Shao et al.,2024), reduce
+over-selection and better align relevance judgments
+with humans. For our third stage of personalized response generation, trained reward models achieve
+modest correlation with human ratings, suggesting
+that human-aligned personalization quality judgments are difficult to model directly.
+Overall, our results show that personalization
+
+Overall, our results show that personalization
+presents unique difficulties for automated and synthetic evaluations. We hope our collected data enables deeper evaluation of personalization systems
+and provides a foundation for studying how models
+should extract, select, and incorporate user information in ways that humans find useful. The code
+and dataset are available at [https://github.com/](https://github.com/)
+orange0629/recenter-personalization.
+2 A Three-Stage Framework for LLM
+
+We frame LLM personalization as a three-stage
+
+2 A Three-Stage Framework for LLM
+Personaliza

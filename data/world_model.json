@@ -1,0 +1,38 @@
+[
+  {
+    "id": "WM-001",
+    "claim": "Across two independent 2025-2026 studies, proposed agentic pathology systems report higher accuracy than the compared multimodal/pathology baselines on complex evaluation tasks such as visual question answering and multiple-choice diagnosis.",
+    "confidence": 0.3,
+    "evidence": [
+      "F-002"
+    ],
+    "refutations": [],
+    "predictions": [],
+    "status": "unverified",
+    "last_updated": "2026-06-09"
+  },
+  {
+    "id": "WM-002",
+    "claim": "As of mid-2026, on two independent long-horizon agent benchmarks\u2014SWE-Marathon (software) and Chi-Bench (healthcare)\u2014frontier agents complete under 30% of end-to-end tasks under each benchmark\u2019s primary pass criteria.",
+    "confidence": 0.3,
+    "evidence": [
+      "F-003"
+    ],
+    "refutations": [],
+    "predictions": [],
+    "status": "unverified",
+    "last_updated": "2026-06-09"
+  },
+  {
+    "id": "WM-003",
+    "claim": "Across independent evaluations, LLMs exhibit substantially lower and less human-aligned personalization performance on human or realistic long-horizon data than on synthetic or simplified setups, including cases where humans rate \u2018personalized\u2019 outputs no better than generic ones.",
+    "confidence": 0.3,
+    "evidence": [
+      "F-004"
+    ],
+    "refutations": [],
+    "predictions": [],
+    "status": "unverified",
+    "last_updated": "2026-06-09"
+  }
+]

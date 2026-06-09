@@ -55,6 +55,7 @@ import argo_memory
 import argo_observe as observe
 import argo_paths
 import argo_rating
+import argo_store
 import profile
 import send_telegram
 
@@ -73,9 +74,11 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 ARGO_MCP_TOKEN = os.environ.get("ARGO_MCP_TOKEN")
 
 # The repo Argo lives in (same default as argo_mcp_server.PROPOSE_REPO). Defined
-# here too so the system prompt can tell Argo its own repo, so it never asks Yiya
-# which repo it lives in.
-PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "yiyaw-lab/seas")
+# here too so the system prompt can tell Argo its own repo, so it never asks the
+# user which repo it lives in. Set ARGO_PROPOSE_REPO to your own "owner/repo" --
+# the placeholder default is intentionally non-real so a fork can't open PRs
+# against the upstream repo.
+PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 
 
 def _build_mcp_servers():
@@ -441,9 +444,11 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 raw = observe.generate_observations(prompt, model)
 
             reply = _clean_reply(raw.strip())
-            # Persist both turns so memory survives restarts and is analysable.
-            _append_turn(chat_id, profile.name(), log_user_text)
-            _append_turn(chat_id, "Argo", reply)
+            # Persist both turns in one write so memory survives restarts.
+            argo_memory.record_many(chat_id, [
+                (profile.name(), log_user_text),
+                ("Argo", reply),
+            ])
             return reply
         except observe.argo_guard.DailyBudget.BudgetExceeded:
             # Hard daily cap hit: stop immediately, don't try other models.
@@ -671,10 +676,14 @@ def _handle_photo(chat_id, msg):
         send_telegram.send_message(f"saw the image but couldn't process it: {exc}")
         return
     if reply is None:
-        # No vision-capable (Anthropic) model configured this turn.
-        send_telegram.send_message(
-            "got an image but can't see it right now (no vision model configured). "
-            "mind describing it, or resending in a bit?")
+        # No vision-capable (Anthropic) model configured this turn. Still record
+        # the user's image turn so the gap shows up in history.
+        _append_turn(chat_id, profile.name(), log_user_text)
+        no_vision_msg = ("got an image but can't see it right now "
+                         "(no vision model configured). mind describing it, "
+                         "or resending in a bit?")
+        _append_turn(chat_id, "Argo", no_vision_msg)
+        send_telegram.send_message(no_vision_msg)
         return
     send_telegram.send_message(reply)
 
@@ -835,14 +844,55 @@ def _already_handled(update_id):
         return False
 
 
+def _health_payload():
+    """Build the health/status JSON from LOCAL files only -- no network, never
+    raises. Returns: status, UTC time, the last few scheduler fires, signal-store
+    age, and a compact performance snapshot. The '/' route returns this on every
+    poll, so it must be cheap and incapable of hanging (CLAUDE.md contract)."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    payload = {"status": "ok", "time": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    # Last few scheduler fires (from the dedupe state file). load_json already
+    # returns the default on a missing/corrupt file; guard the rare read OSError.
+    try:
+        state = argo_store.load_json(argo_paths.STATE_PATH, {}) or {}
+        fired = state.get("fired", [])
+        payload["recent_fires"] = fired[-5:] if isinstance(fired, list) else []
+    except OSError:
+        payload["recent_fires"] = []
+
+    # Signal-store freshness: local stat() age in seconds, None if absent.
+    try:
+        mtime = argo_paths.SIGNALS_PATH.stat().st_mtime
+        payload["signals_age_seconds"] = max(0, int(now.timestamp() - mtime))
+    except OSError:
+        payload["signals_age_seconds"] = None
+
+    # Compact performance snapshot (local-file aggregation, best-effort). Broad
+    # net here on purpose: a stats hiccup must never take the health route down.
+    try:
+        import argo_self
+        perf = argo_self.gather_performance()
+        payload["performance"] = {
+            k: perf.get(k) for k in (
+                "projects_total", "projects_rated", "mean_energy",
+                "energy_trend", "tripwire_seen", "tripwire_settled")
+        }
+    except Exception:
+        payload["performance"] = None
+
+    return payload
+
+
 def create_app():
-    from flask import Flask, request
+    from flask import Flask, jsonify, request
 
     app = Flask(__name__)
 
     @app.get("/")
     def health():
-        return "Argo webhook is up.", 200
+        return jsonify(_health_payload()), 200
 
     @app.post("/webhook")
     def webhook():

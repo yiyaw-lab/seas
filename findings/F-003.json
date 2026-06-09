@@ -1,0 +1,30 @@
+{
+  "id": "F-003",
+  "claim": "As of mid-2026, on two independent long-horizon agent benchmarks\u2014SWE-Marathon (software) and Chi-Bench (healthcare)\u2014frontier agents complete under 30% of end-to-end tasks under each benchmark\u2019s primary pass criteria.",
+  "method": "synthesis",
+  "evidence": [
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/html/2606.07682v1",
+      "quote": "Current frontier coding agents solve fewer than 30% of tasks.",
+      "stance": "supports"
+    },
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/html/2605.16679v2",
+      "quote": "Across 30 agent harness/model configurations, the best agent resolves only 28.0% of tasks, no agent clears 20% on strict pass^3, and executing all tasks in a single session slumps the performance to 3.8%.",
+      "stance": "supports"
+    }
+  ],
+  "prediction": {
+    "claim": "By 2026-12-31, independent reproductions of the reported best-agent configurations on the public SWE-Marathon and Chi-Bench releases will measure under 30% end-to-end task success under each benchmark\u2019s primary pass metric.",
+    "resolves": "2026-12-31",
+    "checkable": "Reproduction reports or leaderboards for SWE-Marathon and Chi-Bench showing the reproduced best agents\u2019 end-to-end success rates; if either is \u226530%, the prediction is false."
+  },
+  "refutation_condition": "A credible evaluation or independent replication in 2026 showing \u226530% end-to-end success on either SWE-Marathon or Chi-Bench for the best-reported agents under the benchmarks\u2019 primary pass criteria.",
+  "extends": [],
+  "contradicts": [],
+  "confidence": 0.3,
+  "status": "unverified",
+  "date": "2026-06-08"
+}
