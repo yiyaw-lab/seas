@@ -147,7 +147,10 @@ def _call(system, prompt, model, temperature, max_tokens=1024):
     The Anthropic path omits it when None; the OpenAI fallback, which still
     accepts it, substitutes a low default. `max_tokens` is raised for the judge,
     which emits the whole hardened plan and overran the 1024 default."""
-    if observe.provider_for(model)["name"] == "anthropic":
+    provider = observe.provider_for(model)
+    if provider is None:
+        raise ValueError(f"no provider found for model {model!r}")
+    if provider["name"] == "anthropic":
         return observe.chat_with_mcp(
             system, [{"role": "user", "content": prompt}], model,
             max_tokens=max_tokens, temperature=temperature,
@@ -381,10 +384,8 @@ def _stamp_project(project_id, verdict, blueprint_path):
     """Record the rehearsal result on the project entry, mirroring how the webhook
     stamps selected/selected_at. Additive fields; existing readers ignore them.
     Best-effort: never raises (the rehearsal already happened)."""
-    import json
-    try:
-        log = json.loads(PROJECTS_LOG.read_text())
-    except (ValueError, OSError):
+    log = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(log, list):
         return
     for entry in log:
         if entry.get("id") == project_id:
@@ -393,7 +394,7 @@ def _stamp_project(project_id, verdict, blueprint_path):
             entry["blueprint_path"] = str(blueprint_path.relative_to(ROOT))
             break
     try:
-        PROJECTS_LOG.write_text(json.dumps(log, indent=2) + "\n")
+        argo_store.save_json(PROJECTS_LOG, log)
     except OSError:
         pass
 

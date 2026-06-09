@@ -59,7 +59,9 @@ def log_project(project_text, model, source="argo"):
     recommend_project can weigh both kinds as candidates side by side."""
     log = argo_store.load_json(PROJECTS_LOG, [])
 
-    project_id = f"P-{len(log) + 1:03d}"
+    existing = [int(p["id"][2:]) for p in log if p.get("id", "").startswith("P-") and p["id"][2:].isdigit()]
+    next_num = (max(existing) + 1) if existing else 1
+    project_id = f"P-{next_num:03d}"
     log.append({
         "id": project_id,
         "date": TODAY,

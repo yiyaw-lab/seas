@@ -225,10 +225,17 @@ def note_self_lesson(claim, kind="lesson", source="chat"):
     return add_self_belief(claim, kind=kind, source=source)
 
 
+_identity_seeded = False
+
+
 def seed_identity(user_name):
     """Seed immutable identity facts on first run if none exist yet.
     Called from the webhook on every system-prompt build; no-op after first run."""
+    global _identity_seeded
+    if _identity_seeded:
+        return
     if get_self_beliefs(kind="identity"):
+        _identity_seeded = True
         return
     for claim in [
         f"My name is Argo. I run as a Telegram bot for {user_name}.",
@@ -237,6 +244,7 @@ def seed_identity(user_name):
          "those are my own messages."),
     ]:
         add_self_belief(claim, kind="identity", confidence=0.92)
+    _identity_seeded = True
 
 
 def format_self_for_prompt(limit=8):
@@ -375,7 +383,7 @@ def reflect(force=False):
     stats = gather_performance()
     meta = _get_meta(_load())
     last_count = meta.get("rated_count", 0) if meta else 0
-    new_rated = stats["projects_rated"] - last_count
+    new_rated = max(0, stats["projects_rated"] - last_count)
 
     if not force and new_rated < REFLECT_MIN_NEW:
         log.info("reflect: %d new rated projects since last (<%d) -- skipping model call",
