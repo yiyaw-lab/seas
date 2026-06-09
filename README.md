@@ -1,5 +1,11 @@
 # SEAS + Argo
 
+[![Tests](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml/badge.svg)](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml)
+
+> Source-available (see [LICENSE](LICENSE)). Stdlib-first Python 3.11 — the core
+> (gate, world model, probes) is pure standard library; thin pinned deps live only
+> at the I/O edge (`requirements.txt`).
+
 Two complementary systems for working at the frontier of AI:
 
 - **SEAS** — a **research engine**. Turns frontier signals into knowledge.
@@ -51,15 +57,26 @@ fetched sources (no fabricated evidence).
 | [`probes.py`](src/probes.py) | Dead-end memory + per-source failure ledger. |
 | [`seas_benchmark.py`](src/seas_benchmark.py) | Objective model A/B via the gate (quality, cost, throttle). |
 
-Run synthesis: `python src/seas_finding.py` (or the `SEAS Findings` workflow).
-Findings persist as JSON in `findings/` with a `runs/<id>/` source bundle; beliefs
-in `data/world_model.json`; dead ends in `data/probes.json`. Needs
-`FIRECRAWL_API_KEY` for topical related-source search (else it honestly probes
-`premature`).
+Run the full pipeline: `PYTHONPATH=src python3 src/seas.py` (fetch → score → rank
+→ synthesize), or the `SEAS Findings` workflow. Findings persist as JSON in
+`findings/` with a `runs/<id>/` source bundle; beliefs in `data/world_model.json`;
+dead ends in `data/probes.json`. Needs `FIRECRAWL_API_KEY` for topical
+related-source search (else it honestly probes `premature` — see
+[docs/FIRECRAWL_SETUP.md](docs/FIRECRAWL_SETUP.md)).
 
-> The legacy `Signal → Opportunity → Experiment` scripts and prose F-001 are
-> retained but superseded by the V3 gate-based pipeline. Inventory in
-> [AUDIT.md](docs/audits/AUDIT.md); full session history in [docs/build-log/](docs/build-log/).
+**Demonstrable, committed evidence** (not a claim — these are real pipeline runs):
+[`findings/`](findings/README.md) holds gate-passed findings F-002…F-004, each
+grounded in two independent sources with quotes verified as real substrings;
+[`data/probes.json`](data/probes.json) holds honest dead-ends, including one where
+the gate **caught a fabricated quote**; [`data/benchmark_results.json`](data/benchmark_results.json)
+is an Opus-vs-Sonnet A/B scored by the gate. The full walkthrough — how a finding
+is earned, and the answer to "is this just a GPT wrapper?" — is in
+[docs/SEAS_PIPELINE.md](docs/SEAS_PIPELINE.md).
+
+> The legacy `Signal → Opportunity → Experiment` scripts are archived under
+> [`archive/src-legacy/`](archive/) (superseded by the V3 gate pipeline). Prose
+> F-001 is kept in `findings/` as the deliberate pre-gate negative example.
+> Inventory in [AUDIT.md](docs/audits/AUDIT.md); session history in [docs/build-log/](docs/build-log/).
 
 ---
 
@@ -126,11 +143,14 @@ cs.SE feed), we reviewed and merged it.
 
 ### Design docs
 
+- [docs/SEAS_PIPELINE.md](docs/SEAS_PIPELINE.md) — how a finding is earned (the gate, a worked example, the benchmark)
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Procfile, workflows, health endpoint, env tiers
+- [docs/MULTI_USER_ROADMAP.md](docs/MULTI_USER_ROADMAP.md) — honest single-user status + the path to multi-tenant
+- [docs/FIRECRAWL_SETUP.md](docs/FIRECRAWL_SETUP.md) — optional source-search key + why the stdlib client
 - [docs/architecture/ARGO_ARCHITECTURE.md](docs/architecture/ARGO_ARCHITECTURE.md) — V1 decision engine (frozen)
 - [docs/architecture/ARGO_V2.md](docs/architecture/ARGO_V2.md) — V2 insight engine (approved design)
 - [docs/plans/ARGO_V2_MIGRATION.md](docs/plans/ARGO_V2_MIGRATION.md) — V1 → V2 path
-- [docs/plans/PHASE_1_PLAN.md](docs/plans/PHASE_1_PLAN.md) — codebase cleanup plan
-- [docs/audits/AUDIT.md](docs/audits/AUDIT.md) — codebase audit
+- [docs/audits/AUDIT.md](docs/audits/AUDIT.md) — codebase audit (pre-archive generational history)
 - [docs/build-log/](docs/build-log/) — dated session logs (newest first)
 - [docs/ARGO_WEBHOOK_SETUP.md](docs/ARGO_WEBHOOK_SETUP.md) — Railway + webhook setup
 - [docs/ARGO_LLM_SETUP.md](docs/ARGO_LLM_SETUP.md) — API key + model config
@@ -172,9 +192,18 @@ src/
   profile.py                 ← active user's identity/persona/voice (data/profile.json;
                                 copy from data/profile.example.json to customise)
   argo.py                    ← V1 weekly bet + energy (interactive)
-  seas.py                    ← SEAS orchestrator
   send_telegram.py, set_webhook.py, seas_demo.py  ← delivery + utilities
-  (older SEAS scripts — see docs/audits/AUDIT.md)
+
+  SEAS V3 pipeline:
+  seas.py                    ← orchestrator: fetch → score → rank → synthesize
+  seas_finding.py            ← Stage 1 synthesis (model proposes, gate disposes)
+  seas_schema.py             ← finding schema + the emission gate
+  world_model.py             ← beliefs + evidence-only confidence revision
+  probes.py                  ← dead-end memory + per-source failure ledger
+  seas_benchmark.py          ← objective model A/B via the gate
+  opportunities.py, score.py, fetch_signals.py  ← rank + score + ingest
+  firecrawl_client.py        ← optional topical source search (stdlib, allowlisted)
+  (legacy Gen-1/2 scripts archived under archive/src-legacy/ — see docs/audits/AUDIT.md)
 
   shared-utils layer (the Argo core builds on these):
   argo_paths.py              ← single source of truth for ROOT + named data paths
@@ -186,19 +215,22 @@ src/
 data/
   feeds.json                 ← approved signal sources (data; Argo can propose edits)
   schedule.json              ← delivery schedules (data; Argo can propose edits)
-  argo_projects.json         ← V2 projects + energy ratings
-  argo_bets.json             ← V1 bet + energy log
-  argo_seen.json             ← tripwire dedup store
-  signals.json               ← live signal cache (gitignored; refreshed each run)
-  argo_chat.json             ← chat memory (Railway volume; gitignored locally)
-  argo_self.json             ← self-belief store (Railway volume; gitignored locally)
-  taste_signals.json         ← taste signals from screenshots/URLs (Railway volume; gitignored)
-  profile.json               ← active user identity/persona (gitignored; not committed)
+  world_model.json           ← SEAS beliefs (committed durable knowledge)
+  probes.json                ← SEAS dead-end memory (committed)
+  benchmark_results.json     ← model A/B over the gate (committed)
+  profile.example.json       ← profile schema template (copy to profile.json)
+  argo_self.example.json     ← self-belief store schema template
+  — runtime state below is gitignored (per-deploy / Railway volume) —
+  signals.json, opportunities.json   ← transient signal cache + ranking
+  argo_projects.json, argo_bets.json, argo_seen.json  ← Argo project/bet/seen state
+  argo_chat.json, argo_self.json, taste_signals.json  ← chat memory, self-model, taste
+  profile.json               ← active user identity/persona (never committed)
 
-docs/build-log/  dated session logs (moved from root; 2026-06-04 sessions 1 + 2)
-docs/         TELEGRAM_SETUP.md, ARGO_LLM_SETUP.md, ARGO_WEBHOOK_SETUP.md
-demo/         generated demo report + weekly message
-findings/     F-001 cognitive operators (canonical finding)
+archive/src-legacy/  superseded Gen-1/2 SEAS modules (not part of the live runtime)
+docs/         SEAS_PIPELINE.md, FIRECRAWL_SETUP.md, DEPLOYMENT.md, MULTI_USER_ROADMAP.md,
+              the *_SETUP guides, architecture/, plans/, audits/, build-log/
+demo/         V3 pipeline walkthrough + sample Argo project message
+findings/     finding log (F-002…F-004 gate-passed; F-001 kept as negative example)
 experiments/  SEAS-00x experiment cards
 ```
 
@@ -207,9 +239,10 @@ experiments/  SEAS-00x experiment cards
 | Workflow | Schedule | What it does |
 |---|---|---|
 | `argo-schedule.yml` | Hourly (UTC) | Runs `argo_scheduled.py` with a 3-hour grace window; fires whatever is due per `data/schedule.json`. Current: project Fridays 15:00 UTC, tripwire daily 14:00/19:00/00:00 UTC, self-reflection Sundays 16:00 UTC. |
+| `seas-findings.yml` | Manual only | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. (Manual until the cadence is proven; then move to `data/schedule.json`.) |
 | `seas-friday-telegram.yml` | Manual only | On-demand project generation + send (one-off / fallback). |
 | `argo-watch.yml` | Manual only | On-demand tripwire sweep (one-off / fallback). |
-| `seas-weekly.yml` | Mondays 15:00 UTC | Runs `seas.py`, commits `data/` + `runs/`. |
+| `tests.yml` | push / PR | Runs the unit suite (read-only, never commits). |
 
 > Project and tripwire are delivered automatically by the hourly runner.
 > The manual workflows are fallbacks for one-off use.
@@ -235,7 +268,7 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (84 tests total):
+passes after. New coverage (87 tests total):
 
 - **chat memory** — roundtrip, per-chat filtering, int/str chat_id unification,
   corrupt-file recovery (`test_memory.py`)
@@ -254,6 +287,23 @@ passes after. New coverage (84 tests total):
   (`test_watch_model.py`)
 - **project selection** — project re-anchoring and last-shown targeting
   (`test_project_selection.py`)
+- **health endpoint** — `/` returns valid JSON from local files only, on a fresh
+  deploy (stores absent) and a running one, and never raises (`test_health.py`)
+
+## Quickstart (what works at each key tier)
+
+```
+PYTHONPATH=src python3 -m unittest discover -s tests   # 87 tests, no keys needed
+```
+
+| You have… | What runs |
+|---|---|
+| **no keys** | the full test suite + all pure logic (the gate, ranking, world model) |
+| **+ an LLM key** (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) | `python3 src/seas.py` scores and synthesizes, but usually emits `premature` probes (no related-source search) |
+| **+ `FIRECRAWL_API_KEY`** | the full finding path — cross-source convergence, real findings (see [docs/FIRECRAWL_SETUP.md](docs/FIRECRAWL_SETUP.md)) |
+
+Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
+`TELEGRAM_CHAT_ID`; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Required env (Railway Variables)
 
