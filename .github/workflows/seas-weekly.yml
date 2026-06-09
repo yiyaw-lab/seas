@@ -21,13 +21,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run SEAS
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run SEAS V3 pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ARGO_MODEL: ${{ vars.ARGO_MODEL }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
         run: python src/seas.py
 
       - name: Commit SEAS output
         run: |
           git config user.name "seas-agent"
           git config user.email "seas-agent@users.noreply.github.com"
-          git add data/ runs/
-          git commit -m "SEAS weekly run" || echo "No changes to commit"
+          git add findings/ 2>/dev/null || true
+          git add data/world_model.json 2>/dev/null || true
+          git add data/probes.json 2>/dev/null || true
+          git add data/opportunities.json 2>/dev/null || true
+          git add runs/ 2>/dev/null || true
+          git commit -m "SEAS V3 weekly run (findings/beliefs/probes)" || echo "No changes to commit"
           git push

@@ -54,6 +54,7 @@ FINDINGS_DIR = ROOT / "findings"
 RUNS_DIR = ROOT / "runs"
 
 MIN_SOURCES = 2            # need at least this many fetched sources to synthesize
+SCORE_PROMPT_PATH = ROOT / "prompts" / "score_signal.md"
 MAX_SOURCE_CHARS = 6000    # per source, fed to the model
 DEFAULT_RESOLVE_DAYS = 90  # default horizon if the model omits one
 
@@ -379,6 +380,58 @@ def _maybe_escalate(urls):
         esc, action, reason = probes.should_escalate_source(url)
         if esc:
             print(f"  [self-heal] {url}: {action} — {reason}")
+
+
+def auto_score_signals(signals, dry_run=False):
+    """LLM-score any unscored signals using prompts/score_signal.md (5 dimensions).
+    Returns the updated list. Best-effort: silently skips on any model/parse failure
+    so a scoring hiccup never blocks the investigation step."""
+    if not SCORE_PROMPT_PATH.exists():
+        return signals
+    prompt_template = SCORE_PROMPT_PATH.read_text()
+
+    import os
+    models = [m for m in observe.resolve_models()
+              if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])]
+    if not models:
+        print("  (no model available for scoring — skipping)")
+        return signals
+    model = models[0]  # cheapest available (Sonnet by default)
+
+    updated = []
+    for sig in signals:
+        if not all(v == 0 for v in sig.get("scores", {}).values()):
+            updated.append(sig)
+            continue
+        if dry_run:
+            print(f"  [dry-run] would score: {sig['title'][:60]}")
+            updated.append(sig)
+            continue
+        prompt = (f"{prompt_template}\n\nSignal to score:\n"
+                  f"Title: {sig['title']}\n"
+                  f"Summary: {sig.get('summary', '')}")
+        try:
+            reply = observe.generate_observations(f"{SYSTEM}\n\n{prompt}", model)
+            scored = _extract_json(reply)
+            if (scored
+                    and isinstance(scored.get("durability"), int)
+                    and isinstance(scored.get("leverage"), int)):
+                sig = dict(sig)
+                sig["scores"] = {
+                    "durability":    int(scored.get("durability", 0)),
+                    "leverage":      int(scored.get("leverage", 0)),
+                    "alignment":     int(scored.get("alignment", 0)),
+                    "accessibility": int(scored.get("accessibility", 0)),
+                    "novelty":       int(scored.get("novelty", 0)),
+                }
+                print(f"  scored: {sig['title'][:55]} "
+                      f"(d={sig['scores']['durability']} "
+                      f"l={sig['scores']['leverage']} "
+                      f"a={sig['scores']['alignment']})")
+        except Exception as exc:
+            print(f"  ! scoring failed for '{sig['title'][:40]}': {exc}")
+        updated.append(sig)
+    return updated
 
 
 def main():

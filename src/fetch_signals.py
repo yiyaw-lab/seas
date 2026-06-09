@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_http
+import argo_store
 
 ROOT = Path(__file__).resolve().parent.parent
 SIGNALS_PATH = ROOT / "data" / "signals.json"
@@ -236,9 +237,24 @@ def main():
             if buckets[lens] and len(chosen) < NUM_SIGNALS:
                 chosen.append(buckets[lens].pop())
 
-    signals = [to_signal(i) for i in chosen]
+    # Preserve scores for signals that already appeared in a previous run so we
+    # don't re-score every signal from scratch on each weekly fetch.
+    existing_scores = {}
+    if SIGNALS_PATH.exists():
+        try:
+            for s in json.loads(SIGNALS_PATH.read_text()):
+                if any(v > 0 for v in s.get("scores", {}).values()):
+                    existing_scores[s["title"].lower()] = s["scores"]
+        except (json.JSONDecodeError, ValueError):
+            pass
 
-    SIGNALS_PATH.write_text(json.dumps(signals, indent=2) + "\n")
+    signals = [to_signal(i) for i in chosen]
+    for s in signals:
+        saved = existing_scores.get(s["title"].lower())
+        if saved:
+            s["scores"] = saved
+
+    argo_store.save_json(SIGNALS_PATH, signals)
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"\nSelected {len(signals)} fresh signals (of {len(deduped)} unique):")
