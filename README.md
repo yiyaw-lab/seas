@@ -236,17 +236,16 @@ experiments/  SEAS-00x experiment cards
 
 ## Automation
 
-| Workflow | Schedule | What it does |
+| Workflow | Effective schedule | What it does |
 |---|---|---|
-| `argo-schedule.yml` | Hourly (UTC) | Runs `argo_scheduled.py` with a 3-hour grace window; fires whatever is due per `data/schedule.json`. Current: project Fridays 15:00 UTC, tripwire daily 14:00/19:00/00:00 UTC, self-reflection Sundays 16:00 UTC. |
-| `seas-findings.yml` | Manual only | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. (Manual until the cadence is proven; then move to `data/schedule.json`.) |
-| `seas-friday-telegram.yml` | Manual only | On-demand project generation + send (one-off / fallback). |
-| `argo-watch.yml` | Manual only | On-demand tripwire sweep (one-off / fallback). |
-| `tests.yml` | push / PR | Runs the unit suite (read-only, never commits). |
+| `argo-schedule.yml` | Hourly (UTC) — the dispatcher | Runs `argo_scheduled.py`; fires whatever is due per `data/schedule.json` with a 3-hour grace window. Drives the project and tripwire deliveries below. |
+| `seas-friday-telegram.yml` | **Fridays 15:00 UTC** (via hourly runner) | Generates a fresh weekly project bet and sends it to Telegram. |
+| `argo-watch.yml` | **Daily 14:00 / 19:00 / 00:00 UTC** (via hourly runner) | Tripwire sweep — fetches feeds, judges new items, sends up to 3 frontier alerts. |
+| `tests.yml` | Every push / PR | Runs the unit suite (read-only, never commits). |
+| `seas-findings.yml` | Manual (`workflow_dispatch`) | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. |
 
-> Project and tripwire are delivered automatically by the hourly runner.
-> The manual workflows are fallbacks for one-off use.
-> New schedules are data edits to `data/schedule.json` — no workflow edit needed.
+> Schedules are data, not code — add or change a delivery by editing `data/schedule.json`.
+> No workflow file needs to change. Argo can propose schedule edits via its Contents-only PR token.
 
 ## Testing
 
