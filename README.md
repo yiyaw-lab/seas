@@ -166,6 +166,8 @@ src/
                                 weekly reflection; seed_identity() on first startup
   argo_scheduled.py          ← hourly schedule runner (reads data/schedule.json)
   argo_rate.py               ← read Telegram replies for energy ratings
+  taste_signals.py           ← durable taste-signal store (load/save/add; backs
+                                taste learning from screenshots and URLs)
   fetch_signals.py           ← RSS ingestion (reads data/feeds.json)
   profile.py                 ← active user's identity/persona/voice (data/profile.json;
                                 copy from data/profile.example.json to customise)
@@ -233,7 +235,7 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (73 tests total):
+passes after. New coverage (84 tests total):
 
 - **chat memory** — roundtrip, per-chat filtering, int/str chat_id unification,
   corrupt-file recovery (`test_memory.py`)
@@ -242,6 +244,16 @@ passes after. New coverage (73 tests total):
 - **image routing** — screenshot routes through conversational path (history +
   tools), no forced taste write, graceful degradation without vision key
   (`test_image_routing.py`)
+- **self-model** — belief store roundtrip, confidence clamping, evidence/refutation
+  moves, reflection stats, graceful-on-missing-files (`test_self.py`)
+- **temperature guard** — Anthropic Opus and OpenAI reasoning models omit
+  `temperature`; standard models keep it (`test_temperature_guard.py`)
+- **SEAS pipeline** — signal ranking/qualification, inbox merge, dedup against
+  existing, zeroed-score defaults (`test_seas_pipeline.py`)
+- **watch model** — tripwire judge skips model call when nothing new
+  (`test_watch_model.py`)
+- **project selection** — project re-anchoring and last-shown targeting
+  (`test_project_selection.py`)
 
 ## Required env (Railway Variables)
 

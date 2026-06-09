@@ -18,6 +18,7 @@ Run with:  python src/fetch_signals.py
 """
 
 import json
+import os
 import random
 import sys
 import urllib.request
@@ -75,7 +76,10 @@ def _load_feeds():
 
 FEEDS = _load_feeds()
 
-USER_AGENT = "argo-fetch-signals/1.0 (+https://github.com/yiyaw-lab/seas)"
+# Identifies the fetcher to feed servers. Override ARGO_USER_AGENT to point at
+# your own repo/contact if you fork this.
+USER_AGENT = os.environ.get(
+    "ARGO_USER_AGENT", "argo-fetch-signals/1.0 (+https://github.com/argo-scout/seas)")
 
 
 def _fetch_url(url, timeout=20):

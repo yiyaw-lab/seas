@@ -19,14 +19,23 @@ argo/telegram_offset.json
 data/argo_chat.json
 
 # Private / trade-secret — never commit
+private/
 COST_PLAYBOOK.md
 
 # Strategy / vision / design docs — keep local, not in the repo
 BRAND.md
 VISION.md
 argo-v3-deck.html
-build-log/2026-06-05-report.html
+seasar-landing.html
 docs/DESIGN_dispatch_to_coder.md
+
+# Investor / pitch letters and internal HTML build reports
+docs/build-log/2026-06-05-release-letter.md
+docs/build-log/*.html
+
+# Personal taste + strategy data — runtime state, not public reference
+data/argo_projects.json
+data/argo_bets.json
 
 # Transient daily-budget counter (argo_guard)
 data/argo_budget.json
@@ -49,3 +58,16 @@ data/profile.json
 # generated per-rehearsal output: large, may quote sources, kept local for
 # eval/research. On Railway, ARGO_REHEARSE_LOG can point at the mounted volume.
 argo/rehearsals/
+
+# V1-era personal output files (observations and project bets)
+argo/observations/
+argo/projects/
+
+# SEAS runtime outputs: scored opportunities, capability inventory, enrichment cache
+data/argo_seen.json
+data/ledger.json
+data/capabilities.json
+data/opportunities.json
+
+# SEAS job run artifacts (JSON outputs in subdirs; .md design docs stay)
+runs/**/*.json

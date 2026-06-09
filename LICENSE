@@ -1,0 +1,31 @@
+Source-Available License (provisional)
+
+Copyright (c) 2026 Yiya Wang. All rights reserved.
+
+This repository is made publicly readable for review, evaluation, learning, and
+discussion. It is "source-available," not open source: publishing the source
+here does not grant a license to use it in production or for any commercial
+purpose.
+
+You MAY:
+  - read, study, and reference the source;
+  - clone or fork it for personal, non-commercial evaluation and experimentation;
+  - quote excerpts with attribution (e.g. in articles, talks, or reviews).
+
+You MAY NOT, without prior written permission from the copyright holder:
+  - use this software, in whole or in substantial part, to operate a production
+    or commercial service;
+  - redistribute it as part of a commercial product or offering;
+  - remove or alter this notice in copies you share.
+
+NO WARRANTY. The software is provided "as is," without warranty of any kind,
+express or implied, including but not limited to the warranties of
+merchantability, fitness for a particular purpose, and noninfringement. In no
+event shall the copyright holder be liable for any claim, damages, or other
+liability arising from the software or its use.
+
+This license is PROVISIONAL. The copyright holder intends to finalize the exact
+terms (which may be a recognized source-available or open-source license such as
+PolyForm Noncommercial, BUSL-1.1, Apache-2.0, or MIT). Until then, the terms
+above govern. For any use beyond the permissions above, or to ask about a
+commercial license, open a GitHub issue to request contact.
