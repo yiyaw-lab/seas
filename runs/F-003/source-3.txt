@@ -1,0 +1,99 @@
+https://arxiv.org/html/2605.16679v2
+
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+[License: CC BY-SA 4.0](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2605.16679v2 \[cs.CL\] 19 May 2026
+
+# 𝝌\\bm{\\chi}-Bench: Can AI Agents Automate End-to-End, Long-Horizon, Policy-Rich Healthcare Workflows?
+
+Haolin Chen
+[actAVA.ai](https://actava.ai/ "")Deon Metelski
+[actAVA.ai](https://actava.ai/ "")Leon Qi
+[actAVA.ai](https://actava.ai/ "")Tao Xia
+[actAVA.ai](https://actava.ai/ "")Joonyul Lee
+[actAVA.ai](https://actava.ai/ "")Steve Brown
+[actAVA.ai](https://actava.ai/ "")Kevin Riley
+[actAVA.ai](https://actava.ai/ "")Frank Wang
+[actAVA.ai](https://actava.ai/ "")T. Y. Alvin Liu
+Johns Hopkins Medicine
+MD
+Johns Hopkins Medicine
+Hank Capps
+Wellstar Health System
+MD
+Wellstar Health System
+Zeyu Tang
+Stanford University
+Xiangchen Song
+CMU
+Lingjing Kong
+CMU
+Fan Feng
+UCSD
+Tianyi Zeng
+Yale School of Medicine
+Zhiwei Liu
+Salesforce AI Research
+Zixian Ma
+University of Washington
+Hang Jiang
+Northeastern University
+
+Fangli Geng
+Brown University
+Yuan Yuan
+Boston College
+Chenyu You
+Stony Brook University
+Qingsong Wen
+University of Oxford
+Hua Wei
+Arizona State University
+Yanjie Fu
+Arizona State University
+
+Yue Zhao
+University of Southern California
+Carl Yang
+Emory University
+Biwei Huang
+UCSD
+Kun Zhang
+CMU
+MBZUAI
+Caiming Xiong
+Recursive Superintelligence
+
+Sanmi Koyejo
+Stanford University
+Eric P. Xing
+MBZUAI
+CMU
+Philip S. Yu
+University of Illinois at Chicago
+Weiran Yao
+[actAVA.ai](https://actava.ai/ "")
+
+###### Abstract
+
+End-to-end automation of realistic healthcare operations stresses three capabilities underrepresented in current benchmarks: policy density, decisions must be grounded in a large library of medical, insurance, and operational rules; multi-role composition, a single task requires the agent to play multiple roles with handoffs; and multilateral interaction: intermediate workflow steps are multi-turn dialogs, such as peer-to-peer review and patient outreach. We introduce χ\\upchi-Bench, a benchmark of long-horizon healthcare workflows across three domains: provider prior authorization, payer utilization management, and care management. Each task hands the agent a clinical case in a high-fidelity simulator of 20 healthcare apps exposed via 87 MCP tools, which it must drive to a terminal status through tool calls and writing the role’s artifacts, guided by a 1,279-document managed-care operations handbook skill. Across 30 agent harness/model configurations, the best agent resolves only 28.0% of tasks, no agent clears 20% on strict pass^3, and executing all tasks in a single session slumps the performance to 3.8%. These results raise the hypothesis that similar gaps are likely to surface in other policy-dense, role-composed, irreversible enterprise domains.
+
+![Refer to caption](https://arxiv.org/html/2605.16679v2/x1.png)Figure 1: χ\\upchi-Bench: Clinical Healthcare In-Situ Environment and Evaluation Benchmark.
+
+[![[Uncaptioned image]](https://arxiv.org/html/2605.16679v2/icons/sharded.png)actava.ai/benchmarks](https://actava.ai/benchmarks "") [![[Uncaptioned image]](https://arxiv.org/html/2605.16679v2/icons/github.png)actava-ai/chi-bench](https://github.com/actava-ai/chi-bench "") [![[Uncaptioned image]](https://arxiv.org/html/2605.16679v2/icons/huggingface.png)actava/chi-bench](https://huggingface.co/datasets/actava/chi-bench "")
+
+## 1 Introduction
+
+The U.S. healthcare system is an administrative nightmare \[ [11](https://arxiv.org/html/2605.16679v2#bib.bib11 ""), [42](https://arxiv.org/html/2605.16679v2#bib.bib42 "")\]. Prior authorization (PA), where providers (e.g., hospitals) prepare clinical documents for payers (e.g., insurers) review to justify a service or medication, is one of the most common yet inefficient workflows \[ [43](https://arxiv.org/html/2605.16679v2#bib.bib43 ""), [45](https://arxiv.org/html/2605.16679v2#bib.bib45 ""), [1](https://arxiv.org/html/2605.16679v2#bib.bib1 "")\]. Care management (CM), a long-term patient-assisting program, follows a similar arc \[ [25](https://arxiv.org/html/2605.16679v2#bib.bib25 ""), [10](https://arxiv.org/html/2605.16679v2#bib.bib10 ""), [23](https://arxiv.org/html/2605.16679v2#bib.bib23 "")\]: referrals queue for weeks, staff spend hours outreaching patients, and coordination across roles buries nurses in work they didn’t sign up for. These are long-horizon, policy-grounded tasks where every handoff is a chance for things to stall. AI agents are increasingly proposed as a way to assist or partially automate such work. Already, frontier agents now sustain hundreds of tool calls over hours of execution, automating long-horizon tasks that were out of reach a year ago.
+
+However, end-to-end automation of realistic healthcare workflows tells a different story, posing three underexplored challenges that possibility warrants rigorous stress-testing:
+
+![Refer to caption](https://arxiv.org/html/2605.16679v2/x2.png)Figure 2: Illustration of the three challenges: policy retrieval, multi-role composition (intake clerk → nurse → MD reviewer → peer-to-peer coordinator), and clinician outreach, all occurring in a single utilization management task. More examples can be found at: [https://actava.ai/benchmarks](https://actava.ai/benchmarks "").
+
+1) Policy density. Every agent decision must be grounded in policy, e.g., medical guidelines, insurance rules, operational procedures that vary across providers and payers and shifts over time. Agents must navigate a large policy library, interpret conditions correctly, and adhere to them across long tool-call chains. 2) Multi-role composition. An end-to-end workflow is divided among roles such as clinician, coordinator, UM nurse, medical director, and RN care manager. An agent must possess all of their domain knowledge, switch context and goals as the case moves. Handoffs are terminal: once a step is submitted or routed, it cannot be edited or re-run. 3) Multilateral interactions. Some steps are not tool calls but 

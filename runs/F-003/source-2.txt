@@ -1,0 +1,133 @@
+https://arxiv.org/html/2606.07682v1
+
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+[License: arXiv.org perpetual non-exclusive license](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2606.07682v1 \[cs.SE\] 05 Jun 2026
+
+# SWE-Marathon: Can Agents Autonomously Complete Ultra-Long-Horizon Software Work?
+
+Rishi Desai
+
+Abundant
+
+&Jesse Hu
+
+Abundant
+
+&Joan Cabezas
+
+Abundant
+
+&Neel Harsola
+
+Abundant
+
+&Pratyush Shukla
+
+Abundant
+
+&Roey Ben Chaim
+
+Zenity
+
+&Adnan El Assadi
+
+Harvard University
+
+&Omkaar Mukund Kamath
+
+University of Waterloo
+
+&Fenil Faldu
+
+Gujarat Technological University
+
+&Prannay Hebbar
+
+Warping
+
+&Jiankai Sun
+
+Stanford University
+
+&Yiyuan Li
+
+UNC-Chapel Hill
+
+&Pramod Srinivasan
+
+Independent
+
+&Ishan Gupta
+
+Independent
+
+&Christopher Settles
+
+Refresh
+
+&Daniel Wang
+
+Abundant
+
+&Derek Chen
+
+Soleda AI
+
+&Pranav Raja
+
+Near AI
+
+&Albert Liu
+
+Georgia Tech
+
+&Marek Šuppa
+
+Comenius University in Bratislava
+
+&Nevasini Sasikumar
+
+UC San Diego
+
+&Luyang Kong
+
+Independent
+
+&Erik Quintanilla
+
+Refresh
+
+&Xiangyi Li
+
+BenchFlow
+
+&Ivan Bercovich
+
+UC Santa Barbara
+
+&Steven Dillmann
+
+Stanford University
+
+Correspondence to: rishi@abundant.ai
+
+###### Abstract
+
+AI agents are increasingly expected to complete long-horizon workflows that require sustained progress over hours, millions of tokens, and complex environments. Yet current agent benchmarks largely evaluate short-form tasks, such as single pull requests, small tickets, or 5–10 minute exercises, limiting our ability to measure agents’ capabilities in planning, long-context understanding, and memory use. We introduce SWE-Marathon, a benchmark of 20 long-horizon tasks spanning software engineering and adjacent technical domains. Each task consists of a unique executable environment, a human-written reference solution, and a multi-layer verification suite. Logged agent attempts average 27.2M total tokens, making SWE-Marathon substantially longer-horizon than existing SWE and command-line agent benchmarks. Current frontier coding agents solve fewer than 30% of tasks. Failures often arise from poor self-verification, self-reported infeasibility, and premature termination. We also observe reward-hacking behavior in 13.8% of rollouts, where agents attempt to exploit the environment or verifier to bypass the intended workflow. SWE-Marathon includes adversarial review of test suites and execution environments, as well as multi-layer checks designed to prevent shortcut solutions. We release SWE-Marathon, evaluation code, and agent trajectories at [swe-marathon.org](https://swe-marathon.org/ "").
+
+![Refer to caption](https://arxiv.org/html/2606.07682v1/draft_figures/swe_marathon_vs_existing_benchmark_horizons.png)Figure 1: SWE-Marathon compared to existing software-engineering and agentic benchmarks. SWE-Marathon tasks average 27.2M total tokens per rollout with a right tail reaching 877M tokens.
+
+## 1 Introduction
+
+Large language models have progressed rapidly from grade-school math (Cobbe et al., [2021](https://arxiv.org/html/2606.07682v1#bib.bib40 "Training verifiers to solve math word problems")) to competitive programming, patch generation (Jimenez et al., [2024](https://arxiv.org/html/2606.07682v1#bib.bib7 "SWE-bench: can language models resolve real-world github issues?")), and multi-domain agentic tasks spanning terminal use (Merrill et al., [2026](https://arxiv.org/html/2606.07682v1#bib.bib4 "Terminal-bench: benchmarking agents on hard, realistic tasks in command line interfaces")), freelance software engineering (Miserendino et al., [2025](https://arxiv.org/html/2606.07682v1#bib.bib1 "SWE-lancer: can frontier llms earn $1 million from real-world freelance software engineering?")), and library-scale generation (Zhao et al., [2024](https://arxiv.org/html/2606.07682v1#bib.bib5 "Commit0: library generation from scratch")). As capability claims extend to workflows that take human engineers days or weeks, evaluation must move beyond isolated patches to tasks requiring sustained progress and substantial reasoning effort.
+
+Current benchmarks fall short on two dimensions: _horizon_ and _verifier strength_. Dominant public benchmarks measure agent performance within minute-scale; even Terminal-Bench (Merrill et al., [2026](https://arxiv.org/html/2606.07682v1#bib.bib4 "Terminal-bench: benchmarking agents on hard, realistic tasks in command line interfaces")), one of the most challenging, has most tasks resolved within an hour by top agents. SWE-Bench grades against a single committed patch, Commit0 (Zhao et al., [2024](https://arxiv.org/html/2606.07682v1#bib.bib5 "Commit0: library generation from scratch")) against a fixed test suite, and multi-hour benchmarks such as FrontierSWE (Chu et al., [2026](https://arxiv.org/html/2606.07682v1#bib.bib3 "FrontierSWE: benchmarking coding agents at the limits of human abilities")) and MirrorCode (Adamczewski et al., [2026](https://arxiv.org/html/2606.07682v1#bib.bib19 "MirrorCode: evidence that AI can already do some weeks-long coding tasks")) still rely on a single verifier methodology while documenting active in-trial reward hacking; over 15% of tasks across five major terminal-agent benchmarks contain reward-hackable verifiers (Bercovich et al., [2026](https://arxiv.org/html/2606.07682v1#bib.bib41 "Terminal wrench: a dataset of 331 reward-hackable environments and 3,632 exploit trajectories")). These designs miss the cross-file, cross-component structure of real software engineering, where objectives are specified rather than scaffolded.
+
+Closing both gaps is hard. Effort in software engineering grows non-linearly with software size (Boehm et al., [2000](https://arxiv.org/html/2606.07682v1#bib.bib32 "Software cost estimation with cocomo ii"); Pendharkar et al., [2008](https://arxiv.org/html/2606.07682v1#bib.bib33 "An empirical study of the cobb–douglas production function properties of software development effort")): long horizons require navigation, hypothesis framing, and correctly investigating an unfamilia

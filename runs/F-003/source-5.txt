@@ -1,0 +1,34 @@
+https://arxiv.org/html/2601.02439v6
+
+Title:
+
+Content selection saved. Describe the issue below:
+
+Description:
+
+[License: arXiv.org perpetual non-exclusive license](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2601.02439v6 \[cs.LG\] 02 May 2026
+
+# ![[Uncaptioned image]](https://arxiv.org/html/2601.02439v6/logo/webgym.png) WebGym: Scaling Training Environments for    Visual Web Agents with Realistic Tasks
+
+Hao Bai1,2†Alexey Taymanov1
+
+Tong Zhang2Aviral Kumar3Spencer Whitehead1
+
+1![[Uncaptioned image]](https://arxiv.org/html/2601.02439v6/logo/ms-logo.png) Microsoft  2![[Uncaptioned image]](https://arxiv.org/html/2601.02439v6/logo/uiuc.png) UIUC  3![[Uncaptioned image]](https://arxiv.org/html/2601.02439v6/logo/cmu_square.png) CMU
+
+†Work partly done during internship at Microsoft.
+
+![[Uncaptioned image]](https://arxiv.org/html/2601.02439v6/assets/teaser.png)
+
+Figure 1: Example rollouts from visual web agents trained on different training environments. Tasks in prior large-scale training setups were relatively simple, e.g., Test-Time-Interaction (TTI; Shen et al. ( [2025](https://arxiv.org/html/2601.02439v6#bib.bib14 "Thinking vs. doing: agents that reason by scaling test-time interaction")), Row 1), resulting in failures of trained agents on many held-out tasks (task shown: From ArXiv, access the website of the university that maintains and manages ArXiv. How many undergraduate students are currently at the university?, where the agent fails to access the Cornell website). We build WebGym (Row 2, bottom), a significantly larger training environment supporting harder and more diverse tasks, totaling nearly 300k tasks (3×\\times the size of TTI), and train an agent via online reinforcement learning to acquire more generalizable skills (task shown: Find the product code for the ‘Austral Oak TrueScale’ laminate benchtop design on laminex.com.au., where the base model (untrained) agent gets stuck repeating its behavior (repeat action). In contrast, the agent trained with WebGym (RL w/ WebGym) successfully solves the task).
+
+We present _WebGym_, the largest-to-date open-source environment for training realistic visual web agents. Real websites are non-stationary and diverse, making artificial or small-scale task sets insufficient for robust policy learning. WebGym contains nearly 300,000 tasks with rubric-based evaluations across diverse, real-world websites and difficulty levels. We train agents with a simple reinforcement learning (RL) recipe, which trains on the agent’s own interaction traces (rollouts), using task rewards as feedback to guide learning. To enable scaling RL, we speed up sampling of trajectories in WebGym by developing a high-throughput asynchronous rollout system, designed specifically for web agents. Our system achieves a 4-5x rollout speedup compared to naïve implementations. Second, we scale the task set breadth, depth, and size, which results in continued performance improvement. Fine-tuning a strong base vision-language model, Qwen-3-VL-8B-Instruct, on WebGym results in an improvement in success rate on an out-of-distribution test set from 26.2% to 42.9%, significantly outperforming agents based on proprietary models such as GPT-4o and GPT-5-Thinking that achieve 27.1% and 29.8%, respectively. This improvement is substantial because our test set consists only of tasks on websites never seen during training, unlike many other prior works on training visual web agents.
+
+## 1 Introduction
+
+Vision-language models (VLMs) have recently demonstrated remarkable performance on agentic tasks on the web. These tasks often resemble those that a human user would aim to perform on the web, such as _“Compare the prices and specs between AirPod 3 and AirPod 2 on Apple.com”_. To solve such tasks, an agent will perform a series of actions, such as navigating to the relevant website, searching for both products, and finally, deciding on and submitting an answer to complete the task.
+Some web agents rely purely on textual information and try to solve tasks by simply utilizing accessibility trees Zhou et al. ( [2023](https://arxiv.org/html/2601.02439v6#bib.bib45 "Webarena: a realistic web environment for building autonomous agents")) as the observation for the agent, while we focus on visual web agents, where agents observe screenshots, much like humans. This choice is based on the premise that web interaction semantics are defined by the rendered interface users see, and that reasoning over visual affordances enables more robust generalization across diverse and dynamically generated web pages (Koh et al., [2024](https://arxiv.org/html/2601.02439v6#bib.bib18 "Visualwebarena: evaluating multimodal agents on realistic visual web tasks"); Zhou et al., [2024](https://arxiv.org/html/2601.02439v6#bib.bib12 "Proposer-agent-evaluator (pae): autonomous skill discovery for foundation model internet agents"); Shen et al., [2025](https://arxiv.org/html/2601.02439v6#bib.bib14 "Thinking vs. doing: agents that reason by scaling test-time interaction")).
+
+There is a growing body of work on evaluating visual web agents by using benchmarks that involve either artificial or real-world websites. Benchmarks with artificial websites typically provide source code for hosting simulated environments that resemble real websites, such as REAL Bench (Garg et al., [2025](https://arxiv.org/html/2601.02439v6#bib.bib17 "Real: benchmarking autonomous agents on deterministic simulations of real websites")) and VisualWebArena (Koh et al., [2024](https://arxiv.org/html/2601.02439v6#bib.bib18 "Visualwebarena: evaluating multimodal agents on realistic visual web tasks")). In contrast, realistic benchmarks such as GAIA-Web (Mialon et al., [2023](https://arxiv.org/html/2601.02439v6#bib.bib8 "Gaia: a benchmark for general ai assistants")), BrowseComp (Wei et al., [2025](https://arxiv.org/html/2601.02439v6#bib.bib7 "Browsecomp: a simple yet challenging benchmark for browsing agents")), and InSTA-v3 (Trabucco et al., [2025](https://arxiv.org/h

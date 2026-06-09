@@ -1,0 +1,76 @@
+https://arxiv.org/html/2603.04191v1
+
+[License: arXiv.org perpetual non-exclusive license](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2603.04191v1 \[cs.AI\] 04 Mar 2026
+
+# Towards Realistic Personalization: Evaluating Long-Horizon    Preference Following in Personalized User-LLM Interactions
+
+Report issue for preceding element
+
+Qianyun Guo
+Yibo Li
+Yue Liu
+Bryan Hooi
+
+Report issue for preceding element
+
+###### Abstract
+
+Report issue for preceding element
+
+Large Language Models (LLMs) are increasingly serving as personal assistants, where users share complex and diverse preferences over extended interactions. However, assessing how well LLMs can follow these preferences in realistic, long-term situations remains underexplored. This work proposes RealPref, a benchmark for evaluating realistic preference-following in personalized user-LLM interactions. RealPref features 100 user profiles, 1300 personalized preferences, four types of preference expression (ranging from explicit to implicit), and long-horizon interaction histories. It includes three types of test questions (multiple-choice, true-or-false, and open-ended), with detailed rubrics for LLM-as-a-judge evaluation. Results indicate that LLM performance significantly drops as context length grows and preference expression becomes more implicit, and that generalizing user preference understanding to unseen scenarios poses further challenges. RealPref and these findings provide a foundation for future research to develop user-aware LLM assistants that better adapt to individual needs. The code is available at [github.com/GG14127/RealPref](https://github.com/GG14127/RealPref "").
+
+Report issue for preceding element
+
+Machine Learning, ICML
+
+## 1 Introduction
+
+Report issue for preceding element
+
+Large Language Models (LLMs) have demonstrated remarkable performance across a wide range of general-purpose tasks, such as mathematical reasoning (Wang et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib32 "")), question answering (Touvron et al., [2023](https://arxiv.org/html/2603.04191v1#bib.bib30 ""); Achiam et al., [2023](https://arxiv.org/html/2603.04191v1#bib.bib1 "")). However, beyond serving as general-purpose assistants that support users in everyday contexts, there is a growing need for LLM-based assistants to support personalized needs such as recommendations and decision-making. As users engage in long-term interactions with LLMs, they naturally disclose personal information, such as individual preferences, habits, and characteristics, through various forms of expression. In turn, users expect assistants to adapt to such signals and provide tailored responses to serve individual needs. Figure [1](https://arxiv.org/html/2603.04191v1#S1.F1 "Figure 1 ‣ 1 Introduction ‣ Towards Realistic Personalization: Evaluating Long-Horizon Preference Following in Personalized User-LLM Interactions") illustrates a scenario example of a long-horizon user-LLM interaction history that LLMs would encounter in the real world.
+
+Report issue for preceding element
+
+![Refer to caption](https://arxiv.org/html/2603.04191v1/pic/intro.png)Figure 1: An example of user-LLM interaction: the conversation consists of several sessions on different topics. The user expresses a food preference in a previous session and then, after several sessions, asks the LLM for food-relevant recommendations.Report issue for preceding element
+
+Despite rising interest in LLMs’ personalization, most efforts focus on simplified scenarios:
+
+Report issue for preceding element
+
+1. 1.
+
+
+Simple Context: Existing works typically feature short-term context with few dialogue turns, and content centered on a single preference or personalization instruction (Salemi et al., [2023](https://arxiv.org/html/2603.04191v1#bib.bib28 ""); Kumar et al., [2024](https://arxiv.org/html/2603.04191v1#bib.bib13 ""); Zhao et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib35 "")) rather than a simulated user. This framing resembles instruction-following rather than genuine personalization emerging from long-term dialogue.
+
+Report issue for preceding element
+
+2. 2.
+
+
+Straightforward Preferences Expression: While real-world preference expressions are often implicit and scattered (e.g., in emotional cues), most studies assume explicit, immediately accessible traits (Jiang et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib12 "")), neglecting the challenge of generalizing preference understanding to unseen scenarios.
+
+Report issue for preceding element
+
+3. 3.
+
+
+Limited Evaluation Methodology: Prevalent classification tasks diverge from natural user-LLM interactions (Zhao et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib35 ""); Jiang et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib12 "")), while generation tasks, though realistic, lack reliable criteria to assess response quality (Zhao et al., [2025](https://arxiv.org/html/2603.04191v1#bib.bib35 "")).
+
+Report issue for preceding element
+
+
+In light of this, we aim to answer: can LLMs effectively (1) capture user preferences from complex user expressions, (2) retain and follow user preferences across extended interaction contexts, and (3) generalize user preference understanding to unseen scenarios?
+
+Report issue for preceding element
+
+We propose a comprehensive evaluation benchmark, RealPref. Unlike existing benchmarks that focus on standalone preferences or short-term context, RealPref is designed to simulate the complexities of authentic, long-horizon user-LLM interactions. It constructs a dynamic testing environment featuring diverse user biographies and multi-session conversation histories, where preferences are revealed through varying levels of expression—ranging from explicit statements to implicit cues. This design enables rigorous assessment of an agent’s ability to maintain consistency and adapt to user needs over time.
+The main contributions of this work are summarized below:
+
+Report issue for preceding element
+
+1. 1.
+
+
+Dataset C

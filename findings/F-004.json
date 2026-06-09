@@ -1,0 +1,30 @@
+{
+  "id": "F-004",
+  "claim": "Across independent evaluations, LLMs exhibit substantially lower and less human-aligned personalization performance on human or realistic long-horizon data than on synthetic or simplified setups, including cases where humans rate \u2018personalized\u2019 outputs no better than generic ones.",
+  "method": "synthesis",
+  "evidence": [
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/html/2606.06614v1",
+      "quote": "generate personalized responses that humans judge no better than generic responses (though that LLM judges widely rate as better).",
+      "stance": "supports"
+    },
+    {
+      "kind": "source",
+      "url": "https://arxiv.org/html/2603.04191v1",
+      "quote": "Results indicate that LLM performance significantly drops as context length grows and preference expression becomes more implicit, and that generalizing user preference understanding to unseen scenarios poses further challenges.",
+      "stance": "supports"
+    }
+  ],
+  "prediction": {
+    "claim": "By 2027-06-30, at least one new human-evaluated personalization study will report that a state-of-the-art LLM\u2019s personalized responses are preferred by human raters in less than 60% of cases over generic responses on a human- or long-horizon-based dataset.",
+    "resolves": "2027-06-30",
+    "checkable": "A published human evaluation shows <60% human preference for personalized vs. generic responses for at least one SOTA LLM on a human/long-horizon personalization benchmark."
+  },
+  "refutation_condition": "If independent evaluations using human conversations or long-horizon realistic contexts show no material drop relative to synthetic/simplified setups (e.g., humans prefer personalized outputs >75% of the time and relevance selection aligns within ~5% of human judgments), the claim is false.",
+  "extends": [],
+  "contradicts": [],
+  "confidence": 0.3,
+  "status": "unverified",
+  "date": "2026-06-08"
+}

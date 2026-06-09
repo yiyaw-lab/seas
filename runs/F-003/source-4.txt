@@ -1,0 +1,57 @@
+https://arxiv.org/html/2602.12430v3
+
+[License: CC BY-NC-ND 4.0](https://info.arxiv.org/help/license/index.html#licenses-available)
+
+arXiv:2602.12430v3 \[cs.MA\] 17 Feb 2026
+
+# Agent Skills for Large Language Models:   Architecture, Acquisition, Security, and the Path Forward
+
+Report issue for preceding element
+
+Renjun Xu, Yang Yan
+
+Zhejiang University, China
+
+Corresponding author: rux@zju.edu.cn
+
+Report issue for preceding element
+
+###### Abstract
+
+Report issue for preceding element
+
+The transition from monolithic language models to modular, skill-equipped agents marks a defining shift in how large language models (LLMs) are deployed in practice.
+Rather than encoding all procedural knowledge within model weights, agent skills—composable packages of instructions, code, and resources that agents load on demand—enable dynamic capability extension without retraining. It is formalized in a paradigm of progressive disclosure, portable skill definitions, and integration with the Model Context Protocol (MCP).
+This survey provides a comprehensive treatment of the agent skills landscape, as it has rapidly evolved during the last few months.
+We organize the field along four axes: (i) architectural foundations, examining the SKILL.md specification, progressive context loading, and the complementary roles of skills and MCP; (ii) skill acquisition, covering reinforcement learning with skill libraries (SAGE), autonomous skill discovery (SEAgent), and compositional skill synthesis; (iii) deployment at scale, including the computer-use agent (CUA) stack, GUI grounding advances, and benchmark progress on OSWorld and SWE-bench; and (iv) security, where recent empirical analyses reveal that 26.1% of community-contributed skills contain vulnerabilities, motivating our proposed Skill Trust and Lifecycle Governance Framework—a four-tier, gate-based permission model that maps skill provenance to graduated deployment capabilities.
+We identify seven open challenges—from cross-platform skill portability to capability-based permission models—and propose a research agenda for realizing trustworthy, self-improving skill ecosystems.
+Unlike prior surveys that broadly cover LLM agents or tool use, this work focuses specifically on the emerging skill abstraction layer and its implications for the next generation of agentic systems.
+An accompanied collection of awesome agent skills resources can be found at [https://github.com/scienceaix/agentskills](https://github.com/scienceaix/agentskills "").
+
+Report issue for preceding element
+
+Keywords: Agent skills, large language models, tool use, computer-use agents, Model Context Protocol, skill libraries, agentic AI, progressive disclosure, security
+
+Report issue for preceding element
+
+## 1 Introduction
+
+Report issue for preceding element
+
+The capabilities of large language models have expanded dramatically, yet their utility as autonomous agents remains constrained by a fundamental tension: general-purpose models possess broad knowledge but lack the specialized procedural expertise that real-world tasks demand. Fine-tuning addresses this partially, but at significant cost and with limited composability. Retrieval-augmented generation (RAG) provides external knowledge, but the retrieved passages are passive—they cannot prescribe multi-step workflows, bundle executable code, or adapt the agent’s tool permissions at runtime.
+
+Report issue for preceding element
+
+Agent skills resolve this tension by introducing a modular, filesystem-based abstraction that equips agents with domain-specific expertise on demand. In this paradigm, a skill is not a model or a prompt template, but a self-contained package: a structured instruction file (SKILL.md), optional scripts, reference documents, and assets, organized in a directory that the agent discovers, loads, and follows when relevant tasks arise \[ [35](https://arxiv.org/html/2602.12430v3#bib.bib1 "Equipping agents for the real world with agent skills")\]. The distinction from traditional tools is architectural: tools execute and return results, whereas skills prepare the agent to solve a problem by injecting procedural knowledge, modifying execution context, and enabling progressive disclosure of information.
+
+Report issue for preceding element
+
+Anthropic formalized this concept in October 2025 with the launch of Agent Skills across Claude’s product surface \[ [7](https://arxiv.org/html/2602.12430v3#bib.bib2 "Introducing agent skills")\], followed by its release as an open standard in December 2025 \[ [3](https://arxiv.org/html/2602.12430v3#bib.bib4 "Agent skills open standard")\]. Within four months, the anthropics/skills repository accumulated over 62,000 GitHub stars, partner-built skills from Atlassian, Figma, Canva, Stripe, and Notion entered a curated directory, and structurally identical architectures were independently adopted by other frontier model providers.
+
+Report issue for preceding element
+
+This rapid convergence reflects a broader recognition: as agents move from research prototypes to production deployments, the industry needs standardized mechanisms for packaging, distributing, and governing procedural expertise. The parallel maturation of the Model Context Protocol (MCP)—an open standard for connecting agents to external data and tools, donated to the Linux Foundation’s Agentic AI Foundation in December 2025 \[ [5](https://arxiv.org/html/2602.12430v3#bib.bib6 "Donating the model context protocol and establishing the agentic AI foundation")\]—provides the complementary infrastructure layer. Together, skills and MCP define an emerging agentic stack in which skills supply the “what to do” and MCP supplies the “how to connect.”
+
+Report issue for preceding element
+
+This survey is the first to provide a comprehensive, focused treatment of the agent skills paradigm. While excellent surveys exist on LLM agents broadly \[ [16](https://arxiv.org/html/2602.12430v3#bib.bib41 "Large language model agent: a survey on methodology, applications and challenges"), [18](https
