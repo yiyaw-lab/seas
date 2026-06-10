@@ -16,14 +16,34 @@ import argo_watch as watch
 
 
 class ItemIdTest(unittest.TestCase):
-    def test_prefers_link_and_normalizes(self):
-        self.assertEqual(watch._item_id({"link": "  HTTP://X "}), "http://x")
+    def test_prefers_link_canonicalized(self):
+        # Canonical id is host+path with the scheme dropped, so http/https reprints
+        # of the same URL collapse. (Was "http://x" before the syndication fix.)
+        self.assertEqual(watch._item_id({"link": "  HTTP://X "}), "x")
 
     def test_falls_back_to_title(self):
         self.assertEqual(watch._item_id({"title": "Big Launch"}), "big launch")
 
     def test_empty_when_neither(self):
         self.assertEqual(watch._item_id({}), "")
+
+    def test_url_scheme_and_trailing_slash_equivalent(self):
+        # Same story via two feeds: https + trailing slash vs http, no slash.
+        self.assertEqual(
+            watch._item_id({"link": "https://Example.com/post/"}),
+            watch._item_id({"link": "http://example.com/post"}))
+
+    def test_tracking_query_stripped(self):
+        self.assertEqual(
+            watch._item_id({"link": "https://x.com/a?utm_source=feed&ref=hn"}),
+            watch._item_id({"link": "https://x.com/a"}))
+
+    def test_normalized_title_collapses_tag_and_whitespace(self):
+        # No-link fallback: a [tag]-prefixed, oddly-spaced, punctuated reprint
+        # dedups against the clean title.
+        self.assertEqual(
+            watch._item_id({"title": "[NEWS]  Big   Launch!"}),
+            watch._item_id({"title": "Big Launch"}))
 
 
 class LoadSaveSeenTest(unittest.TestCase):
@@ -76,11 +96,13 @@ class AttemptsGatingTest(unittest.TestCase):
                                             lambda label, url: items))
 
     def test_only_unsettled_items_are_eligible(self):
-        seen = {"http://seen-once": 1, "http://settled": watch.MAX_ATTEMPTS}
+        # ids are canonicalized (host+path, scheme and '//' dropped), so the
+        # seen-store keys are what _item_id derives from the feed links.
+        seen = {"seen-once": 1, "settled": watch.MAX_ATTEMPTS}
         eligible = {watch._item_id(it) for it in watch.collect_new(seen)}
-        self.assertIn("http://new", eligible)
-        self.assertIn("http://seen-once", eligible)        # 1 < MAX_ATTEMPTS
-        self.assertNotIn("http://settled", eligible)       # == MAX_ATTEMPTS
+        self.assertIn("new", eligible)
+        self.assertIn("seen-once", eligible)        # 1 < MAX_ATTEMPTS
+        self.assertNotIn("settled", eligible)       # == MAX_ATTEMPTS
 
 
 if __name__ == "__main__":

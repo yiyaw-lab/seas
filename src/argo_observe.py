@@ -42,6 +42,9 @@ from datetime import datetime
 from pathlib import Path
 
 import argo_guard
+from argo_log import get_logger
+
+log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 SIGNALS_PATH = ROOT / "data" / "signals.json"
@@ -335,7 +338,7 @@ def _rejects_temperature(model):
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
-                  temperature=1.0):
+                  temperature=1.0, return_tool_events=False):
     """Claude chat call with structured messages and optional MCP tool servers.
 
     Separate from generate_observations (the string-in/string-out helper the
@@ -344,7 +347,9 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     is the connector's server-definition list; for each server we add the matching
     `mcp_toolset` entry to `tools` (required by the 2025-11-20 connector). Anthropic
     runs the tool loop and may return mcp_tool_use/mcp_tool_result blocks alongside
-    text; we return only the text. Used by argo_webhook._llm_reply. Claude-only.
+    text. Returns the joined text; with return_tool_events=True returns
+    (text, [fired_tool_name, ...]) so a caller can tell a real send from a phantom.
+    Used by argo_webhook._llm_reply. Claude-only.
     """
     import anthropic
 
@@ -378,17 +383,31 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     # Same guardrails as the other model calls: daily budget + breaker + retry.
     response = _guarded("anthropic", do_call, f"chat/{model}")
 
-    # Log only MCP tool *failures* (silent on success), so a broken connector or
-    # erroring tool is visible in the logs without spamming every tool turn.
+    # Telemetry: log every tool the connector fired (name on use, ok/error on
+    # result) and collect the fired names. A bare error-only log hid the most
+    # important case -- the model SAYS it sent/proposed something but no tool
+    # fired -- so we log each call and hand the caller the fired-tool list to
+    # detect that phantom (return_tool_events).
+    events = []
     if mcp_servers:
         for b in response.content:
-            if getattr(b, "type", "") == "mcp_tool_result" and getattr(b, "is_error", False):
-                print(f"[mcp] tool error: {str(getattr(b, 'content', ''))[:300]}")
+            bt = getattr(b, "type", "")
+            if bt == "mcp_tool_use":
+                name = getattr(b, "name", "?")
+                events.append(name)
+                log.info("mcp tool_use: %s", name)
+            elif bt == "mcp_tool_result":
+                snippet = str(getattr(b, "content", ""))[:200]
+                if getattr(b, "is_error", False):
+                    log.warning("mcp tool_result ERROR: %s", snippet)
+                else:
+                    log.info("mcp tool_result ok: %s", snippet)
 
-    return "".join(
+    text = "".join(
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
     )
+    return (text, events) if return_tool_events else text
 
 
 # Provider registry. Each entry: how to recognise a model name, which env var

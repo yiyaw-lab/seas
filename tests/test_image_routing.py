@@ -45,10 +45,12 @@ class ImageRoutingTest(unittest.TestCase):
     def test_image_routes_conversational_no_forced_taste(self):
         captured = {}
 
-        def fake_chat(system, messages, model, mcp_servers=None, **kw):
+        def fake_chat(system, messages, model, mcp_servers=None,
+                      return_tool_events=False, **kw):
             captured["messages"] = messages
             captured["model"] = model
-            return "that's the lockdown piece I sent. re: Mythos, looking now."
+            text = "that's the lockdown piece I sent. re: Mythos, looking now."
+            return (text, []) if return_tool_events else text
 
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=True), \
                 mock.patch.object(observe, "chat_with_mcp", fake_chat), \
@@ -81,9 +83,11 @@ class ImageRoutingTest(unittest.TestCase):
         argo_memory.record(777, "Argo", "earlier: I sent you the OpenAI lockdown piece")
         captured = {}
 
-        def fake_chat(system, messages, model, mcp_servers=None, **kw):
+        def fake_chat(system, messages, model, mcp_servers=None,
+                      return_tool_events=False, **kw):
             captured["messages"] = messages
-            return "yes, that one."
+            text = "yes, that one."
+            return (text, []) if return_tool_events else text
 
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=True), \
                 mock.patch.object(observe, "chat_with_mcp", fake_chat), \

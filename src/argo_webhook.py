@@ -55,9 +55,13 @@ import argo_memory
 import argo_observe as observe
 import argo_paths
 import argo_rating
+import argo_reply_context
 import argo_store
 import profile
 import send_telegram
+from argo_log import get_logger
+
+log = get_logger(__name__)
 
 # Re-exported from argo_paths; kept as a module-level name so the project-state
 # helpers (and the tests that patch wh.PROJECTS_LOG) read the override at call
@@ -417,6 +421,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     last_error = None
     for model in runnable:
         try:
+            tool_events = []
             if observe.provider_for(model)["name"] == "anthropic":
                 # Claude path: structured messages + MCP tools. Assistant turns are
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
@@ -429,8 +434,9 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     }
                     for t in hist
                 ] + [{"role": "user", "content": final_content}]
-                raw = observe.chat_with_mcp(
-                    build_system_prompt(), messages, model, mcp_servers=MCP_SERVERS
+                raw, tool_events = observe.chat_with_mcp(
+                    build_system_prompt(), messages, model,
+                    mcp_servers=MCP_SERVERS, return_tool_events=True,
                 )
             else:
                 # Fallback path (gpt-4o): the original single string prompt. Only
@@ -443,7 +449,10 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 )
                 raw = observe.generate_observations(prompt, model)
 
-            reply = _clean_reply(raw.strip())
+            # Phantom-send backstop: if the model CLAIMS it sent/built a proposal
+            # but no project tool actually fired, correct it honestly (the
+            # deterministic route handles explicit asks; this catches the rest).
+            reply = _guard_phantom_send(_clean_reply(raw.strip()), tool_events)
             # Persist both turns in one write so memory survives restarts.
             argo_memory.record_many(chat_id, [
                 (profile.name(), log_user_text),
@@ -457,6 +466,34 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
         except Exception as exc:
             last_error = exc
     return f"(Argo hit an error reaching the model: {last_error})"
+
+
+# Project tools that produce a real artifact. If a reply claims it sent or built a
+# proposal but NONE of these fired, the claim is a phantom.
+_PROJECT_TOOLS = frozenset({
+    "new_project", "add_project", "project_too_complex", "recommend_project",
+    "get_latest_project", "scaffold_project", "rehearse_project",
+})
+_PHANTOM_CLAIM_RE = re.compile(
+    r"captured your idea"
+    r"|putting (a|the|your) project together"
+    r"|(sending|sent|drafting|building|shaping)\b[^.!?\n]{0,40}\b(proposal|project)\b",
+    re.IGNORECASE)
+
+
+def _guard_phantom_send(reply, tool_events):
+    """Stop a 'said sending, nothing landed' phantom from reaching the user: if the
+    reply asserts it sent/built a proposal but no project tool actually fired,
+    replace the false claim with an honest nudge and log it. The deterministic
+    proposal route covers explicit asks; this is the conversational backstop."""
+    if any(t in _PROJECT_TOOLS for t in tool_events):
+        return reply
+    if _PHANTOM_CLAIM_RE.search(reply):
+        log.warning("phantom send suppressed: reply claimed a proposal but no "
+                    "project tool fired (events=%s)", tool_events or "none")
+        return ("hang on, I didn't actually build anything yet. say 'give me a "
+                "proposal' and I'll ship one for real.")
+    return reply
 
 
 def _llm_reply(chat_id, user_text):
@@ -478,6 +515,44 @@ def _target_project(log, project_id=None):
 
 def _match_existing_project(text):
     return argo_rating.match_existing_project(text, PROJECTS_LOG)
+
+
+# Re-show intent -> let the model's get_latest_project handle it; do NOT generate
+# a new project when she wants to SEE the one already sent.
+_RESHOW_RE = re.compile(
+    r"\b(re-?send|again|the one you sent|already sent|last (one|project)|"
+    r"that project|where('?s| is)|show (me )?(it|the|that))\b", re.IGNORECASE)
+# Explicit ask for a fresh proposal (a new bet).
+_NEW_PROPOSAL_RE = re.compile(
+    r"\b(give|send|make|build|gimme|got)\s+me\s+[^.!?\n]*\b(proposal|project|bet)\b"
+    r"|\bpropose\b[^.!?\n]*\b(project|idea|bet)\b"
+    r"|\b(another|a new|a fresh|the full)\s+(proposal|project|bet|one)\b"
+    r"|\bproposal,?\s*please\b", re.IGNORECASE)
+# Bring-your-own idea: an explicit seed to shape into a proposal.
+_IDEA_SEED_RE = re.compile(
+    r"\b(?:add my idea|shape my idea|here'?s my idea|my idea)\s*(?:is\s+|[:\-]\s*)(?P<a>.+)"
+    r"|\bi\s+(?:want|wanna|would like|'?d like)\s+to\s+build\s+(?P<b>.+)"
+    r"|\bbuild me\s+(?P<c>.+)", re.IGNORECASE | re.DOTALL)
+
+
+def _match_proposal_request(text):
+    """Map an explicit proposal ask to a deterministic delivery, so 'give me a
+    proposal' / 'add my idea: X' ALWAYS lands a real artifact instead of relying on
+    the model to fire new_project/add_project (the phantom-send bug). Returns
+    None / ("new", "") / ("idea", seed). Conservative: anything ambiguous (incl.
+    'show me the one you sent') falls through to the model. New-bet is checked
+    before idea-seed so 'build me a project' is a new bet, not a seed of 'a project'."""
+    t = " ".join(text.split())  # collapse whitespace/newlines for matching
+    if _RESHOW_RE.search(t):
+        return None
+    if _NEW_PROPOSAL_RE.search(t):
+        return ("new", "")
+    m = _IDEA_SEED_RE.search(t)
+    if m:
+        seed = (m.group("a") or m.group("b") or m.group("c") or "").strip()
+        if seed:
+            return ("idea", seed)
+    return None
 
 
 # --- Responsiveness: instant ack + "still working" heartbeat ----------------
@@ -529,7 +604,11 @@ def _ack_text(text):
     if any(h in t for h in ("project", "another", "different one", "idea",
                             "too complex", "over my head", "scaffold",
                             "ship this", "which one", "build")):
-        return "on it, putting a project together. takes a minute."
+        # Don't promise a specific artifact here: this branch fires on project-
+        # ADJACENT talk ("which one should I build?", "too complex") that may not
+        # produce a proposal. Explicit "give me a proposal" asks are delivered
+        # deterministically upstream (see the proposal route in handle_update).
+        return "on it, one sec."
     return "on it."
 
 
@@ -806,7 +885,43 @@ def handle_update(update):
             "Reply 1-10 to rate it, SELECT to lock it in, or ask for another.")
         return
 
-    reply = _reply_with_progress(chat_id, text)
+    # Proposal-on-demand gate: an explicit "give me a proposal" / "add my idea: X"
+    # is delivered DETERMINISTICALLY here -- generate + send the artifact straight
+    # off, instead of leaving it to the model to fire new_project/add_project (the
+    # phantom-send bug: Argo said "sending" and nothing landed). Upstream of the
+    # model like SELECT/REHEARSE; re-show asks fall through to get_latest_project.
+    proposal = _match_proposal_request(text)
+    if proposal is not None:
+        kind, seed = proposal
+        import argo_project
+        import argo_mcp_server
+        made = (argo_project.make_proposal(refresh=True) if kind == "new"
+                else argo_project.make_proposal(refresh=True, seed=seed, source="yiya"))
+        if made == "NO_SIGNALS":
+            send_telegram.send_message(
+                "couldn't pull fresh signals to ground one right now. try again in "
+                "a bit, or give me your own idea and I'll shape that.")
+            return
+        if made is None:
+            send_telegram.send_message(
+                "couldn't generate a project just now (no model reachable). "
+                "try again shortly.")
+            return
+        project_id, pitch, _text, doc, _model = made
+        note = argo_mcp_server._deliver_proposal(project_id, pitch, doc)
+        # _deliver_proposal already sent the pitch + doc and returns a model-facing
+        # note: success/partial notes start with "[", a total-delivery failure
+        # returns the content with no leading "[" -- be honest then.
+        if not note.startswith("["):
+            send_telegram.send_message(
+                "built it but couldn't get it through to you just now, "
+                "try again in a sec.")
+        return
+
+    # Model fallback. Pass the reply-augmented text so when she REPLIES to one of
+    # Argo's messages, Argo sees what she's reacting to (the reply-to excerpt) --
+    # the extract was added but never wired in, so replies lost their context.
+    reply = _reply_with_progress(chat_id, argo_reply_context.extract_user_text(msg))
     send_telegram.send_message(reply)
 
 

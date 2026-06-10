@@ -21,9 +21,11 @@ Run:  python src/argo_watch.py            (fetch, judge, send, record)
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -55,9 +57,35 @@ SEEN_CAP = 2000        # keep the seen-store bounded
 MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
 
+_TITLE_TAG_RE = re.compile(r"^\s*\[[^\]]*\]\s*")  # a leading "[news]"-style tag
+
+
+def _canonical_url(link):
+    """host + path, scheme- and query-insensitive, so the SAME article reaching
+    us via two feeds (http vs https, a trailing slash, utm/ref tracking params)
+    collapses to one id instead of alerting twice."""
+    parts = urlsplit(link)
+    if not parts.netloc:
+        # Not a scheme://host URL (e.g. an Atom urn:/tag: id). Keep the raw
+        # string so it still dedups, just without canonicalization.
+        return link.lower()
+    return f"{parts.netloc.lower()}{parts.path.rstrip('/')}"
+
+
+def _normalize_title(title):
+    """Lowercased, tag- and punctuation-stripped title, used only when an item has
+    no link, so a re-punctuated or [tag]-prefixed reprint still matches."""
+    t = _TITLE_TAG_RE.sub("", title)        # drop a leading [tag]
+    t = re.sub(r"[^\w\s]", " ", t)          # punctuation -> space (don't glue words)
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
 def _item_id(item):
-    """Stable identity for dedup: prefer the link, fall back to title."""
-    return (item.get("link") or item.get("title") or "").strip().lower()
+    """Stable identity for dedup: canonicalized link, else normalized title."""
+    link = (item.get("link") or "").strip()
+    if link:
+        return _canonical_url(link)
+    return _normalize_title(item.get("title") or "")
 
 
 def load_seen():
