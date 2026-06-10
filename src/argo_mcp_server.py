@@ -36,6 +36,9 @@ import argo_paths
 import argo_store
 import fetch_signals
 import profile
+from argo_log import get_logger
+
+log = get_logger(__name__)
 
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
 
@@ -465,7 +468,7 @@ def _deliver_proposal(project_id, pitch, doc):
         doc_ok = send_telegram.try_send_message(doc)  # fallback: proposal as text
     # Log the delivery outcome so a 'said sent but nothing arrived' report is
     # diagnosable from the server logs (pitch vs doc, which one failed).
-    print(f"[deliver_proposal] {project_id} pitch_ok={pitch_ok} doc_ok={doc_ok}")
+    log.info("deliver_proposal %s pitch_ok=%s doc_ok=%s", project_id, pitch_ok, doc_ok)
 
     # Mark it SHOWN if anything reached them, so a later bare rating/SELECT targets
     # THIS project (the one they're looking at), not whatever was generated last.
