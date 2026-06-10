@@ -39,6 +39,11 @@ jobs:
         run: |
           git config user.name "argo-schedule"
           git config user.email "argo-schedule@users.noreply.github.com"
-          git add data/argo_seen.json data/schedule_state.json 2>/dev/null || true
+          # Add each path on its own line: a single `git add a b` aborts and
+          # stages NOTHING if any one path is gitignored/missing (see
+          # seas-findings.yml). Both stores are now tracked (un-ignored) so the
+          # dedupe state actually persists across runs.
+          git add data/argo_seen.json 2>/dev/null || true
+          git add data/schedule_state.json 2>/dev/null || true
           git commit -m "argo-schedule: update run state" || echo "No changes"
           git push || echo "Nothing to push"
