@@ -26,7 +26,6 @@ DATA = ROOT / "data"
 
 PROJECTS_LOG = DATA / "argo_projects.json"
 SIGNALS_PATH = DATA / "signals.json"
-SEEN_PATH = DATA / "argo_seen.json"
 SCHEDULE_PATH = DATA / "schedule.json"
 STATE_PATH = DATA / "schedule_state.json"
 FINDINGS_DIR = ROOT / "findings"
@@ -42,3 +41,9 @@ SELF_PATH = Path(os.environ.get("ARGO_SELF_PATH", str(DATA / "argo_self.json")))
 # reason: the webhook writes these at chat time, so point ARGO_TASTE_PATH at the
 # Railway volume or each redeploy wipes the store (IDs reset to T-001).
 TASTE_PATH = Path(os.environ.get("ARGO_TASTE_PATH", str(DATA / "taste_signals.json")))
+# Tripwire dedup store. On GitHub Actions it persists by being committed back to
+# the repo (see argo-watch.yml / argo-schedule.yml); ARGO_SEEN_PATH lets a runner
+# with a writable volume (e.g. Railway) point it there instead, like the stores
+# above. argo_watch re-exports this as its module-level SEEN_PATH (the test patch
+# point), so load_seen/save_seen read the override at call time.
+SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
