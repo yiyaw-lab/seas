@@ -215,6 +215,51 @@ class FunnelGateTest(EvolveBase):
         # eligible for a retry until MAX_ATTEMPTS.
         self.assertEqual(ev.load_seen()["a"], 1)
 
+    def test_malformed_mapper_reply_is_infrastructure_failure(self):
+        # Neither NONE nor JSON: must come back None (no attempt penalty), never
+        # be coerced to {} as if the mapper had really judged the items.
+        import argo_observe
+        with mock.patch.object(ev, "_resolve_model", return_value="claude-x"), \
+             mock.patch.object(argo_observe, "provider_for",
+                               return_value={"name": "anthropic"}), \
+             mock.patch.object(argo_observe, "chat_with_mcp",
+                               return_value="sure! here is a lever idea: broken"):
+            self.assertIsNone(ev._map_levers([{"title": "t"}]))
+        with mock.patch.object(ev, "_resolve_model", return_value="claude-x"), \
+             mock.patch.object(argo_observe, "provider_for",
+                               return_value={"name": "anthropic"}), \
+             mock.patch.object(argo_observe, "chat_with_mcp",
+                               return_value="NONE"):
+            self.assertEqual(ev._map_levers([{"title": "t"}]), {})
+
+    def test_orphaned_nudged_lever_is_rearmed(self):
+        # A gate turn cleared the staging slot then died before writing the next
+        # status: the nudged lever has no slot, so EVOLVE can never reach it.
+        past = _iso(datetime.now(timezone.utc)
+                    - timedelta(hours=ev.STALE_CLAIM_HOURS + 1))
+        self._lever(id="EV-912", feature="orphan_one", status="nudged",
+                    nudged_at=past)
+        with mock.patch.object(ev, "_collect_new",
+                               side_effect=AssertionError("fetch must not run")), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan()
+        self.assertTrue(res["acted"])
+        self.assertEqual(res["lever"], "EV-912")  # re-armed and re-offered
+        self.assertEqual(ev.get_lever("EV-912")["status"], "nudged")
+        self.assertTrue(ev.has_pending())
+
+    def test_staged_nudged_lever_waits_indefinitely(self):
+        # A properly staged lever may wait days for the user's EVOLVE/SKIP: the
+        # sweep must never re-arm it, however old the nudge is.
+        past = _iso(datetime.now(timezone.utc) - timedelta(days=10))
+        self._lever(id="EV-913", feature="patient_one", status="nudged",
+                    nudged_at=past)
+        ev._stage("EV-913")
+        res = ev.scan()
+        self.assertFalse(res["acted"])  # GATE 1: pending blocks the funnel
+        self.assertEqual(ev.get_lever("EV-913")["status"], "nudged")
+
     def test_source_title_match_exact_first_ambiguous_skipped(self):
         items = [{"title": "SDK v9", "_iid": "a"},
                  {"title": "SDK v9.1 hotfix", "_iid": "b"}]

@@ -341,7 +341,9 @@ def _map_levers(items):
         return None
     if (raw or "").strip().upper() == "NONE":
         return {}
-    return _parse_json(raw) or {}
+    # A reply that is neither NONE nor parseable JSON is a model failure, not a
+    # verdict: return None so the caller doesn't burn the items' attempt counts.
+    return _parse_json(raw)
 
 
 def _slug(s):
@@ -381,7 +383,9 @@ def _offer(lever_id):
         return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
     _stage(lever_id)
     _record_nudge()
-    _update_lever(lever_id, status="nudged")
+    # nudged_at lets the sweep spot a nudged lever whose staging slot was lost
+    # (crashed gate turn) and re-arm it instead of wedging the feature forever.
+    _update_lever(lever_id, status="nudged", nudged_at=_now_iso())
     log.info("evolve: staged + nudged %s (%s)", lever_id, lever.get("feature"))
     return {"acted": True, "lever": lever_id, "feature": lever.get("feature")}
 
@@ -389,26 +393,37 @@ def _offer(lever_id):
 # --- the scan funnel (free gates before the paid one) ---------------------------
 
 def _sweep_stale_claims():
-    """A crash mid-accept (during the slow rehearse/propose work) leaves a claimed
-    lever stuck in 'evolving'/'accepted' with no staging file and no PR -- nothing
-    would ever touch it again. Re-arm those as nudge-ready after a grace window so
-    the funnel re-offers them. Levers in _ACTIVE_CLAIMS are a live thread's work
-    in this process and are never swept (the time lease alone only backstops a
-    scan running in a different process than the webhook gate)."""
+    """Re-arm levers wedged by a crash so the funnel re-offers them:
+    - 'evolving'/'accepted' with no PR past the lease (death mid-rehearse/propose);
+    - 'nudged' with no staging slot pointing at it (a gate turn cleared the slot,
+      then died before writing the next status). A properly staged lever waits for
+      the user indefinitely -- only the orphaned ones are revived.
+    Levers in _ACTIVE_CLAIMS are a live thread's work in this process and are never
+    swept (the time lease alone only backstops a scan running in a different
+    process than the webhook gate). Runs under the gate lock so it can't fire
+    inside another thread's clear-then-claim window."""
     cutoff = (_now() - timedelta(hours=STALE_CLAIM_HOURS)).strftime(_TS_FMT)
-    data = _load_ledger()
-    changed = False
-    for l in data["levers"]:
-        if l.get("id") in _ACTIVE_CLAIMS:
-            continue
-        if (l.get("status") in ("evolving", "accepted") and not l.get("pr_number")
-                and (l.get("claimed_at") or "") < cutoff):
-            log.warning("evolve: re-arming stale %s claim %s (%s)",
-                        l.get("status"), l.get("id"), l.get("feature"))
-            l["status"] = "nudge-ready"
-            changed = True
-    if changed:
-        _save_ledger(data)
+    with _GATE_LOCK:
+        staged = _peek_pending()
+        data = _load_ledger()
+        changed = False
+        for l in data["levers"]:
+            lid = l.get("id")
+            if lid in _ACTIVE_CLAIMS or lid == staged:
+                continue
+            status = l.get("status")
+            stuck_claim = (status in ("evolving", "accepted")
+                           and not l.get("pr_number")
+                           and (l.get("claimed_at") or "") < cutoff)
+            orphaned_nudge = (status == "nudged"
+                              and (l.get("nudged_at") or "") < cutoff)
+            if stuck_claim or orphaned_nudge:
+                log.warning("evolve: re-arming wedged %s lever %s (%s)",
+                            status, lid, l.get("feature"))
+                l["status"] = "nudge-ready"
+                changed = True
+        if changed:
+            _save_ledger(data)
 
 
 def _match_item(items, source_title):
