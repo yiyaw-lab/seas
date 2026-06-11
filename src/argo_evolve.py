@@ -60,6 +60,7 @@ MAX_AFFECTED_FILES = 3     # an evolution PR stays small and reviewable
 MUTE_DAYS_SKIP = 30        # user said SKIP: rest a month
 MUTE_DAYS_KILL = 60        # the rehearsal judge said KILL: rest two months
 MUTE_DAYS_FAILED = 7       # authoring/CI failed: rest a week, then eligible again
+STALE_CLAIM_HOURS = 2      # a claimed lever with no PR after this is a crashed accept
 SEEN_CAP = 1000            # keep the seen-store bounded
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -381,9 +382,44 @@ def _offer(lever_id):
 
 # --- the scan funnel (free gates before the paid one) ---------------------------
 
+def _sweep_stale_claims():
+    """A crash mid-accept (during the slow rehearse/propose work) leaves a claimed
+    lever stuck in 'evolving'/'accepted' with no staging file and no PR -- nothing
+    would ever touch it again. Re-arm those as nudge-ready after a grace window so
+    the funnel re-offers them."""
+    cutoff = (_now() - timedelta(hours=STALE_CLAIM_HOURS)).strftime(_TS_FMT)
+    data = _load_ledger()
+    changed = False
+    for l in data["levers"]:
+        if (l.get("status") in ("evolving", "accepted") and not l.get("pr_number")
+                and (l.get("claimed_at") or "") < cutoff):
+            log.warning("evolve: re-arming stale %s claim %s (%s)",
+                        l.get("status"), l.get("id"), l.get("feature"))
+            l["status"] = "nudge-ready"
+            changed = True
+    if changed:
+        _save_ledger(data)
+
+
+def _match_item(items, source_title):
+    """Link the mapper's source_title back to ONE feed item: exact normalized
+    match first, containment only when it's unambiguous. A short partial title
+    must not attach the lever (or settle the seen-store) for the wrong release."""
+    t = (source_title or "").strip().lower()
+    if not t:
+        return None
+    exact = [it for it in items if (it.get("title") or "").strip().lower() == t]
+    if exact:
+        return exact[0]
+    partial = [it for it in items if t in (it.get("title") or "").lower()]
+    return partial[0] if len(partial) == 1 else None
+
+
 def scan():
     """Run the funnel once. Returns a summary dict (never raises out to the
     scheduler). Gate order keeps every free check ahead of the one paid call."""
+    # Recover claims orphaned by a crash before the gates run (see the sweep).
+    _sweep_stale_claims()
     # GATE 1: one staged lever at a time -- the webhook gate must resolve it first.
     if has_pending():
         return {"acted": False, "reason": "pending lever awaiting EVOLVE/SKIP"}
@@ -408,7 +444,6 @@ def scan():
     # The mapper ran: bump every item it saw. The chosen item is settled at
     # MAX_ATTEMPTS only after a lever actually lands, so a mapper hit that the
     # validation gates below reject is retried (up to the cap), not retired.
-    chosen_title = (result.get("source_title") or "").strip().lower()
     for it in items:
         seen[it["_iid"]] = seen.get(it["_iid"], 0) + 1
     save_seen(seen)
@@ -424,8 +459,7 @@ def scan():
     if not files or len(files) > MAX_AFFECTED_FILES:
         return {"acted": False, "reason": "affected files missing or too many"}
     magnitude = result.get("magnitude") if result.get("magnitude") in ("minor", "major") else "major"
-    src_item = next((it for it in items if chosen_title
-                     and chosen_title in (it.get("title") or "").lower()), None)
+    src_item = _match_item(items, result.get("source_title"))
     data = _load_ledger()
     lever = {
         "id": _next_id(data["levers"]), "created_at": _now_iso(),
@@ -530,7 +564,9 @@ def accept_pending():
         if lever.get("status") != "nudged":
             return (f"That lever is already {lever.get('status')}; nothing left "
                     "for me to do here.")
-        _update_lever(lid, status="evolving")
+        # claimed_at is the lease: if this process dies mid-rehearse/propose,
+        # _sweep_stale_claims re-arms the lever instead of leaving it stuck.
+        _update_lever(lid, status="evolving", claimed_at=_now_iso())
     # Major levers must survive the debate first -- the same gate user projects get.
     if lever.get("magnitude") == "major":
         verdict, notes = _rehearse_lever(lever)
@@ -584,8 +620,26 @@ def accept_pending():
         _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED))
         return text or ("I tried to draft the upgrade PR but hit an error before "
                         "it opened. I'll let this one rest a week.")
+    _ensure_proposal_row(info, lever.get("self_belief_id"))
     _update_lever(lid, status="pr_open", pr_number=info["pr_number"])
     return text
+
+
+def _ensure_proposal_row(info, belief_id):
+    """The propose path records the PR in the proposals ledger itself, but that
+    write is best-effort; if it failed, re-record here so sync_proposal_outcomes
+    can follow the PR instead of stranding the lever in pr_open forever."""
+    import argo_diagnose
+    n = info.get("pr_number")
+    try:
+        if any(p.get("pr_number") == n for p in argo_diagnose._load_proposals()):
+            return
+        argo_diagnose.append_proposal(n, info.get("url"), belief_id, None,
+                                      head_sha=info.get("head_sha"))
+        log.warning("evolve: proposals ledger was missing PR #%s; re-recorded", n)
+    except Exception:
+        log.error("evolve: could not ensure proposal row for PR #%s", n,
+                  exc_info=True)
 
 
 # --- closing the loop: follow the PR, then score the prediction ------------------

@@ -215,6 +215,14 @@ class FunnelGateTest(EvolveBase):
         # eligible for a retry until MAX_ATTEMPTS.
         self.assertEqual(ev.load_seen()["a"], 1)
 
+    def test_source_title_match_exact_first_ambiguous_skipped(self):
+        items = [{"title": "SDK v9", "_iid": "a"},
+                 {"title": "SDK v9.1 hotfix", "_iid": "b"}]
+        self.assertEqual(ev._match_item(items, " sdk V9 ")["_iid"], "a")  # exact wins
+        self.assertEqual(ev._match_item(items, "hotfix")["_iid"], "b")    # unique substring
+        self.assertIsNone(ev._match_item(items, "v9"))                    # ambiguous: no link
+        self.assertIsNone(ev._match_item(items, ""))
+
     def test_rejected_relevance_bumps_not_retires(self):
         items = [{"title": "t", "summary": "", "link": "http://a",
                   "source": "sdk", "_iid": "a"}]
@@ -368,9 +376,37 @@ class GateCommandsTest(EvolveBase):
         lever = ev.get_lever("EV-904")
         self.assertEqual(lever["status"], "pr_open")
         self.assertEqual(lever["pr_number"], 202)
+        # And the missing ledger row is re-recorded so sync can follow the PR.
+        rows = dg._load_proposals()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pr_number"], 202)
+        self.assertEqual(rows[0]["belief_id"], lever["self_belief_id"])
 
     def test_accept_with_nothing_staged(self):
         self.assertIn("Nothing staged", ev.accept_pending())
+
+    def test_stale_claim_is_rearmed_and_reoffered(self):
+        # A crash mid-accept left this lever claimed with no PR: the next scan
+        # must re-arm it and offer it again instead of leaving it stuck forever.
+        past = _iso(datetime.now(timezone.utc) - timedelta(hours=ev.STALE_CLAIM_HOURS + 1))
+        self._lever(id="EV-907", feature="stuck_one", status="evolving",
+                    claimed_at=past)
+        with mock.patch.object(ev, "_collect_new",
+                               side_effect=AssertionError("fetch must not run")), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan()
+        self.assertTrue(res["acted"])
+        self.assertEqual(res["lever"], "EV-907")
+        self.assertEqual(ev.get_lever("EV-907")["status"], "nudged")
+
+    def test_fresh_claim_is_left_alone(self):
+        self._lever(id="EV-908", feature="busy_now", status="evolving",
+                    claimed_at=_iso(datetime.now(timezone.utc)))
+        with mock.patch.object(ev, "_collect_new", return_value=[]):
+            res = ev.scan()
+        self.assertFalse(res["acted"])
+        self.assertEqual(ev.get_lever("EV-908")["status"], "evolving")
 
 
 class SyncOutcomesTest(EvolveBase):
