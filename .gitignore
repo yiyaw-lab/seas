@@ -37,6 +37,10 @@ docs/build-log/*.html
 data/argo_projects.json
 data/argo_bets.json
 
+# Files the user sends Argo over Telegram (argo_webhook saves them; the durable
+# copy lives on the Railway volume via ARGO_FILES_DIR)
+data/files/
+
 # Transient daily-budget counter (argo_guard)
 data/argo_budget.json
 

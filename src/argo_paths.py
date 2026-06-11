@@ -56,3 +56,7 @@ SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
 # (the test patch points), so their helpers read the override at call time.
 INCIDENTS_PATH = Path(os.environ.get("ARGO_INCIDENTS_PATH", str(DATA / "argo_incidents.json")))
 PROPOSALS_PATH = Path(os.environ.get("ARGO_PROPOSALS_PATH", str(DATA / "argo_proposals.json")))
+# Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
+# saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
+# volume or a redeploy wipes them. Gitignored.
+FILES_DIR = Path(os.environ.get("ARGO_FILES_DIR", str(DATA / "files")))

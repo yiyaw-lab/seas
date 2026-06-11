@@ -696,12 +696,33 @@ def _select_latest_project(project_id=None):
     return argo_rating.select_latest_project(PROJECTS_LOG, project_id)
 
 
-def _download_telegram_photo(msg):
-    """Download the largest photo in a Telegram message. Returns (bytes,
-    media_type) or (None, None). Telegram sends photos in two steps: getFile to
-    resolve a file_path, then download from the file CDN — both need the token."""
+def _download_telegram_file(file_id):
+    """Download any Telegram file by file_id. Returns (bytes, file_path) or
+    (None, None). Two steps: getFile to resolve a CDN file_path, then download
+    from the file CDN — both need the token."""
     import urllib.request
 
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not file_id or not token:
+        return None, None
+    ctx = argo_http.tls_context()
+    try:
+        api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
+        with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
+            path = json.loads(r.read().decode()).get("result", {}).get("file_path")
+        if not path:
+            return None, None
+        dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
+        with urllib.request.urlopen(dl, timeout=30, context=ctx) as r:
+            return r.read(), path
+    except Exception as exc:
+        log.warning("telegram file download failed: %s", exc)
+        return None, None
+
+
+def _download_telegram_photo(msg):
+    """Download the largest photo in a Telegram message. Returns (bytes,
+    media_type) or (None, None)."""
     # Telegram delivers an image two ways:
     #   - "photo" (compressed, via the image picker): msg['photo'] = [sizes...]
     #   - "document" (sent as a FILE, common on desktop / to keep quality):
@@ -716,26 +737,13 @@ def _download_telegram_photo(msg):
     elif doc and str(doc.get("mime_type", "")).startswith("image/"):
         file_id = doc.get("file_id")
         media = doc.get("mime_type")
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not file_id or not token:
+    data, path = _download_telegram_file(file_id)
+    if data is None:
         return None, None
-    ctx = argo_http.tls_context()
-    try:
-        api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
-        with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
-            path = json.loads(r.read().decode()).get("result", {}).get("file_path")
-        if not path:
-            return None, None
-        dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
-        with urllib.request.urlopen(dl, timeout=20, context=ctx) as r:
-            data = r.read()
-        # Prefer the document's declared mime_type; else infer from the path.
-        if not media:
-            media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
-        return data, media
-    except Exception as exc:
-        print(f"photo download failed: {exc}")
-        return None, None
+    # Prefer the document's declared mime_type; else infer from the path.
+    if not media:
+        media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+    return data, media
 
 
 def _handle_photo(chat_id, msg):
@@ -784,6 +792,111 @@ def _handle_photo(chat_id, msg):
     send_telegram.send_message(reply)
 
 
+# Files Argo reads inline as text, by extension (Telegram clients' mime types
+# are unreliable for these). Anything else non-PDF is saved but not parsed.
+_TEXT_EXTS = frozenset({
+    ".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".toml", ".xml",
+    ".py", ".js", ".ts", ".html", ".css", ".sh", ".log",
+})
+_MAX_FILE_CHARS = 12000  # keep a huge file from blowing the prompt/budget
+_MAX_FILE_BYTES = 19 * 1024 * 1024  # Telegram's bot-API download cap is 20MB
+
+# Re-exported so tests can patch wh.FILES_DIR; helpers read it at call time.
+FILES_DIR = argo_paths.FILES_DIR
+
+
+def _save_incoming_file(name, data):
+    """Persist a user-sent file into FILES_DIR (point ARGO_FILES_DIR at the
+    Railway volume so it survives redeploys). Returns the saved Path. The name
+    is sanitized to a safe basename and uniquified, never overwritten."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "file").name) or "file"
+    files_dir = Path(FILES_DIR)
+    files_dir.mkdir(parents=True, exist_ok=True)
+    dest = files_dir / safe
+    n = 1
+    while dest.exists():
+        dest = files_dir / f"{Path(safe).stem}-{n}{Path(safe).suffix}"
+        n += 1
+    dest.write_bytes(data)
+    return dest
+
+
+def _handle_document(chat_id, msg):
+    """A non-image file (PDF, notes, csv, code...): download it, SAVE it to
+    FILES_DIR, and read it through the normal history-aware brain. Previously
+    these fell through the text guard and were silently dropped — the user
+    sent Argo a file and got nothing back."""
+    import base64
+
+    doc = msg.get("document") or {}
+    caption = msg.get("caption", "") or ""
+    name = doc.get("file_name") or "file"
+    if (doc.get("file_size") or 0) > _MAX_FILE_BYTES:
+        send_telegram.send_message(
+            f"{name} is over Telegram's 20MB bot limit so I can't pull it "
+            "down. mind sending a smaller version or a link?")
+        return
+    data, _ = _download_telegram_file(doc.get("file_id"))
+    if data is None:
+        send_telegram.send_message(
+            f"got {name} but couldn't pull it down, mind resending?")
+        return
+    try:
+        saved_note = f"saved to {_save_incoming_file(name, data)}"
+    except OSError as exc:
+        log.warning("could not save incoming file %s: %s", name, exc)
+        saved_note = "could not be saved to disk"
+
+    mime = str(doc.get("mime_type") or "")
+    suffix = Path(name).suffix.lower()
+    caption_note = caption or "[no caption -- react to the file]"
+    anthropic_only = False
+    if mime == "application/pdf" or suffix == ".pdf":
+        # Claude reads PDFs natively via a document block (vision models only).
+        anthropic_only = True
+        content = [
+            {"type": "document", "source": {
+                "type": "base64", "media_type": "application/pdf",
+                "data": base64.b64encode(data).decode(),
+            }},
+            {"type": "text",
+             "text": f"[the user sent this PDF: {name}, {saved_note}] "
+                     f"{caption_note}"},
+        ]
+    elif mime.startswith("text/") or suffix in _TEXT_EXTS:
+        body = data.decode("utf-8", errors="replace")
+        clipped = ""
+        if len(body) > _MAX_FILE_CHARS:
+            body = body[:_MAX_FILE_CHARS]
+            clipped = ", clipped here because it's long"
+        content = (f"[the user sent a file: {name}, {saved_note}{clipped}]\n"
+                   f"---\n{body}\n---\n{caption_note}")
+    else:
+        content = (f"[the user sent a file you can't read inline: {name} "
+                   f"({mime or 'unknown type'}), {saved_note}. acknowledge it "
+                   f"honestly and ask what they want done with it] {caption_note}")
+
+    log_user_text = f"[file: {name}]{(' ' + caption) if caption else ''}"
+    try:
+        reply = _generate_reply(chat_id, content, log_user_text,
+                                route_text=caption,
+                                anthropic_only=anthropic_only)
+    except Exception as exc:
+        send_telegram.send_message(f"saved {name} but couldn't read it: {exc}")
+        return
+    if reply is None:
+        # PDFs need a Claude model; or no model is configured at all. Still
+        # record the turn so the gap shows up in history.
+        _append_turn(chat_id, profile.name(), log_user_text)
+        no_model_msg = (f"saved {name}, but I can't read it right now (no "
+                        "usable model configured). mind telling me what's in "
+                        "it, or resending in a bit?")
+        _append_turn(chat_id, "Argo", no_model_msg)
+        send_telegram.send_message(no_model_msg)
+        return
+    send_telegram.send_message(reply)
+
+
 def handle_update(update):
     """Process one Telegram update dict; send a reply. Pure-ish + testable."""
     msg = update.get("message") or update.get("channel_post") or {}
@@ -799,6 +912,12 @@ def handle_update(update):
     is_image = bool(msg.get("photo")) or str(doc.get("mime_type", "")).startswith("image/")
     if chat_id is not None and is_image:
         _handle_photo(chat_id, msg)
+        return
+
+    # Any other attached file (PDF, notes, csv, code...) also has no `text` and
+    # used to fall through the guard below — silently dropped.
+    if chat_id is not None and doc:
+        _handle_document(chat_id, msg)
         return
 
     if chat_id is None or not text:
@@ -837,6 +956,24 @@ def handle_update(update):
             send_telegram.send_message("Dropped it. I'll stop flagging that one for now.")
         else:
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
+        return
+
+    # EVOLVE / SKIP gate: the frontier loop offered a stack upgrade. EVOLVE rehearses
+    # big levers with Argo's own adversaries, then drafts the real PR (the same
+    # propose path as FIX -- human merge only); SKIP drops it and mutes that lever
+    # for a month. Kept upstream of the model like FIX/IGNORE, so an upgrade only
+    # ships on an explicit human okay and the PR is opened by code, never narrated.
+    if word in ("EVOLVE", "SKIP"):
+        import argo_evolve
+        if word == "SKIP":
+            send_telegram.send_message(argo_evolve.decline_pending())
+        elif not argo_evolve.has_pending():
+            send_telegram.send_message("Nothing staged to evolve right now. I'll "
+                                       "flag the next upgrade I spot.")
+        else:
+            send_telegram.send_message("on it. i'll stress-test the idea and draft "
+                                       "the PR. this takes a couple minutes.")
+            send_telegram.send_message(argo_evolve.accept_pending())
         return
 
     # SELECT gate: the user commits to a project. Bare "SELECT" locks in the
@@ -1161,6 +1298,17 @@ def create_asgi_app():
 
 def main():
     self_register_webhook()
+    # In-process scheduler for the volume-dependent commands (diagnose, frontier):
+    # the Actions scheduler can't run these -- its checkout has no incident or
+    # evolution state, and this webhook can never read what it stages over there --
+    # so the webhook runs them against its own filesystem. Daemon thread: it can
+    # never hold the process open. ARGO_LOCAL_SCHEDULER=0 disables it.
+    if os.environ.get("ARGO_LOCAL_SCHEDULER", "1") != "0":
+        def _local_sched():
+            import argo_scheduled
+            argo_scheduled.local_loop()
+        threading.Thread(target=_local_sched, daemon=True,
+                         name="argo-local-scheduler").start()
     # Startup diagnostics (no secrets) so the Railway logs show whether tools are
     # actually wired — the invisible config that's bitten us repeatedly.
     anthropic_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
