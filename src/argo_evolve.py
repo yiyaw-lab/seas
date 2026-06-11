@@ -95,9 +95,10 @@ def _send(text):
 def _propose(payload):
     """Open the upgrade PR through the existing self-fix path: author files with the
     premium model, run the repro-test + wiring gates, open the PR, record it in the
-    proposals ledger. Lazy import keeps the no-EVOLVE path light."""
+    proposals ledger. Returns (text, info_or_None); info carries the PR number when
+    one actually opened. Lazy import keeps the no-EVOLVE path light."""
     import argo_mcp_server
-    return argo_mcp_server._run_propose_fix(payload)
+    return argo_mcp_server._run_propose_fix(payload, return_info=True)
 
 
 # --- seen-store (own namespace; argo_watch's shape and identity) --------------
@@ -357,13 +358,16 @@ def _offer(lever_id):
         f"Adopting {lever.get('feature')} would improve me: "
         f"{lever.get('expected_benefit', '')}",
         kind="capability", source="evolution")
+    # Persist the belief id before the send so a delivery-failure retry reuses it
+    # instead of minting a duplicate belief.
+    _update_lever(lever_id, self_belief_id=bid)
     sent = _send(_nudge_text(lever))
     if not sent:
         log.warning("evolve: nudge delivery failed for %s; will retry", lever_id)
         return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
     _stage(lever_id)
     _record_nudge()
-    _update_lever(lever_id, status="nudged", self_belief_id=bid)
+    _update_lever(lever_id, status="nudged")
     log.info("evolve: staged + nudged %s (%s)", lever_id, lever.get("feature"))
     return {"acted": True, "lever": lever_id, "feature": lever.get("feature")}
 
@@ -427,7 +431,9 @@ def scan():
         "affected_files": files,
         "expected_benefit": (result.get("expected_benefit") or "").strip(),
         "risk": (result.get("risk") or "").strip(),
-        "magnitude": magnitude, "status": "new", "muted_until": None,
+        # nudge-ready (not "new") so a failed nudge send is retried by GATE 3
+        # next scan instead of stranding the lever and blocking its feature.
+        "magnitude": magnitude, "status": "nudge-ready", "muted_until": None,
         "self_belief_id": None, "world_belief_id": None,
         "prediction_id": None, "prediction_spec": None,
         "pr_number": None, "rehearse": None,
@@ -486,18 +492,6 @@ def _rehearse_lever(lever):
         return None, type(exc).__name__
 
 
-def _find_pr_for(belief_id):
-    """Join the freshly-opened PR back from the proposals ledger by self-belief id
-    (newest first -- _run_propose_fix records it there via append_proposal)."""
-    if not belief_id:
-        return None
-    import argo_diagnose
-    for p in reversed(argo_diagnose._load_proposals()):
-        if p.get("belief_id") == belief_id and p.get("pr_number"):
-            return p["pr_number"]
-    return None
-
-
 def accept_pending():
     """User replied EVOLVE: rehearse (major levers), record the world-model belief
     + dated prediction, then draft the PR through the existing propose path.
@@ -553,16 +547,15 @@ def accept_pending():
         "kind": "evolution",
     }
     try:
-        text = _propose(payload)
+        text, info = _propose(payload)
     except Exception:
         log.error("evolve: propose failed for %s", lid, exc_info=True)
-        text = None
-    pr = _find_pr_for(lever.get("self_belief_id"))
-    if pr is None:
+        text, info = None, None
+    if not info:
         _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED))
         return text or ("I tried to draft the upgrade PR but hit an error before "
                         "it opened. I'll let this one rest a week.")
-    _update_lever(lid, status="pr_open", pr_number=pr)
+    _update_lever(lid, status="pr_open", pr_number=info["pr_number"])
     return text
 
 
@@ -606,8 +599,8 @@ def sync_proposal_outcomes():
                     lever["status"] = "confirmed"
                     if wm_id:
                         world_model.add_evidence(
-                            wm_id, f"PR #{n} merged and held through the "
-                                   f"post-deploy watch")
+                            wm_id, f"PR #{n} merged; first day post-deploy "
+                                   f"was quiet")
                 else:
                     lever["status"] = "failed"
                     lever["muted_until"] = _mute_until(MUTE_DAYS_FAILED)

@@ -387,7 +387,17 @@ def confirm_deployed():
         if now_iso < p["deploy_watch_until"]:
             continue  # still watching
         n = p["pr_number"]
-        if argo_incidents.recurred_since(p["incident_key"], p.get("merged_at") or ""):
+        if not p.get("incident_key"):
+            # Not failure-driven (e.g. an evolution upgrade): there is no incident
+            # to check for recurrence, so don't claim "it held" -- just record the
+            # quiet first day and leave the benefit claim to its dated prediction.
+            argo_self.resolve_self_belief(
+                p["belief_id"],
+                f"PR #{n} merged, CI green, quiet first day after deploy "
+                f"(no incident check applies)")
+            _send(f"the upgrade (PR #{n}) merged and nothing broke in the first "
+                  f"day. my dated prediction will grade the real benefit.")
+        elif argo_incidents.recurred_since(p["incident_key"], p.get("merged_at") or ""):
             argo_self.add_evidence(
                 p["belief_id"], f"incident recurred after PR #{n} merged", supports=False)
             argo_incidents.mark(p["incident_key"], status="open")

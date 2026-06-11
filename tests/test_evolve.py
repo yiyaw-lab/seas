@@ -134,6 +134,37 @@ class FunnelGateTest(EvolveBase):
         self.assertEqual(seen["a"], ev.MAX_ATTEMPTS)  # chosen item settled
         self.assertEqual(seen["b"], 1)                # unused item bumped
 
+    def test_failed_nudge_leaves_lever_retryable(self):
+        items = [{"title": "SDK v9 ships X", "summary": "s", "link": "http://a",
+                  "source": "sdk", "_iid": "a"}]
+        result = {"relevant": True, "feature": "shiny_thing",
+                  "lever": "adopt it", "affected_files": ["src/argo_store.py"],
+                  "expected_benefit": "cheaper", "risk": "low",
+                  "magnitude": "minor", "source_title": "SDK v9 ships X"}
+        with mock.patch.object(ev, "_send", lambda t: False), \
+             mock.patch.object(ev, "_collect_new", return_value=items), \
+             mock.patch.object(ev, "_map_levers", return_value=result):
+            res = ev.scan()
+        self.assertFalse(res["acted"])
+        self.assertIn("nudge delivery failed", res["reason"])
+        self.assertFalse(ev.has_pending())
+        lever = ev.get_lever(res["lever"])
+        self.assertEqual(lever["status"], "nudge-ready")  # retryable, not stranded
+        bid = lever["self_belief_id"]
+        self.assertTrue(bid)                              # belief persisted pre-send
+        # The next scan retries via the seed gate: no fetch, no mapper, no new belief.
+        with mock.patch.object(ev, "_collect_new",
+                               side_effect=AssertionError("fetch must not run")), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            res2 = ev.scan()
+        self.assertTrue(res2["acted"])
+        self.assertEqual(res2["lever"], res["lever"])
+        lever = ev.get_lever(res2["lever"])
+        self.assertEqual(lever["status"], "nudged")
+        self.assertEqual(lever["self_belief_id"], bid)
+        self.assertEqual(len(argo_self.get_self_beliefs(kind="capability")), 1)
+
     def test_mapper_failure_does_not_penalize_seen(self):
         items = [{"title": "t", "summary": "", "link": "http://a",
                   "source": "sdk", "_iid": "a"}]
@@ -222,7 +253,8 @@ class GateCommandsTest(EvolveBase):
             captured.update(payload)
             dg.append_proposal(101, "http://pr/101", payload["belief_id"],
                                payload["incident_key"])
-            return "Drafted a fix and opened http://pr/101 for your review."
+            return ("Drafted a fix and opened http://pr/101 for your review.",
+                    {"pr_number": 101, "url": "http://pr/101"})
 
         with mock.patch.object(ev, "_propose", side_effect=fake_propose), \
              mock.patch.object(ev, "_rehearse_lever",
@@ -272,12 +304,27 @@ class GateCommandsTest(EvolveBase):
         self._lever(id="EV-903", feature="meh", magnitude="minor")
         ev._stage("EV-903")
         with mock.patch.object(ev, "_propose",
-                               return_value="I couldn't draft a fix I trust for that one."):
+                               return_value=("I couldn't draft a fix I trust for that one.",
+                                             None)):
             text = ev.accept_pending()
         self.assertIn("couldn't draft", text)
         lever = ev.get_lever("EV-903")
         self.assertEqual(lever["status"], "failed")
         self.assertIsNotNone(lever["muted_until"])
+
+    def test_accept_tracks_pr_even_if_ledger_append_failed(self):
+        self._lever(id="EV-904", feature="lucky", magnitude="minor")
+        ev._stage("EV-904")
+        # _propose opened a real PR but the proposals-ledger write failed: the lever
+        # must still go pr_open with the returned number, never "failed".
+        with mock.patch.object(ev, "_propose",
+                               return_value=("Drafted a fix and opened http://pr/202.",
+                                             {"pr_number": 202, "url": "http://pr/202"})):
+            text = ev.accept_pending()
+        self.assertIn("http://pr/202", text)
+        lever = ev.get_lever("EV-904")
+        self.assertEqual(lever["status"], "pr_open")
+        self.assertEqual(lever["pr_number"], 202)
 
     def test_accept_with_nothing_staged(self):
         self.assertIn("Nothing staged", ev.accept_pending())
@@ -319,7 +366,7 @@ class SyncOutcomesTest(EvolveBase):
         ev.sync_proposal_outcomes()
         self.assertEqual(ev.get_lever("EV-910")["status"], "confirmed")
         belief = wm.get_belief(wm_id)
-        self.assertTrue(any("held" in e for e in belief["evidence"]))
+        self.assertTrue(any("quiet" in e for e in belief["evidence"]))
 
     def test_ci_failure_fails_the_lever_and_refutes(self):
         _, wm_id, _ = self._adopted_lever()

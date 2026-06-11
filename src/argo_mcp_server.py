@@ -1407,19 +1407,24 @@ def _author_fix_files(payload):
     return None
 
 
-def _run_propose_fix(payload):
+def _run_propose_fix(payload, return_info=False):
     """FIX path: draft the fix files, run them through the propose gate + open the PR,
     and record the PR in the proposal ledger so verify/confirm can follow it to
-    resolution. Honest acks only -- proposed and pending review, never 'fixed.'"""
+    resolution. Honest acks only -- proposed and pending review, never 'fixed.'
+    With return_info=True, returns (text, info_or_None) so the caller learns the PR
+    number directly instead of re-joining through the proposals ledger."""
+    def _done(text, info=None):
+        return (text, info) if return_info else text
     files = _author_fix_files(payload)
     if not files:
-        return ("I couldn't draft a fix I trust for that one (no small, testable change). "
-                "I'll leave it for you rather than open a shaky PR.")
+        return _done("I couldn't draft a fix I trust for that one (no small, testable "
+                     "change). I'll leave it for you rather than open a shaky PR.")
     text, info = _propose_change_impl(
         payload.get("title", "Argo self-fix"), payload.get("description", ""),
         json.dumps(files))
     if not info:
-        return f"I drafted a fix but it didn't pass my own checks, so I didn't open it: {text}"
+        return _done(f"I drafted a fix but it didn't pass my own checks, so I didn't "
+                     f"open it: {text}")
     try:
         import argo_diagnose
         argo_diagnose.append_proposal(
@@ -1427,8 +1432,8 @@ def _run_propose_fix(payload):
             payload.get("incident_key"), head_sha=info.get("head_sha"))
     except Exception:
         log.error("propose_fix: could not record proposal in ledger", exc_info=True)
-    return (f"Drafted a fix with a reproduction test and opened {info['url']} for your "
-            f"review, pending CI. I can't merge it myself.")
+    return _done(f"Drafted a fix with a reproduction test and opened {info['url']} for "
+                 f"your review, pending CI. I can't merge it myself.", info)
 
 
 def mcp_asgi_app():
