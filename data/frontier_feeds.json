@@ -1,0 +1,10 @@
+{
+  "_comment": "Frontier-MOVEMENT sources for the evolution loop (argo_evolve): releases and announcements about Argo's own stack (models, SDKs, MCP), not project signals (those live in feeds.json). fetch_signals.load_frontier_feeds() loads this. Add a feed by appending {label, url} -- Argo can propose this via a Contents-only PR. GitHub releases always expose an Atom feed at .../releases.atom; the platform.claude.com release-notes page has no feed (a scraper for it is itself a future evolution lever).",
+  "feeds": [
+    { "label": "anthropic-sdk-python releases", "url": "https://github.com/anthropics/anthropic-sdk-python/releases.atom" },
+    { "label": "claude-code releases", "url": "https://github.com/anthropics/claude-code/releases.atom" },
+    { "label": "claude-agent-sdk-python releases", "url": "https://github.com/anthropics/claude-agent-sdk-python/releases.atom" },
+    { "label": "mcp servers releases", "url": "https://github.com/modelcontextprotocol/servers/releases.atom" },
+    { "label": "Anthropic News (community RSS)", "url": "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml" }
+  ]
+}

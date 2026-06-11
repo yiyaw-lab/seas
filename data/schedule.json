@@ -1,5 +1,5 @@
 {
-  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect' | 'diagnose'.",
+  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour; the webhook's in-process local scheduler fires the volume-dependent commands (diagnose, frontier) the same way. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect' | 'diagnose' | 'frontier'.",
   "schedules": [
     {
       "name": "Weekly project (Fri)",
@@ -28,6 +28,13 @@
       "hour": 13,
       "command": "diagnose",
       "enabled": true
+    },
+    {
+      "name": "Frontier evolution",
+      "days": "daily",
+      "hour": 17,
+      "command": "frontier",
+      "enabled": false
     }
   ]
 }

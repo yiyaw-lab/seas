@@ -106,9 +106,25 @@ plain text only — no markdown, no em dashes; sources cited like a human, never
 (never trust the model to self-limit); the `/mcp` endpoint is bearer-auth'd;
 secrets come from env/.env and are `.strip()`-ed. Never commit secrets.
 
+**Scheduled/background behavior — the placement triad.** Any scheduled or
+background behavior must state, in its docstring or PR, (1) where it TRIGGERS
+(Actions cron vs the webhook's in-process `local_loop`), (2) which FILESYSTEM it
+reads/writes (a fresh Actions checkout vs the Railway volume), and (3) who
+CONSUMES the result — and all three must be the same place or explicitly
+bridged, with a guard or test proving it. Hard-won: the diagnose loop sat
+structurally inert for days because it was scheduled on Actions where its
+(gitignored) ledger is always empty. Volume-bound commands belong in
+`argo_scheduled.LOCAL_COMMANDS`; Actions keeps the delivery jobs.
+
 **Git.** Commit only when asked. Small, surgical commits; subject + the
 `Co-Authored-By` trailer. `data/signals.json`, chat logs, and `COST_PLAYBOOK.md`
-are gitignored — don't commit them.
+are gitignored — don't commit them. Before opening any PR, run an adversarial
+review of the branch diff (`/code-review` at high effort) and fix or explicitly
+defer what it finds — an external review bot found 7 real state-machine/
+failure-path issues on a PR this suite had passed (see memory:
+pr11-bugbot-lessons-state-machines). When committing from a tree that peers are
+also editing, follow the /commit-mine procedure: positive hunk selection,
+staged-snapshot test via `checkout-index`, foreign-symbol review.
 
 **Cost.** Default model is Sonnet; escalate to Opus only for architecture, a
 stalled bug, cross-cutting refactors, or high-stakes work — and flag it when you

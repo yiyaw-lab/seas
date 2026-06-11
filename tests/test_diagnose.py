@@ -116,5 +116,55 @@ class DiagnoseFunnelTest(unittest.TestCase):
         self.assertTrue(res["acted"])  # re-diagnosed, not skipped
 
 
+class ConfirmDeployedTest(unittest.TestCase):
+    """confirm_deployed closes the post-merge watch: incident-keyed proposals are
+    graded against the incident ledger; null-key ones (evolution upgrades) resolve
+    honestly without claiming a recurrence check that never ran."""
+
+    def setUp(self):
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(inc, "INCIDENTS_PATH", base / "inc.json"))
+        self.enterContext(mock.patch.object(dg, "PROPOSALS_PATH", base / "prop.json"))
+        self.enterContext(mock.patch.object(argo_self, "SELF_PATH", base / "self.json"))
+        self.sent = []
+        self.enterContext(mock.patch.object(dg, "_send", lambda t: self.sent.append(t) or True))
+
+    def _merged_proposal(self, bid, incident_key, n=9):
+        dg.append_proposal(n, f"http://pr/{n}", bid, incident_key)
+        items = dg._load_proposals()
+        items[0].update(merged=True, merged_at="2026-06-01T00:00:00Z",
+                        deploy_watch_until="2026-06-02T00:00:00Z")  # window elapsed
+        dg._save_proposals(items)
+
+    def test_null_incident_key_resolves_without_recurrence_claim(self):
+        bid = argo_self.add_self_belief("adopting x improves me", kind="capability",
+                                        source="evolution")
+        self._merged_proposal(bid, None)
+        with mock.patch.object(inc, "recurred_since",
+                               side_effect=AssertionError("no incident to check")):
+            dg.confirm_deployed()
+        p = dg._load_proposals()[0]
+        self.assertTrue(p["resolved"])
+        self.assertIs(p["held"], True)  # stamped for downstream outcome sync
+        belief = next(b for b in argo_self.get_self_beliefs() if b["id"] == bid)
+        self.assertEqual(belief["status"], "resolved")
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("dated prediction", self.sent[0])  # honest evolution wording
+        self.assertNotIn("no recurrence", self.sent[0])
+
+    def test_incident_recurrence_refutes_and_reopens(self):
+        bid = argo_self.add_self_belief("i drop messages", kind="capability")
+        key = inc.record_incident("phantom_send", "claimed but no tool fired")
+        self._merged_proposal(bid, key)  # incident seen after merged_at -> recurred
+        dg.confirm_deployed()
+        p = dg._load_proposals()[0]
+        self.assertTrue(p["resolved"])
+        self.assertIs(p["held"], False)
+        belief = next(b for b in argo_self.get_self_beliefs() if b["id"] == bid)
+        self.assertTrue(belief.get("refutations"))
+        self.assertIn("didn't hold", self.sent[0])
+        self.assertEqual(inc.get_cluster(key)["status"], "open")
+
+
 if __name__ == "__main__":
     unittest.main()

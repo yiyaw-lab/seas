@@ -25,8 +25,11 @@ COST_PLAYBOOK.md
 # Strategy / vision / design docs — keep local, not in the repo
 BRAND.md
 VISION.md
+ROADMAP.md
+ROADMAP.html
 argo-v3-deck.html
 seasar-landing.html
+proof-draft.html
 docs/DESIGN_dispatch_to_coder.md
 
 # Investor / pitch letters and internal HTML build reports
@@ -57,6 +60,16 @@ data/argo_self.json
 # Railway volume so they survive redeploys.
 data/argo_incidents.json
 data/argo_proposals.json
+
+# Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
+# seen-store, lever ledger, EVOLVE staging slot, prediction store, and the local
+# scheduler's dedupe state. Runtime state; ARGO_* overrides point them at the
+# Railway volume. (frontier_feeds.json and stack_manifest.json stay committed.)
+data/argo_frontier_seen.json
+data/argo_evolution.json
+data/argo_pending_evolve.json
+data/argo_predictions.json
+data/schedule_state_local.json
 
 # Local Claude Code agent config (not project code)
 .claude/

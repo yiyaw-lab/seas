@@ -22,11 +22,16 @@ Standard-library only. JSON store at data/world_model.json.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WORLD_MODEL_PATH = ROOT / "data" / "world_model.json"
+# Env-overridable like the other live stores (argo_paths): the webhook and the
+# evolution loop write beliefs at runtime, so point ARGO_WORLD_MODEL_PATH at the
+# Railway volume or each redeploy resets to the committed copy.
+WORLD_MODEL_PATH = Path(os.environ.get("ARGO_WORLD_MODEL_PATH",
+                                       str(ROOT / "data" / "world_model.json")))
 FINDINGS_DIR = ROOT / "findings"
 
 # Confidence is clamped to an open interval: a belief is never certain (1.0) and

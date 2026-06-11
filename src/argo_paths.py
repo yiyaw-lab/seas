@@ -56,7 +56,27 @@ SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
 # (the test patch points), so their helpers read the override at call time.
 INCIDENTS_PATH = Path(os.environ.get("ARGO_INCIDENTS_PATH", str(DATA / "argo_incidents.json")))
 PROPOSALS_PATH = Path(os.environ.get("ARGO_PROPOSALS_PATH", str(DATA / "argo_proposals.json")))
+# Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
+# seen-store, the lever ledger, the single-slot EVOLVE staging file, and the dated
+# prediction store. All written at webhook/scheduler time on the live bot, so point
+# the ARGO_* overrides at the Railway volume or each redeploy wipes them. All
+# gitignored. Home modules re-export these as module-level constants (the test
+# patch points), same convention as the stores above.
+FRONTIER_SEEN_PATH = Path(os.environ.get("ARGO_FRONTIER_SEEN_PATH",
+                                         str(DATA / "argo_frontier_seen.json")))
+EVOLUTION_PATH = Path(os.environ.get("ARGO_EVOLUTION_PATH",
+                                     str(DATA / "argo_evolution.json")))
+PENDING_EVOLVE_PATH = Path(os.environ.get("ARGO_PENDING_EVOLVE_PATH",
+                                          str(DATA / "argo_pending_evolve.json")))
+PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
+                                       str(DATA / "argo_predictions.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.
 FILES_DIR = Path(os.environ.get("ARGO_FILES_DIR", str(DATA / "files")))
+# The webhook's in-process scheduler (argo_scheduled.local_loop) keeps its OWN
+# dedupe state, separate from schedule_state.json: the Actions runner commits that
+# file into the repo, so sharing it would let an inert Actions fire consume the
+# webhook's fire key for the day via the deploy-time checkout.
+LOCAL_STATE_PATH = Path(os.environ.get("ARGO_LOCAL_SCHED_STATE",
+                                       str(DATA / "schedule_state_local.json")))

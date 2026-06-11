@@ -56,6 +56,17 @@ class IncidentLedgerTest(unittest.TestCase):
         key = inc.record_incident("not_a_real_kind", "whatever")
         self.assertTrue(key.startswith("other|"))
 
+    # --- seen_since (kind-level recurrence, used by the prediction scorer) ---
+
+    def test_seen_since_true_only_for_kind_seen_after_cutoff(self):
+        inc.record_incident("scheduler_task_error", "boom")
+        self.assertTrue(inc.seen_since("scheduler_task_error", "2020-01-01T00:00:00Z"))
+        self.assertFalse(inc.seen_since("scheduler_task_error", "2099-01-01T00:00:00Z"))
+        self.assertFalse(inc.seen_since("tool_error", "2020-01-01T00:00:00Z"))
+
+    def test_seen_since_empty_store_is_false_and_never_raises(self):
+        self.assertFalse(inc.seen_since("tool_error", "2020-01-01T00:00:00Z"))
+
     def test_samples_capped_to_three_newest_first(self):
         for i in range(5):
             inc.record_incident("tool_error", "same sig", f"sample{i}")
