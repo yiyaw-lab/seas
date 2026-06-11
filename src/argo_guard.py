@@ -101,6 +101,11 @@ class CircuitBreaker:
                 self.opened_at = time.monotonic()
                 log.warning("circuit '%s' OPENED after %d failures",
                             self.name, self.failures)
+                try:  # late import: guard is a low-level dep, avoid an import cycle
+                    import argo_incidents
+                    argo_incidents.record_incident("circuit_open", self.name)
+                except Exception:
+                    pass
             raise
         # success: reset
         if self.failures or self.opened_at:

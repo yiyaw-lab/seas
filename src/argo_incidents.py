@@ -1,0 +1,216 @@
+"""Argo's operational-failure ledger: the 'observe' layer of the self-improvement loop.
+
+Every operational failure used to go only to stdout (Railway/Actions console) and was
+forgotten -- so the human was the only failure detector. This module turns those
+ephemeral log lines into durable, deduplicated data Argo can read back and reason
+about, which is what lets the daily `diagnose` pass surface its own recurring problems
+proactively instead of waiting to be told.
+
+The store is a ROLLUP MAP keyed by `kind|fingerprint`, not an append log: a flapping
+failure increments a count in place, so a single broken dependency can't flood the
+ledger (the structural guard against self-flooding). The fingerprint strips the volatile
+parts of a signature (digits, UUIDs, URLs) so 'sendMessage failed: 503 at 14:03' and
+'sendMessage failed: 502 at 17:55' collapse into one cluster.
+
+Inviolable contract: record_incident is called from inside other modules' failure
+handlers, so it MUST NEVER raise -- a bug here can't be allowed to turn a logged failure
+into a crashed chat turn or scheduler run. Every public function swallows store errors.
+
+Status lifecycle of a cluster: open -> diagnosed -> proposed -> resolved, with `muted`
+(user said IGNORE) as a side state. A resolved problem that happens again is, by
+definition, open again: record_incident flips resolved->open on recurrence (the ledger
+is its own post-deploy verifier -- a fix that didn't hold reappears here).
+
+Standard-library + the shared-utils layer (argo_store/argo_paths/argo_log). JSON store at
+data/argo_incidents.json (gitignored; ARGO_INCIDENTS_PATH points it at the Railway volume).
+"""
+
+import re
+from datetime import datetime, timedelta, timezone
+
+import argo_paths
+import argo_store
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
+# Re-exported so tests can patch the module global (mock.patch.object(argo_incidents,
+# "INCIDENTS_PATH", tmp)); helpers read the bare name at call time so the override bites.
+INCIDENTS_PATH = argo_paths.INCIDENTS_PATH
+
+# Fixed kinds so a typo can't spawn a phantom bucket; an unknown kind coerces to "other"
+# (typos collapse into one harmless cluster instead of proliferating).
+INCIDENT_KINDS = frozenset({
+    "phantom_send", "budget_exceeded", "model_failure", "tool_error",
+    "circuit_open", "scheduler_task_error", "delivery_failure", "other",
+})
+
+MAX_SAMPLES = 3        # keep the few most recent example messages per cluster
+SAMPLE_CHARS = 240     # cap each sample so the ledger stays small
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).strftime(_TS_FMT)
+
+
+def _parse(ts):
+    """Parse a stored timestamp to an aware datetime, or None if unparseable."""
+    try:
+        return datetime.strptime(ts, _TS_FMT).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load():
+    store = argo_store.load_json(INCIDENTS_PATH, {})
+    return store if isinstance(store, dict) else {}
+
+
+def _save(store):
+    INCIDENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    argo_store.save_json(INCIDENTS_PATH, store)
+
+
+def _fingerprint(signature):
+    """Collapse a signature to a stable key by stripping the volatile parts -- URLs,
+    UUIDs, long hex (SHAs), and any digit run -- so near-identical failures roll up."""
+    s = (signature or "").strip().lower()
+    s = re.sub(r"https?://\S+", "<url>", s)
+    s = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", s)
+    s = re.sub(r"\b[0-9a-f]{12,}\b", "<hex>", s)
+    s = re.sub(r"\d+", "<n>", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:80] or "unspecified"
+
+
+def record_incident(kind, signature, sample=""):
+    """Record one operational failure into the rollup ledger. Increments the matching
+    cluster's count (creating it if new), refreshes last_seen, and keeps up to the few
+    most recent samples. A recurrence of a resolved cluster reopens it (post-deploy proof
+    a fix did not hold). NEVER raises: returns the cluster key, or None on any store error."""
+    try:
+        if kind not in INCIDENT_KINDS:
+            log.warning("record_incident: unknown kind %r coerced to 'other'", kind)
+            kind = "other"
+        fp = _fingerprint(signature)
+        key = f"{kind}|{fp}"
+        store = _load()
+        now = _now_iso()
+        c = store.get(key)
+        if not isinstance(c, dict):
+            c = {"kind": kind, "fingerprint": fp, "count": 0,
+                 "first_seen": now, "last_seen": now, "samples": [],
+                 "status": "open", "belief_id": None, "pr_number": None,
+                 "resolved_commit": None, "muted_until": None}
+            store[key] = c
+        c["count"] = int(c.get("count", 0)) + 1
+        c["last_seen"] = now
+        if sample:
+            c["samples"] = ([str(sample)[:SAMPLE_CHARS]] + list(c.get("samples", [])))[:MAX_SAMPLES]
+        # A resolved problem that recurs is open again. Mark recurred_after_fix so the
+        # diagnostic ranking can float it to the top, and keep belief_id/pr_number so
+        # re-diagnosis adds refuting evidence to the SAME belief.
+        if c.get("status") == "resolved":
+            c["status"] = "open"
+            c["recurred_after_fix"] = True
+        # A muted cluster whose mute window has passed becomes eligible again.
+        elif c.get("status") == "muted":
+            mu = c.get("muted_until")
+            if mu and mu < now:
+                c["status"] = "open"
+        _save(store)
+        return key
+    except Exception:
+        log.warning("record_incident failed (kind=%s)", kind, exc_info=True)
+        return None
+
+
+def open_clusters(min_count=3, window_hours=24):
+    """Eligible clusters for diagnosis: status 'open', count >= min_count, last seen
+    within window_hours. Ranked worst-first by count, then recency. Free, read-only,
+    never raises (returns [] on error)."""
+    try:
+        store = _load()
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        out = []
+        for key, c in store.items():
+            if key.startswith("_") or not isinstance(c, dict):
+                continue
+            if c.get("status") != "open" or int(c.get("count", 0)) < min_count:
+                continue
+            seen = _parse(c.get("last_seen", ""))
+            if seen is None or seen < cutoff:
+                continue
+            out.append({**c, "key": key})
+        out.sort(key=lambda c: (c.get("count", 0), c.get("last_seen", "")), reverse=True)
+        return out
+    except Exception:
+        log.warning("open_clusters failed", exc_info=True)
+        return []
+
+
+def get_cluster(key):
+    c = _load().get(key)
+    return c if isinstance(c, dict) else None
+
+
+def mark(key, status=None, **fields):
+    """Update a cluster's status and/or arbitrary fields (belief_id, pr_number,
+    muted_until, ...). Returns the updated cluster or None. Never raises."""
+    try:
+        store = _load()
+        c = store.get(key)
+        if not isinstance(c, dict):
+            return None
+        if status is not None:
+            c["status"] = status
+        for k, v in fields.items():
+            c[k] = v
+        _save(store)
+        return c
+    except Exception:
+        log.warning("mark failed (%s)", key, exc_info=True)
+        return None
+
+
+def recurred_since(key, since_iso):
+    """True if the cluster has been seen strictly after since_iso -- the post-deploy
+    recurrence check (last_seen advances on every record_incident)."""
+    c = get_cluster(key)
+    return bool(c and (c.get("last_seen") or "") > (since_iso or ""))
+
+
+def get_meta(meta_key, default=None):
+    """Read a reserved bookkeeping value (keys are namespaced with a leading '_', so
+    they never collide with a cluster key)."""
+    return _load().get(meta_key, default)
+
+
+def set_meta(meta_key, value):
+    try:
+        store = _load()
+        store[meta_key] = value
+        _save(store)
+    except Exception:
+        log.warning("set_meta failed (%s)", meta_key, exc_info=True)
+
+
+def prune(max_age_days=14):
+    """Drop resolved/muted clusters whose last activity is older than max_age_days.
+    Open/diagnosed/proposed clusters and reserved meta keys are always kept."""
+    try:
+        store = _load()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        dropped = [k for k, c in store.items()
+                   if not k.startswith("_") and isinstance(c, dict)
+                   and c.get("status") in ("resolved", "muted")
+                   and (_parse(c.get("last_seen", "")) or datetime.now(timezone.utc)) < cutoff]
+        for k in dropped:
+            del store[k]
+        if dropped:
+            _save(store)
+        return len(dropped)
+    except Exception:
+        log.warning("prune failed", exc_info=True)
+        return 0

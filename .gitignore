@@ -47,6 +47,13 @@ data/argo_pending_heal.json
 # Per-deploy runtime state; schema documented in data/argo_self.example.json.
 data/argo_self.json
 
+# Self-diagnosis ledgers (argo_incidents / argo_diagnose): the operational-failure
+# rollup Argo reads back, and the fix-PR ledger that joins a proposal to its belief.
+# Per-deploy runtime state; point ARGO_INCIDENTS_PATH / ARGO_PROPOSALS_PATH at the
+# Railway volume so they survive redeploys.
+data/argo_incidents.json
+data/argo_proposals.json
+
 # Local Claude Code agent config (not project code)
 .claude/
 data/profile.json

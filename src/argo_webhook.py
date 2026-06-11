@@ -68,6 +68,17 @@ log = get_logger(__name__)
 # time. The rating/project-state helpers themselves live in argo_rating.
 PROJECTS_LOG = argo_paths.PROJECTS_LOG
 
+
+def _note_incident(kind, signature, sample=""):
+    """Record an operational failure into the diagnostic ledger, best-effort. Late
+    import + swallow so observability can never break a chat turn."""
+    try:
+        import argo_incidents
+        argo_incidents.record_incident(kind, signature, sample)
+    except Exception:
+        pass
+
+
 # Optional shared-secret check: Telegram sends this header if you set it on the
 # webhook (set_webhook.py does). Blocks randoms POSTing to your endpoint.
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
@@ -461,10 +472,12 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
             return reply
         except observe.argo_guard.DailyBudget.BudgetExceeded:
             # Hard daily cap hit: stop immediately, don't try other models.
+            _note_incident("budget_exceeded", "daily call budget reached")
             return ("Argo's hit its daily call budget, taking a breather. "
                     "Back tomorrow (or raise the cap).")
         except Exception as exc:
             last_error = exc
+    _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
     return f"(Argo hit an error reaching the model: {last_error})"
 
 
@@ -491,6 +504,10 @@ def _guard_phantom_send(reply, tool_events):
     if _PHANTOM_CLAIM_RE.search(reply):
         log.warning("phantom send suppressed: reply claimed a proposal but no "
                     "project tool fired (events=%s)", tool_events or "none")
+        # highest-signal incident: a self-caught lie about sending.
+        _note_incident("phantom_send",
+                       "reply claimed a proposal but no project tool fired",
+                       f"events={tool_events or 'none'}; reply={reply[:120]}")
         return ("hang on, I didn't actually build anything yet. say 'give me a "
                 "proposal' and I'll ship one for real.")
     return reply
@@ -809,6 +826,19 @@ def handle_update(update):
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
         return
 
+    # FIX / IGNORE gate: the diagnostic loop offered a drafted self-fix. FIX opens the
+    # real PR (run_pending_heal -> propose_fix); IGNORE drops it and mutes that incident
+    # cluster for a week. Kept upstream of the model so a fix only ships on a human okay,
+    # and the PR is genuinely opened by code (the URL is real, never a narrated phantom).
+    if word in ("FIX", "IGNORE"):
+        import argo_mcp_server
+        if word == "IGNORE":
+            argo_mcp_server.decline_pending_fix()
+            send_telegram.send_message("Dropped it. I'll stop flagging that one for now.")
+        else:
+            send_telegram.send_message(argo_mcp_server.run_pending_heal())
+        return
+
     # SELECT gate: the user commits to a project. Bare "SELECT" locks in the
     # latest; "SELECT P-00x" locks in a specific candidate (e.g. the one
     # recommend_project named). Then Rehearse stress-tests the bet BEFORE handing
@@ -996,6 +1026,18 @@ def _health_payload():
         }
     except Exception:
         payload["performance"] = None
+
+    # Open incident clusters Argo has caught about itself -- so the operator can SEE
+    # problems accumulate here instead of waiting for the daily nudge. Local read,
+    # never raises; min_count=1 so a single fresh failure is already visible.
+    try:
+        import argo_incidents
+        payload["incidents"] = [
+            {k: c.get(k) for k in ("kind", "count", "last_seen", "status")}
+            for c in argo_incidents.open_clusters(min_count=1, window_hours=24 * 14)[:10]
+        ]
+    except Exception:
+        payload["incidents"] = []
 
     return payload
 
