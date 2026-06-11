@@ -181,6 +181,23 @@ def recurred_since(key, since_iso):
     return bool(c and (c.get("last_seen") or "") > (since_iso or ""))
 
 
+def seen_since(kind, since_iso):
+    """True if ANY cluster of `kind` has been seen strictly after since_iso -- the
+    kind-level recurrence check (recurred_since is the key-level one). Used by the
+    prediction scorer (argo_predictions) to grade 'this class of failure stays gone'
+    claims. Read-only; never raises (False on any store error)."""
+    try:
+        for key, c in _load().items():
+            if key.startswith("_") or not isinstance(c, dict):
+                continue
+            if c.get("kind") == kind and (c.get("last_seen") or "") > (since_iso or ""):
+                return True
+        return False
+    except Exception:
+        log.warning("seen_since failed (%s)", kind, exc_info=True)
+        return False
+
+
 def get_meta(meta_key, default=None):
     """Read a reserved bookkeeping value (keys are namespaced with a leading '_', so
     they never collide with a cluster key)."""
