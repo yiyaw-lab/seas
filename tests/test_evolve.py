@@ -408,6 +408,36 @@ class GateCommandsTest(EvolveBase):
         self.assertFalse(res["acted"])
         self.assertEqual(ev.get_lever("EV-908")["status"], "evolving")
 
+    def test_active_claim_shields_stale_sweep(self):
+        # A live accept thread may legitimately outlast the lease (slow rehearse/
+        # propose): its registered claim must never be swept out from under it.
+        past = _iso(datetime.now(timezone.utc)
+                    - timedelta(hours=ev.STALE_CLAIM_HOURS + 1))
+        self._lever(id="EV-909", feature="slow_one", status="evolving",
+                    claimed_at=past)
+        ev._ACTIVE_CLAIMS.add("EV-909")
+        try:
+            with mock.patch.object(ev, "_collect_new", return_value=[]):
+                ev.scan()
+            self.assertEqual(ev.get_lever("EV-909")["status"], "evolving")
+        finally:
+            ev._ACTIVE_CLAIMS.discard("EV-909")
+
+    def test_accept_registers_active_claim_for_duration(self):
+        self._lever(id="EV-911", feature="registered", magnitude="major",
+                    status="nudged")
+        ev._stage("EV-911")
+        membership = []
+
+        def fake_rehearse(lever):
+            membership.append(lever["id"] in ev._ACTIVE_CLAIMS)
+            return (None, "no model")
+
+        with mock.patch.object(ev, "_rehearse_lever", side_effect=fake_rehearse):
+            ev.accept_pending()
+        self.assertEqual(membership, [True])      # shielded while working
+        self.assertNotIn("EV-911", ev._ACTIVE_CLAIMS)  # released after
+
 
 class SyncOutcomesTest(EvolveBase):
     def _adopted_lever(self):
@@ -475,6 +505,31 @@ class SyncOutcomesTest(EvolveBase):
         self.assertEqual(lever["status"], "failed")
         self.assertIsNotNone(lever["muted_until"])
         self.assertTrue(wm.get_belief(wm_id)["refutations"])
+
+
+    def test_wrong_prediction_fails_confirmed_lever(self):
+        # The dated prediction is the final grader: a wrong score must close the
+        # lever lifecycle, not leave 'confirmed' blocking the slug forever.
+        self._adopted_lever()
+        ev._update_lever("EV-910", status="confirmed")
+        items = pred._load()
+        items[0].update(scored_at="2026-06-25T00:00:00Z", correct=False)
+        pred._save(items)
+        ev._apply_prediction_verdicts()
+        lever = ev.get_lever("EV-910")
+        self.assertEqual(lever["status"], "failed")
+        self.assertIsNotNone(lever["muted_until"])
+
+    def test_correct_or_unscored_prediction_keeps_confirmed(self):
+        self._adopted_lever()
+        ev._update_lever("EV-910", status="confirmed")
+        ev._apply_prediction_verdicts()  # unscored: untouched
+        self.assertEqual(ev.get_lever("EV-910")["status"], "confirmed")
+        items = pred._load()
+        items[0].update(scored_at="2026-06-25T00:00:00Z", correct=True)
+        pred._save(items)
+        ev._apply_prediction_verdicts()
+        self.assertEqual(ev.get_lever("EV-910")["status"], "confirmed")
 
 
 class PlacementGuardTest(EvolveBase):

@@ -75,6 +75,12 @@ _TERMINAL = ("rejected", "killed", "failed")
 # overlapping replies could both claim the same staged lever.
 _GATE_LOCK = threading.Lock()
 
+# Lever ids a live accept thread in THIS process is working on. The stale-claim
+# sweep exists to recover claims orphaned by a process death -- after a restart
+# this set is empty, so membership shields live work from the sweep no matter how
+# slow rehearse/propose run, while true orphans still get re-armed.
+_ACTIVE_CLAIMS = set()
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -386,11 +392,15 @@ def _sweep_stale_claims():
     """A crash mid-accept (during the slow rehearse/propose work) leaves a claimed
     lever stuck in 'evolving'/'accepted' with no staging file and no PR -- nothing
     would ever touch it again. Re-arm those as nudge-ready after a grace window so
-    the funnel re-offers them."""
+    the funnel re-offers them. Levers in _ACTIVE_CLAIMS are a live thread's work
+    in this process and are never swept (the time lease alone only backstops a
+    scan running in a different process than the webhook gate)."""
     cutoff = (_now() - timedelta(hours=STALE_CLAIM_HOURS)).strftime(_TS_FMT)
     data = _load_ledger()
     changed = False
     for l in data["levers"]:
+        if l.get("id") in _ACTIVE_CLAIMS:
+            continue
         if (l.get("status") in ("evolving", "accepted") and not l.get("pr_number")
                 and (l.get("claimed_at") or "") < cutoff):
             log.warning("evolve: re-arming stale %s claim %s (%s)",
@@ -567,6 +577,17 @@ def accept_pending():
         # claimed_at is the lease: if this process dies mid-rehearse/propose,
         # _sweep_stale_claims re-arms the lever instead of leaving it stuck.
         _update_lever(lid, status="evolving", claimed_at=_now_iso())
+        _ACTIVE_CLAIMS.add(lid)
+    try:
+        return _run_accept(lid, lever)
+    finally:
+        _ACTIVE_CLAIMS.discard(lid)
+
+
+def _run_accept(lid, lever):
+    """The slow half of EVOLVE (rehearse, belief + prediction, propose). Runs
+    outside the gate lock; _ACTIVE_CLAIMS shields the claim from the stale sweep
+    for however long this takes."""
     # Major levers must survive the debate first -- the same gate user projects get.
     if lever.get("magnitude") == "major":
         verdict, notes = _rehearse_lever(lever)
@@ -708,6 +729,33 @@ def sync_proposal_outcomes():
         log.error("evolve: sync_proposal_outcomes failed", exc_info=True)
 
 
+def _apply_prediction_verdicts():
+    """The dated prediction is the loop's final grader: when score_due marks an
+    evolution lever's prediction wrong, close the lever lifecycle too -- failed
+    plus a rest week -- so a confirmed lever whose benefit never showed up stops
+    blocking its feature slug forever. (world_model already took the scoring hit
+    via apply_prediction_outcome; no extra evidence here.) Never raises."""
+    try:
+        data = _load_ledger()
+        changed = False
+        for lever in data["levers"]:
+            pid = lever.get("prediction_id")
+            if not pid or lever.get("status") not in ("confirmed", "merged_watch"):
+                continue
+            p = argo_predictions.get_prediction(pid)
+            if not p or not p.get("scored_at") or p.get("correct") is not False:
+                continue
+            log.info("evolve: prediction %s scored wrong; failing lever %s",
+                     pid, lever.get("id"))
+            lever["status"] = "failed"
+            lever["muted_until"] = _mute_until(MUTE_DAYS_FAILED)
+            changed = True
+        if changed:
+            _save_ledger(data)
+    except Exception:
+        log.error("evolve: _apply_prediction_verdicts failed", exc_info=True)
+
+
 # --- dogfood seeds ----------------------------------------------------------------
 
 # Three pre-validated upgrades (researched 2026-06-10) so week one exercises the
@@ -826,6 +874,7 @@ def run_cli():
         argo_predictions.score_due(notify=_send)
     except Exception:
         log.error("frontier: prediction scoring failed", exc_info=True)
+    _apply_prediction_verdicts()
     try:
         result = scan()
     except Exception:
