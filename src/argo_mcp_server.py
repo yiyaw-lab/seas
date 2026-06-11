@@ -93,6 +93,13 @@ def _build_allowed_hosts():
         host = urlparse(url).hostname
         if host:
             hosts.add(host.lower())
+    # Frontier-movement feeds (the evolution loop's release watch) go through the
+    # same structural allowlist -- never rely on their hosts coinciding with the
+    # hardcoded set below.
+    for _label, url in fetch_signals.load_frontier_feeds():
+        host = urlparse(url).hostname
+        if host:
+            hosts.add(host.lower())
     hosts.update({
         "arxiv.org", "export.arxiv.org",
         "github.com", "raw.githubusercontent.com",
@@ -1087,6 +1094,11 @@ PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 PROPOSE_BASE = os.environ.get("ARGO_PROPOSE_BASE", "main")
 MAX_PROPOSE_FILES = 5
 MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable
+# The self-modification loops (diagnose fixes, frontier evolution) must never be
+# able to touch their own safety rails: CI (which proves fail->pass), and the
+# budget/breaker guards. A proposal naming one of these is refused before any
+# GitHub write. Prefix match, so the whole .github/ tree is covered.
+PROTECTED_PATHS = (".github/", "src/argo_guard.py")
 
 
 def _gh_write(method, path, body):
@@ -1183,6 +1195,8 @@ def _validate_files(files):
             return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
         if p.startswith("/") or ".." in p:
             return f"Refused: unsafe path '{p}'."
+        if any(p == prot or p.startswith(prot) for prot in PROTECTED_PATHS):
+            return f"Refused: '{p}' is a protected safety path."
     return None
 
 

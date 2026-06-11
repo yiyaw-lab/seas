@@ -46,7 +46,18 @@ COMMANDS = {
     "watch": ("argo_watch", "main"),
     "reflect": ("argo_self", "reflect_cli"),
     "diagnose": ("argo_diagnose", "run_cli"),
+    "frontier": ("argo_evolve", "run_cli"),
 }
+
+# Commands that need the WEBHOOK's filesystem: their ledgers live on the Railway
+# volume and their FIX/EVOLVE gates read a staging file the webhook must see. The
+# Actions runner can't serve these (its checkout has no incident/evolution state,
+# and the webhook can never read what it stages there), so the webhook runs them
+# itself via local_loop() in a daemon thread. On Actions they stay structurally
+# inert (diagnose: empty ledger; frontier: its own GITHUB_ACTIONS guard).
+LOCAL_COMMANDS = ("diagnose", "frontier")
+LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
+LOCAL_INTERVAL_SECONDS = 15 * 60
 
 
 def _as_list(v):
@@ -96,17 +107,24 @@ def run_command(command):
     getattr(mod, fn_name)()
 
 
-def main():
-    dry = "--dry-run" in sys.argv
+def fire_due(only=None, dry=False, state_path=None):
+    """One scheduler pass: fire every enabled schedule due this UTC hour, deduped
+    per window per day. `only` restricts to a command allowlist (the webhook's
+    local loop passes LOCAL_COMMANDS); `state_path` overrides the dedupe store
+    (the local loop keeps its own -- see LOCAL_STATE_PATH in argo_paths). Returns
+    the list of fired command names."""
+    spath = state_path or STATE_PATH
     now = datetime.now(timezone.utc)
     config = argo_store.load_json(SCHEDULE_PATH, {"schedules": []})
-    state = argo_store.load_json(STATE_PATH, {"fired": []})
+    state = argo_store.load_json(spath, {"fired": []})
     fired = set(state.get("fired", []))
 
     due = []
     for sched in config.get("schedules", []):
         cmd = sched.get("command")
         if cmd not in COMMANDS:
+            continue
+        if only is not None and cmd not in only:
             continue
         target_hour = _due_hour(sched, now)
         if target_hour is None:
@@ -123,8 +141,9 @@ def main():
     print(f"\n⏰ Argo schedule runner — {now:%Y-%m-%d %H:%M UTC}")
     if not due:
         print("Nothing due this hour.\n")
-        return
+        return []
 
+    ran = []
     for sched, target_hour in due:
         key = _fire_key(sched, now, target_hour)
         print(f"  -> {sched.get('name')} [{sched['command']}]"
@@ -135,6 +154,7 @@ def main():
                  sched.get("name"), sched["command"], target_hour)
         try:
             run_command(sched["command"])
+            ran.append(sched["command"])
         except Exception as exc:
             # Outermost net: one bad command must not skip the rest. Log with the
             # traceback so the failure is diagnosable, never silently swallowed.
@@ -153,8 +173,28 @@ def main():
         # keep the dedupe file small: only retain today's keys
         today = f"{now:%Y-%m-%dT}"
         state["fired"] = [k for k in fired if today in k]
-        argo_store.save_json(STATE_PATH, state)
+        argo_store.save_json(spath, state)
     print("\n✅ Schedule run complete.\n")
+    return ran
+
+
+def local_loop(only=LOCAL_COMMANDS, interval=LOCAL_INTERVAL_SECONDS):
+    """Blocking forever-loop for the webhook's in-process scheduler thread: runs
+    only the volume-dependent commands (LOCAL_COMMANDS) against this process's
+    filesystem. The per-window dedupe still applies, so polling every 15 minutes
+    fires each window once; the grace window covers a slow boot."""
+    import time
+    log.info("local scheduler: running [%s] every %ds", ", ".join(only), interval)
+    while True:
+        try:
+            fire_due(only=only, state_path=LOCAL_STATE_PATH)
+        except Exception:
+            log.error("local scheduler pass failed", exc_info=True)
+        time.sleep(interval)
+
+
+def main():
+    fire_due(dry="--dry-run" in sys.argv)
 
 
 if __name__ == "__main__":

@@ -106,5 +106,53 @@ class MainDedupeTest(unittest.TestCase):
         self.assertEqual(self.calls, [])  # deduped: never re-sent
 
 
+class LocalCommandsTest(unittest.TestCase):
+    """The webhook's in-process scheduler half: fire_due(only=...) restricts to the
+    volume-dependent commands, and its dedupe state is a SEPARATE file (sharing the
+    Actions-committed one would let an inert Actions fire consume the webhook's key)."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.schedule = self.tmp / "schedule.json"
+        self.state = self.tmp / "schedule_state.json"
+        self.local_state = self.tmp / "schedule_state_local.json"
+        self.enterContext(mock.patch.object(sched, "SCHEDULE_PATH", self.schedule))
+        self.enterContext(mock.patch.object(sched, "STATE_PATH", self.state))
+        self.schedule.write_text(json.dumps({"schedules": [
+            {"name": "weekly-project", "days": "daily", "hour": [15],
+             "command": "project", "enabled": True},
+            {"name": "frontier", "days": "daily", "hour": [15],
+             "command": "frontier", "enabled": True},
+        ]}))
+        self.calls = []
+        self.enterContext(mock.patch.object(
+            sched, "run_command", lambda cmd: self.calls.append(cmd)))
+
+    def _fire(self, **kwargs):
+        with mock.patch.object(sched, "datetime") as dt:
+            dt.now.return_value = _now(15)
+            return sched.fire_due(**kwargs)
+
+    def test_frontier_command_is_registered(self):
+        self.assertEqual(sched.COMMANDS["frontier"], ("argo_evolve", "run_cli"))
+        self.assertIn("frontier", sched.LOCAL_COMMANDS)
+        self.assertIn("diagnose", sched.LOCAL_COMMANDS)
+
+    def test_only_filter_fires_just_the_local_commands(self):
+        ran = self._fire(only=("frontier",), state_path=self.local_state)
+        self.assertEqual(ran, ["frontier"])
+        self.assertEqual(self.calls, ["frontier"])
+
+    def test_local_state_is_isolated_from_the_actions_state(self):
+        self._fire(only=("frontier",), state_path=self.local_state)
+        self.assertTrue(self.local_state.exists())
+        self.assertFalse(self.state.exists())  # the shared file is untouched
+        # A key fired by the Actions runner must NOT block the local pass.
+        self.state.write_text(json.dumps({"fired": ["frontier@2026-06-15T15"]}))
+        self.local_state.unlink()
+        ran = self._fire(only=("frontier",), state_path=self.local_state)
+        self.assertEqual(ran, ["frontier"])
+
+
 if __name__ == "__main__":
     unittest.main()
