@@ -993,6 +993,17 @@ def _peek_pending_payload():
         return None
 
 
+def pending_heal_action():
+    """Name of the staged heal action, or None. Lets the webhook's CONFIRM
+    gate decide without parsing the pending file itself."""
+    if not PENDING_HEAL_PATH.exists():
+        return None
+    try:
+        return (json.loads(PENDING_HEAL_PATH.read_text()) or {}).get("action")
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
 def decline_pending_fix():
     """User replied IGNORE: drop the staged fix and mute its cluster for 7 days so the
     diagnostic loop won't re-nudge it."""

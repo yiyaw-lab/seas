@@ -292,9 +292,11 @@ def build_system_prompt(p=None):
     f"their values. Tell {obj} the specific var to set so {subj} can fix it in one step. "
     "If something's broken you can SELF-HEAL: reregister_webhook (if the webhook "
     "is down) or refetch_signals (if signals are stale). These are gated: by "
-    "default you only recommend the fix; if asked to actually do it, the tool "
-    "will tell the user to reply CONFIRM. Never claim you fixed something you "
-    "haven't. "
+    "default you only recommend the fix; when you mean to actually do it, CALL "
+    "the tool. The tool itself stages the action and tells the user to reply "
+    "CONFIRM. NEVER offer a CONFIRM step in your own words without calling the "
+    "tool in the same turn: a CONFIRM you typed yourself has nothing staged "
+    "behind it and dead-ends. Never claim you fixed something you haven't. "
     "IMPORTANT: a project tool returning an error (e.g. couldn't pull signals, "
     "couldn't generate) is an INTERNAL hiccup, NOT a missing repo or token. Do "
     f"NOT ask {name} for the repo name, do NOT blame GITHUB_TOKEN, and do NOT open a "
@@ -963,7 +965,30 @@ def handle_update(update):
         if word == "CANCEL":
             argo_mcp_server.clear_pending_heal()
             send_telegram.send_message("Okay, dropped it.")
-        else:
+            return
+        if argo_mcp_server.pending_heal_action() is not None:
+            send_telegram.send_message(argo_mcp_server.run_pending_heal())
+            return
+        # Nothing staged: the model offered CONFIRM in free text without calling
+        # the heal tool. Recover instead of dead-ending: route the turn to the
+        # model (its own offer is in history) so it can stage the action for
+        # real, then honor the okay the user already gave. Safe heals only;
+        # never propose_fix, so the FIX gate can't be jumped through here.
+        log.warning("confirm with nothing staged; routing to model for recovery")
+        _note_incident("confirm_dead_end",
+                       "user replied CONFIRM but no heal action was staged")
+        note = (text + "\n\n[system note: the user replied CONFIRM but nothing is "
+                "staged. If you offered a self-heal in your last turn, call that "
+                "tool now (reregister_webhook or refetch_signals); this reply "
+                "already counts as the confirmation, so say you're doing it now "
+                "and do not ask for CONFIRM again. If you never offered one, ask "
+                "what they want to confirm.]")
+        reply = _generate_reply(chat_id, note, text)
+        send_telegram.send_message(
+            reply or "Nothing was staged on my side. Say 'reregister webhook' "
+                     "or 'refetch signals' and I'll set it up properly.")
+        if argo_mcp_server.pending_heal_action() in ("reregister_webhook",
+                                                     "refetch_signals"):
             send_telegram.send_message(argo_mcp_server.run_pending_heal())
         return
 
