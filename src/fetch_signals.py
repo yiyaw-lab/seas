@@ -76,6 +76,39 @@ def _load_feeds():
 
 FEEDS = _load_feeds()
 
+# Frontier-MOVEMENT sources for the evolution loop (argo_evolve): releases and
+# announcements about Argo's OWN stack (models, SDKs, MCP servers). Deliberately
+# separate from FEEDS: these would pollute project-signal generation (weekly SDK
+# patch notes are not project material), and the evolution loop keeps its own
+# seen-store. GitHub releases always expose an Atom feed at .../releases.atom.
+_FRONTIER_FALLBACK = [
+    ("anthropic-sdk-python releases",
+     "https://github.com/anthropics/anthropic-sdk-python/releases.atom"),
+    ("claude-code releases",
+     "https://github.com/anthropics/claude-code/releases.atom"),
+    ("claude-agent-sdk-python releases",
+     "https://github.com/anthropics/claude-agent-sdk-python/releases.atom"),
+    ("mcp servers releases",
+     "https://github.com/modelcontextprotocol/servers/releases.atom"),
+    ("Anthropic News (community RSS)",
+     "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml"),
+]
+
+
+def load_frontier_feeds():
+    """Frontier-movement feeds for argo_evolve, from data/frontier_feeds.json with
+    the hardcoded fallback above (same contract as _load_feeds/FEEDS)."""
+    path = ROOT / "data" / "frontier_feeds.json"
+    try:
+        data = json.loads(path.read_text())
+        feeds = [(f["label"], f["url"]) for f in data["feeds"]
+                 if f.get("label") and f.get("url")]
+        if feeds:
+            return feeds
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        pass
+    return _FRONTIER_FALLBACK
+
 # Identifies the fetcher to feed servers. Override ARGO_USER_AGENT to point at
 # your own repo/contact if you fork this.
 USER_AGENT = os.environ.get(

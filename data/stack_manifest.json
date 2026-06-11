@@ -1,0 +1,31 @@
+{
+  "_comment": "Argo's honest self-description of its OWN stack, fed to the frontier-evolution mapper (argo_evolve) so it can judge whether a release unlocks a real upgrade. Keep this current: an evolution PR that adopts a feature must move it from api_features_not_used to api_features_used in the same PR.",
+  "models": {
+    "default_chat": "claude-sonnet-4-6 (env ARGO_CHAT_MODEL)",
+    "premium": "claude-opus-4-8 (env ARGO_CHAT_MODEL_PREMIUM; rehearse judge + fix authoring)",
+    "fallback": "gpt-4o (OpenAI, when no Anthropic key)"
+  },
+  "sdks": {
+    "anthropic": "requirements.txt (Messages API via SDK)",
+    "openai": "requirements.txt (fallback provider)",
+    "mcp": "FastMCP server at /mcp (bearer-auth), tools self-registered"
+  },
+  "api_features_used": [
+    "messages (chat + tool use via MCP)",
+    "vision (Telegram screenshots)",
+    "max_tokens tuning per call",
+    "temperature omitted for models that reject it (opus-4-8, gpt-5/o-series)"
+  ],
+  "api_features_not_used": [
+    "structured outputs (output_config json_schema) - JSON replies are regex-parsed today",
+    "prompt caching (cache_control) - the big system prompt is re-billed every turn",
+    "Batch API (50 percent cheaper for non-latency-sensitive calls like SEAS scoring)",
+    "adaptive thinking (thinking type adaptive on premium calls)",
+    "token usage telemetry (no per-call cost recording exists yet)"
+  ],
+  "runtime": "python 3.11 stdlib-first; Railway web (webhook + in-process local scheduler for diagnose/frontier) + GitHub Actions hourly scheduler (project/watch/reflect)",
+  "known_gotchas": [
+    "claude-opus-4-8 rejects the temperature param (400); argo_observe omits it",
+    "new dependencies are not allowed without explicit reason (stdlib-first rule)"
+  ]
+}

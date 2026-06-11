@@ -1,0 +1,781 @@
+"""Argo's frontier-evolution loop: 'watch -> map -> EVOLVE -> PR -> score'.
+
+The diagnose loop (argo_diagnose) reacts to FAILURES; this loop reacts to the
+FRONTIER ITSELF. On a schedule it watches release feeds for Argo's own stack
+(models, SDKs, MCP -- data/frontier_feeds.json), maps anything new against an
+honest self-description (data/stack_manifest.json + the live capability inventory
++ the self/world belief stores), and, at most once a day, texts the owner ONE
+upgrade lever: "Anthropic shipped X, i could adopt it in Y -- reply EVOLVE or
+SKIP." EVOLVE rehearses big levers with Argo's own adversaries (a KILL is final),
+then drafts the change as a real PR through the existing propose machinery; a
+dated prediction is recorded at accept, ARMED when the PR merges, and scored by
+argo_predictions when due -- so an adopted upgrade has to prove itself against
+reality, not vibes.
+
+Everything dangerous is reused, not re-rolled: the PR path is argo_mcp_server's
+_run_propose_fix (repro-test gate, protected-path denylist, PR-only token, human
+merge -- Argo still can't merge anything); CI-polling and the post-deploy quiet
+window are argo_diagnose's verify/confirm, which handle these PRs unchanged.
+
+Placement: this command needs the webhook's filesystem (volume ledgers + the
+staging file the EVOLVE gate reads), so it runs in the webhook's in-process
+scheduler (argo_scheduled.local_loop). On GitHub Actions it is structurally
+inert (the guard in run_cli), exactly like diagnose is there.
+
+Run:  python3 src/argo_evolve.py            (one full pass: sync, score, scan)
+      python3 src/argo_evolve.py --no-send  (dry run: fetch + map + print only,
+                                             no sends, no writes)
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+import argo_paths
+import argo_predictions
+import argo_self
+import argo_store
+import argo_watch  # _item_id (pure) -- the seen-store identity this loop mirrors
+import fetch_signals
+import world_model
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
+# Re-exported so tests patch the module globals (mock.patch.object); every helper
+# reads the bare name at call time so the override bites.
+FRONTIER_SEEN_PATH = argo_paths.FRONTIER_SEEN_PATH
+EVOLUTION_PATH = argo_paths.EVOLUTION_PATH
+PENDING_EVOLVE_PATH = argo_paths.PENDING_EVOLVE_PATH
+MANIFEST_PATH = argo_paths.DATA / "stack_manifest.json"
+ROOT = argo_paths.ROOT
+
+MAX_NUDGES_PER_DAY = 1     # hard ceiling on proactive evolution nudges (spam guard)
+MAX_ATTEMPTS = 3           # re-map an unused item this many times before retiring
+MAP_ITEM_CAP = 20          # cap the mapper prompt size
+MAX_AFFECTED_FILES = 3     # an evolution PR stays small and reviewable
+MUTE_DAYS_SKIP = 30        # user said SKIP: rest a month
+MUTE_DAYS_KILL = 60        # the rehearsal judge said KILL: rest two months
+MUTE_DAYS_FAILED = 7       # authoring/CI failed: rest a week, then eligible again
+SEEN_CAP = 1000            # keep the seen-store bounded
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+# Levers in one of these states block re-proposing their feature slug; a terminal
+# lever blocks only while muted (confirmed blocks forever -- it's adopted).
+_IN_FLIGHT = ("nudge-ready", "nudged", "accepted", "pr_open", "merged_watch")
+_TERMINAL = ("rejected", "killed", "failed")
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _now_iso():
+    return _now().strftime(_TS_FMT)
+
+
+def _mute_until(days):
+    return (_now() + timedelta(days=days)).strftime(_TS_FMT)
+
+
+# --- small seams (patched in tests) ------------------------------------------
+
+def _send(text):
+    """Best-effort Telegram delivery (mirrors argo_diagnose._send)."""
+    try:
+        import send_telegram
+        return send_telegram.try_send_message(text)
+    except Exception:
+        log.error("evolve: send failed", exc_info=True)
+        return False
+
+
+def _propose(payload):
+    """Open the upgrade PR through the existing self-fix path: author files with the
+    premium model, run the repro-test + wiring gates, open the PR, record it in the
+    proposals ledger. Lazy import keeps the no-EVOLVE path light."""
+    import argo_mcp_server
+    return argo_mcp_server._run_propose_fix(payload)
+
+
+# --- seen-store (own namespace; argo_watch's shape and identity) --------------
+
+def load_seen():
+    data = argo_store.load_json(FRONTIER_SEEN_PATH, {})
+    if isinstance(data, list):  # tolerate the legacy list shape, like argo_watch
+        return {i: MAX_ATTEMPTS for i in data}
+    return data if isinstance(data, dict) else {}
+
+
+def save_seen(seen):
+    bounded = dict(list(seen.items())[-SEEN_CAP:])
+    FRONTIER_SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    argo_store.save_json(FRONTIER_SEEN_PATH, bounded)
+
+
+def _collect_new(seen):
+    """Fetch the frontier feeds and return items still eligible for mapping (never
+    seen, or seen but not yet settled)."""
+    new = []
+    for label, url in fetch_signals.load_frontier_feeds():
+        for item in fetch_signals.fetch_feed(label, url):
+            iid = argo_watch._item_id(item)
+            if iid and seen.get(iid, 0) < MAX_ATTEMPTS:
+                item["_iid"] = iid
+                new.append(item)
+    return new[:MAP_ITEM_CAP]
+
+
+# --- the lever ledger ---------------------------------------------------------
+
+def _load_ledger():
+    data = argo_store.load_json(EVOLUTION_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("_meta"), dict):
+        data["_meta"] = {}
+    if not isinstance(data.get("levers"), list):
+        data["levers"] = []
+    return data
+
+
+def _save_ledger(data):
+    EVOLUTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    argo_store.save_json(EVOLUTION_PATH, data)
+
+
+def _next_id(levers):
+    nums = []
+    for l in levers:
+        lid = str(l.get("id", ""))
+        if lid.startswith("EV-") and lid.split("-", 1)[1].isdigit():
+            nums.append(int(lid.split("-", 1)[1]))
+    return f"EV-{max(nums, default=0) + 1:03d}"
+
+
+def get_lever(lever_id):
+    return next((l for l in _load_ledger()["levers"] if l.get("id") == lever_id), None)
+
+
+def _update_lever(lever_id, **fields):
+    data = _load_ledger()
+    lever = next((l for l in data["levers"] if l.get("id") == lever_id), None)
+    if lever is None:
+        return None
+    lever.update(fields)
+    _save_ledger(data)
+    return lever
+
+
+def _active_features():
+    """Feature slugs the mapper must not re-propose: anything in flight, anything
+    adopted (confirmed), and any terminal lever still inside its mute window."""
+    now = _now_iso()
+    out = set()
+    for l in _load_ledger()["levers"]:
+        feature = l.get("feature")
+        if not feature:
+            continue
+        status = l.get("status")
+        if status in _TERMINAL:
+            mu = l.get("muted_until")
+            if mu and mu > now:
+                out.add(feature)
+        else:  # in flight or confirmed
+            out.add(feature)
+    return out
+
+
+def _nudge_budget_left():
+    meta = _load_ledger()["_meta"]
+    today = _now().strftime("%Y-%m-%d")
+    if meta.get("last_nudge_date") != today:
+        return MAX_NUDGES_PER_DAY
+    return max(0, MAX_NUDGES_PER_DAY - int(meta.get("nudges_today", 0)))
+
+
+def _record_nudge():
+    data = _load_ledger()
+    meta = data["_meta"]
+    today = _now().strftime("%Y-%m-%d")
+    if meta.get("last_nudge_date") != today:
+        meta["last_nudge_date"] = today
+        meta["nudges_today"] = 0
+    meta["nudges_today"] = int(meta.get("nudges_today", 0)) + 1
+    _save_ledger(data)
+
+
+# --- EVOLVE/SKIP staging (single slot, separate from the heal slot) -----------
+
+def has_pending():
+    return PENDING_EVOLVE_PATH.exists()
+
+
+def _stage(lever_id):
+    PENDING_EVOLVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    argo_store.save_json(PENDING_EVOLVE_PATH,
+                         {"lever_id": lever_id, "staged_at": _now_iso()})
+
+
+def _peek_pending():
+    data = argo_store.load_json(PENDING_EVOLVE_PATH, None)
+    return data.get("lever_id") if isinstance(data, dict) else None
+
+
+def _clear_pending():
+    PENDING_EVOLVE_PATH.unlink(missing_ok=True)
+
+
+# --- the mapper: one guarded model call ----------------------------------------
+
+_MAP_SYSTEM = ("You are Argo, scanning frontier release notes for ONE concrete "
+               "upgrade to your own stack. Be skeptical: most items are not relevant "
+               "to you. Never invent a capability, and only name files from the "
+               "provided list.")
+
+_MAP_PROMPT = (
+    "NEW frontier items (releases, changelogs, announcements):\n{items}\n\n"
+    "YOUR CURRENT STACK (stack_manifest.json):\n{manifest}\n\n"
+    "WHAT YOU BELIEVE ABOUT YOURSELF:\n{self_beliefs}\n\n"
+    "WHAT YOU BELIEVE ABOUT THE FRONTIER:\n{world}\n\n"
+    "Features already proposed or adopted (do NOT propose these again):\n{taken}\n\n"
+    "Your source files (affected_files may only use paths from this list):\n{files}\n\n"
+    "If exactly one of the NEW items unlocks a concrete, small upgrade to your own "
+    "stack, reply with ONLY a JSON object, no prose, no markdown, with these keys:\n"
+    '  "relevant": true\n'
+    '  "feature": short snake_case slug for the capability (e.g. "structured_outputs")\n'
+    '  "lever": one plain sentence: the concrete change to make\n'
+    '  "affected_files": a list of 1-3 paths from the list above\n'
+    '  "expected_benefit": one plain sentence\n'
+    '  "risk": one plain sentence\n'
+    '  "magnitude": "minor" for a contained change, "major" for a new call path or '
+    "new dependency surface\n"
+    '  "source_title": the title of the item that triggered this\n'
+    "If nothing is genuinely relevant to YOUR stack (most runs), reply with exactly: "
+    "NONE\nNo em dashes."
+)
+
+
+def _repo_files():
+    try:
+        return sorted("src/" + p.name for p in (ROOT / "src").glob("*.py"))
+    except OSError:
+        return []
+
+
+def _resolve_model():
+    import argo_observe as observe
+    candidates = ([os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"]
+                  + observe.resolve_models())
+    for m in candidates:
+        p = observe.provider_for(m)
+        if p and os.environ.get(p["key_env"]):
+            return m
+    return None
+
+
+def _parse_json(raw):
+    """Pull the first JSON object out of the model reply, tolerantly. None on failure.
+    (Upgrading this very parser to structured outputs is seed lever EV: see
+    ensure_seeds -- the loop's first proposal is to improve its own parsing.)"""
+    if not raw:
+        return None
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _map_levers(items):
+    """One guarded model call: new frontier items -> ONE lever dict, {} for an
+    explicit NONE, or None on infrastructure failure (so the caller does not
+    penalize the items' attempt counts for an outage). Routed through argo_observe
+    so the DailyBudget + circuit breaker apply."""
+    import argo_observe as observe
+    model = _resolve_model()
+    if model is None:
+        log.warning("evolve: no model available for the mapper")
+        return None
+    listing = "\n".join(
+        f"- [{it.get('source', '')}] {it.get('title', '')}: "
+        f"{(it.get('summary') or '')[:200]}"
+        for it in items)
+    manifest = json.dumps(argo_store.load_json(MANIFEST_PATH, {}), indent=2)[:4000]
+    prompt = _MAP_PROMPT.format(
+        items=listing or "(none)",
+        manifest=manifest,
+        self_beliefs=argo_self.format_self_for_prompt() or "(none yet)",
+        world=world_model.format_beliefs_for_prompt() or "(none yet)",
+        taken=", ".join(sorted(_active_features())) or "(none)",
+        files="\n".join(_repo_files()) or "(unavailable)")
+    try:
+        if observe.provider_for(model)["name"] == "anthropic":
+            raw = observe.chat_with_mcp(
+                _MAP_SYSTEM, [{"role": "user", "content": prompt}], model,
+                temperature=0)
+        else:
+            raw = observe.generate_observations(prompt, model, temperature=0)
+    except Exception:
+        log.error("evolve: mapper call failed", exc_info=True)
+        return None
+    if (raw or "").strip().upper() == "NONE":
+        return {}
+    return _parse_json(raw) or {}
+
+
+def _slug(s):
+    return re.sub(r"[^a-z0-9_]+", "_", (s or "").strip().lower()).strip("_")[:40]
+
+
+# --- the nudge -----------------------------------------------------------------
+
+def _nudge_text(lever):
+    src = ((lever.get("source_item") or {}).get("title") or "").strip()
+    head = (f"frontier update: {src}. " if src else "frontier idea: ")
+    return (head
+            + f"i could adopt {lever.get('feature')}: {lever.get('lever')} "
+            + f"expected benefit: {lever.get('expected_benefit')} "
+            + f"risk: {lever.get('risk')} "
+            + "reply EVOLVE to draft the PR (i'll stress-test it with my own "
+              "adversaries first if it's a big change), or SKIP to drop it. "
+              "i can't merge anything myself.")
+
+
+def _offer(lever_id):
+    """Stage one lever behind the EVOLVE/SKIP gate and send the nudge. Seeds the
+    self-belief at nudge time (low confidence; it must earn its way up)."""
+    lever = get_lever(lever_id)
+    if lever is None:
+        return {"acted": False, "reason": "lever missing"}
+    bid = lever.get("self_belief_id") or argo_self.add_self_belief(
+        f"Adopting {lever.get('feature')} would improve me: "
+        f"{lever.get('expected_benefit', '')}",
+        kind="capability", source="evolution")
+    sent = _send(_nudge_text(lever))
+    if not sent:
+        log.warning("evolve: nudge delivery failed for %s; will retry", lever_id)
+        return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
+    _stage(lever_id)
+    _record_nudge()
+    _update_lever(lever_id, status="nudged", self_belief_id=bid)
+    log.info("evolve: staged + nudged %s (%s)", lever_id, lever.get("feature"))
+    return {"acted": True, "lever": lever_id, "feature": lever.get("feature")}
+
+
+# --- the scan funnel (free gates before the paid one) ---------------------------
+
+def scan():
+    """Run the funnel once. Returns a summary dict (never raises out to the
+    scheduler). Gate order keeps every free check ahead of the one paid call."""
+    # GATE 1: one staged lever at a time -- the webhook gate must resolve it first.
+    if has_pending():
+        return {"acted": False, "reason": "pending lever awaiting EVOLVE/SKIP"}
+    # GATE 2: the spam ceiling.
+    if _nudge_budget_left() <= 0:
+        return {"acted": False, "reason": "daily nudge budget spent"}
+    # GATE 3 (free): a seeded lever ready to offer skips fetch + mapper entirely.
+    seed = next((l for l in _load_ledger()["levers"]
+                 if l.get("status") == "nudge-ready"), None)
+    if seed:
+        return _offer(seed["id"])
+    # Fetch + dedup (network, but no model cost).
+    seen = load_seen()
+    items = _collect_new(seen)
+    if not items:
+        return {"acted": False, "reason": "no new frontier items"}
+    result = _map_levers(items)
+    if result is None:
+        # Infrastructure failure: do NOT update the seen-store, so the items are
+        # not attempt-penalized for an outage (mirrors argo_watch's abort).
+        return {"acted": False, "reason": "mapper unavailable"}
+    # The mapper ran: settle the chosen item, bump everything else it saw.
+    chosen_title = (result.get("source_title") or "").strip().lower()
+    for it in items:
+        if chosen_title and chosen_title in (it.get("title") or "").lower():
+            seen[it["_iid"]] = MAX_ATTEMPTS
+        else:
+            seen[it["_iid"]] = seen.get(it["_iid"], 0) + 1
+    save_seen(seen)
+    if not result.get("relevant"):
+        return {"acted": False, "reason": "nothing relevant"}
+    feature = _slug(result.get("feature"))
+    if not feature:
+        return {"acted": False, "reason": "mapper returned no feature slug"}
+    if feature in _active_features():
+        return {"acted": False, "reason": f"feature already tracked: {feature}"}
+    files = [f for f in (result.get("affected_files") or [])
+             if isinstance(f, str) and (ROOT / f).exists()]
+    if not files or len(files) > MAX_AFFECTED_FILES:
+        return {"acted": False, "reason": "affected files missing or too many"}
+    magnitude = result.get("magnitude") if result.get("magnitude") in ("minor", "major") else "major"
+    src_item = next((it for it in items if chosen_title
+                     and chosen_title in (it.get("title") or "").lower()), None)
+    data = _load_ledger()
+    lever = {
+        "id": _next_id(data["levers"]), "created_at": _now_iso(),
+        "source": "frontier",
+        "source_item": ({"title": src_item.get("title"), "link": src_item.get("link"),
+                         "feed": src_item.get("source")} if src_item else
+                        {"title": result.get("source_title")}),
+        "feature": feature, "lever": (result.get("lever") or "").strip(),
+        "affected_files": files,
+        "expected_benefit": (result.get("expected_benefit") or "").strip(),
+        "risk": (result.get("risk") or "").strip(),
+        "magnitude": magnitude, "status": "new", "muted_until": None,
+        "self_belief_id": None, "world_belief_id": None,
+        "prediction_id": None, "prediction_spec": None,
+        "pr_number": None, "rehearse": None,
+    }
+    data["levers"].append(lever)
+    _save_ledger(data)
+    return _offer(lever["id"])
+
+
+# --- EVOLVE / SKIP (consumed by the webhook gate) --------------------------------
+
+def decline_pending():
+    """User replied SKIP: drop the staged lever and mute its feature for a month."""
+    lid = _peek_pending()
+    _clear_pending()
+    if not lid:
+        return "Nothing staged to skip right now."
+    lever = _update_lever(lid, status="rejected",
+                          muted_until=_mute_until(MUTE_DAYS_SKIP))
+    bid = (lever or {}).get("self_belief_id")
+    if bid:
+        argo_self.add_evidence(bid, "user skipped the proposal", supports=False)
+    feature = (lever or {}).get("feature") or "that one"
+    return f"Dropped it. I won't bring up {feature} again for a month."
+
+
+def _judge_reason(judge_text):
+    for line in (judge_text or "").splitlines():
+        if line.strip().upper().startswith("VERDICT:"):
+            return line.strip()
+    return (judge_text or "").strip()[:200]
+
+
+def _rehearse_lever(lever):
+    """Run the upgrade bet through the existing adversaries + judge (text-based:
+    zero changes to argo_rehearse). Returns (verdict, notes) or (None, reason) on
+    infrastructure failure."""
+    import argo_rehearse
+    bet = ("UPGRADE BET (a change to Argo's own stack, not a user project):\n"
+           f"Adopt {lever.get('feature')}: {lever.get('lever')}\n"
+           f"Expected benefit: {lever.get('expected_benefit')}\n"
+           f"Risk: {lever.get('risk')}\n"
+           f"Files to change: {', '.join(lever.get('affected_files') or [])}")
+    run_id = f"{lever.get('id', 'EV-???')}-{_now():%Y%m%dT%H%M%S}"
+    try:
+        critiques = argo_rehearse.run_adversaries(bet, run_id, lever.get("id", ""))
+        if critiques is None:
+            return None, "no model available"
+        verdict, judge_text = argo_rehearse.run_judge(bet, critiques, run_id,
+                                                      lever.get("id", ""))
+        if verdict is None:
+            return None, (judge_text or "judge failed")[:200]
+        return verdict, _judge_reason(judge_text)
+    except Exception as exc:
+        log.error("evolve: rehearsal failed", exc_info=True)
+        return None, type(exc).__name__
+
+
+def _find_pr_for(belief_id):
+    """Join the freshly-opened PR back from the proposals ledger by self-belief id
+    (newest first -- _run_propose_fix records it there via append_proposal)."""
+    if not belief_id:
+        return None
+    import argo_diagnose
+    for p in reversed(argo_diagnose._load_proposals()):
+        if p.get("belief_id") == belief_id and p.get("pr_number"):
+            return p["pr_number"]
+    return None
+
+
+def accept_pending():
+    """User replied EVOLVE: rehearse (major levers), record the world-model belief
+    + dated prediction, then draft the PR through the existing propose path.
+    Returns the honest text for the webhook to send."""
+    lid = _peek_pending()
+    _clear_pending()
+    if not lid:
+        return "Nothing staged to evolve. I'll flag the next upgrade I spot."
+    lever = get_lever(lid)
+    if lever is None:
+        return ("I lost track of that lever (the staging outlived the ledger). "
+                "I'll re-flag it if it still matters.")
+    # Major levers must survive the debate first -- the same gate user projects get.
+    if lever.get("magnitude") == "major":
+        verdict, notes = _rehearse_lever(lever)
+        if verdict is None:
+            _stage(lid)  # infrastructure failure: keep it staged so EVOLVE retries
+            return (f"I couldn't run the rehearsal ({notes}). The lever is still "
+                    "staged; reply EVOLVE to retry.")
+        _update_lever(lid, rehearse={"verdict": verdict, "notes": notes[:500]})
+        if verdict == "KILL":
+            _update_lever(lid, status="killed",
+                          muted_until=_mute_until(MUTE_DAYS_KILL))
+            bid = lever.get("self_belief_id")
+            if bid:
+                argo_self.add_evidence(bid, f"rehearsal killed it: {notes[:160]}",
+                                       supports=False)
+            return ("I argued with myself about it first and the judge said no. "
+                    f"{notes[:300]} Dropping it for a couple of months.")
+    # Adopted: earn a world-model belief, and a dated prediction when scorable.
+    wm_id = world_model.add_belief(
+        f"Adopting {lever.get('feature')} improves Argo: "
+        f"{lever.get('expected_benefit', '')}",
+        source_finding=f"evolution:{lid}")
+    pred_id = None
+    spec = lever.get("prediction_spec")
+    if isinstance(spec, dict) and isinstance(spec.get("metric"), dict):
+        pred_id = argo_predictions.record(
+            wm_id, spec.get("text", ""), spec["metric"],
+            int(spec.get("days", 14)), source=f"evolution:{lid}")
+    _update_lever(lid, status="accepted", world_belief_id=wm_id,
+                  prediction_id=pred_id)
+    payload = {
+        "title": f"Argo evolution: adopt {lever.get('feature')}",
+        "description": (f"Frontier upgrade: {lever.get('lever', '')}\n\n"
+                        f"Expected benefit: {lever.get('expected_benefit', '')}\n"
+                        f"Risk: {lever.get('risk', '')}\n"
+                        f"Evolution lever: {lid}."),
+        "suspected_files": lever.get("affected_files") or [],
+        "suggestion": lever.get("lever", ""),
+        "belief_id": lever.get("self_belief_id"),
+        "incident_key": None,  # not failure-driven; safe for verify/confirm as-is
+        "kind": "evolution",
+    }
+    try:
+        text = _propose(payload)
+    except Exception:
+        log.error("evolve: propose failed for %s", lid, exc_info=True)
+        text = None
+    pr = _find_pr_for(lever.get("self_belief_id"))
+    if pr is None:
+        _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED))
+        return text or ("I tried to draft the upgrade PR but hit an error before "
+                        "it opened. I'll let this one rest a week.")
+    _update_lever(lid, status="pr_open", pr_number=pr)
+    return text
+
+
+# --- closing the loop: follow the PR, then score the prediction ------------------
+
+def sync_proposal_outcomes():
+    """Read-only join against the proposals ledger that argo_diagnose's verify/
+    confirm passes already maintain: move each evolution lever (and its world-model
+    belief) to match its PR's fate, and ARM the prediction the moment the PR merges.
+    Never raises."""
+    try:
+        import argo_diagnose
+        proposals = {p.get("pr_number"): p for p in argo_diagnose._load_proposals()}
+        data = _load_ledger()
+        changed = False
+        for lever in data["levers"]:
+            n = lever.get("pr_number")
+            if not n or lever.get("status") not in ("pr_open", "merged_watch"):
+                continue
+            p = proposals.get(n)
+            if not p:
+                continue
+            wm_id = lever.get("world_belief_id")
+            if p.get("ci_failed") and lever["status"] == "pr_open":
+                lever["status"] = "failed"
+                lever["muted_until"] = _mute_until(MUTE_DAYS_FAILED)
+                if wm_id:
+                    world_model.add_evidence(wm_id, f"PR #{n} failed CI",
+                                             supports=False)
+                changed = True
+            elif p.get("resolved"):
+                # diagnose's confirm pass finished its post-deploy quiet window and
+                # settled the SELF-belief; mirror its verdict here. The dated
+                # prediction (due later) stays the stronger, final grader.
+                if lever.get("prediction_id") and p.get("merged_at"):
+                    argo_predictions.arm(lever["prediction_id"], p.get("merged_at"))
+                bid = lever.get("self_belief_id")
+                held = any(b.get("id") == bid and b.get("status") == "resolved"
+                           for b in argo_self.get_self_beliefs())
+                if held:
+                    lever["status"] = "confirmed"
+                    if wm_id:
+                        world_model.add_evidence(
+                            wm_id, f"PR #{n} merged and held through the "
+                                   f"post-deploy watch")
+                else:
+                    lever["status"] = "failed"
+                    lever["muted_until"] = _mute_until(MUTE_DAYS_FAILED)
+                    if wm_id:
+                        world_model.add_evidence(wm_id, f"PR #{n} did not hold",
+                                                 supports=False)
+                changed = True
+            elif p.get("merged") and lever["status"] == "pr_open":
+                lever["status"] = "merged_watch"
+                if lever.get("prediction_id"):
+                    argo_predictions.arm(lever["prediction_id"],
+                                         p.get("merged_at") or _now_iso())
+                changed = True
+        if changed:
+            _save_ledger(data)
+    except Exception:
+        log.error("evolve: sync_proposal_outcomes failed", exc_info=True)
+
+
+# --- dogfood seeds ----------------------------------------------------------------
+
+# Three pre-validated upgrades (researched 2026-06-10) so week one exercises the
+# whole pipeline: nudge -> EVOLVE -> (rehearse) -> PR -> verify -> confirm -> score.
+# Each is scoped to <=3 files; the structured-outputs seed ships its own measurement
+# hook so its prediction has a precomputable cluster key.
+_SEED_LEVERS = [
+    {
+        "feature": "structured_outputs",
+        "lever": ("Adopt Anthropic structured outputs (output_config json_schema) "
+                  "for my own JSON-returning calls: argo_observe grows an optional "
+                  "output_schema param and argo_diagnose uses it so a malformed "
+                  "reply can no longer silently drop a diagnosis. The change must "
+                  "also call argo_incidents.record_incident('model_failure', "
+                  "'diagnose json parse failed') whenever parsing still fails, so "
+                  "the prediction below is measurable."),
+        "affected_files": ["src/argo_observe.py", "src/argo_diagnose.py"],
+        "expected_benefit": ("Schema-valid JSON from diagnosis calls; the silent "
+                             "parse-failure class disappears."),
+        "risk": ("The output_config parameter shape must match the current API or "
+                 "the diagnose call 400s."),
+        "magnitude": "minor",
+        "prediction_spec": {
+            "text": ("No 'diagnose json parse failed' incidents recur within 14 "
+                     "days of the structured-outputs PR merging"),
+            "metric": {"kind": "incident_absent",
+                       "key": "model_failure|diagnose json parse failed"},
+            "days": 14,
+        },
+    },
+    {
+        "feature": "prompt_caching",
+        "lever": ("Add cache_control (prompt caching) to my Anthropic calls so the "
+                  "big stable system prompt (capabilities + self beliefs + profile) "
+                  "is cached between webhook turns instead of re-billed every "
+                  "message; volatile context must stay after the cache breakpoint."),
+        "affected_files": ["src/argo_observe.py", "src/argo_webhook.py"],
+        "expected_benefit": ("Roughly 90 percent cheaper input tokens on repeated "
+                             "chat turns, no behavior change."),
+        "risk": ("A churning prompt prefix (timestamps, reordered sections) would "
+                 "silently miss the cache; section order matters."),
+        "magnitude": "minor",
+        "prediction_spec": None,  # no usage telemetry yet -- benefit lands as
+                                  # belief evidence, honestly unscored
+    },
+    {
+        "feature": "batch_api",
+        "lever": ("Move SEAS signal auto-scoring to the Anthropic Batch API (50 "
+                  "percent cheaper, not latency sensitive), with a synchronous "
+                  "fallback when a batch does not complete in time."),
+        "affected_files": ["src/seas_finding.py", "src/argo_observe.py"],
+        "expected_benefit": "Half-price scoring of the signal pool each run.",
+        "risk": ("A new call path (submit, poll, collect) that can time out or "
+                 "partially complete; the fallback must be wired."),
+        "magnitude": "major",
+        "prediction_spec": {
+            "text": ("No scheduler_task_error incidents occur in the 14 days after "
+                     "the batch-scoring PR merges"),
+            "metric": {"kind": "incident_absent",
+                       "incident_kind": "scheduler_task_error"},
+            "days": 14,
+        },
+    },
+]
+
+
+def ensure_seeds():
+    """Insert the dogfood seed levers once (idempotent by feature slug). The funnel
+    offers one per day, so the seeds serialize naturally across week one."""
+    try:
+        data = _load_ledger()
+        have = {l.get("feature") for l in data["levers"]}
+        added = 0
+        for seed in _SEED_LEVERS:
+            if seed["feature"] in have:
+                continue
+            entry = {
+                "id": _next_id(data["levers"]), "created_at": _now_iso(),
+                "source": "seed", "source_item": None,
+                "status": "nudge-ready", "muted_until": None,
+                "self_belief_id": None, "world_belief_id": None,
+                "prediction_id": None, "pr_number": None, "rehearse": None,
+            }
+            entry.update(seed)
+            data["levers"].append(entry)
+            added += 1
+        if added:
+            _save_ledger(data)
+            log.info("evolve: seeded %d dogfood lever(s)", added)
+        return added
+    except Exception:
+        log.error("evolve: ensure_seeds failed", exc_info=True)
+        return 0
+
+
+# --- entrypoints --------------------------------------------------------------
+
+def run_cli():
+    """Scheduler entrypoint (the 'frontier' command): close the loop on prior
+    evolution PRs, score due predictions, then run one scan funnel. Each stage is
+    independently guarded."""
+    # Placement guard (load-bearing): on GitHub Actions there is no persistent
+    # ledger and the webhook can never read the staging file -- structurally inert
+    # there, the same way diagnose is. The webhook's local scheduler is the real
+    # production home (argo_scheduled.local_loop).
+    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("ARGO_EVOLUTION_PATH"):
+        log.info("frontier: skipping on Actions (no shared filesystem with the webhook)")
+        print("Frontier: skipped on Actions (no shared filesystem with the webhook).")
+        return {"acted": False, "reason": "actions-no-volume"}
+    ensure_seeds()
+    try:
+        sync_proposal_outcomes()
+    except Exception:
+        log.error("frontier: sync failed", exc_info=True)
+    try:
+        argo_predictions.score_due(notify=_send)
+    except Exception:
+        log.error("frontier: prediction scoring failed", exc_info=True)
+    try:
+        result = scan()
+    except Exception:
+        log.error("frontier: scan failed", exc_info=True)
+        result = {"acted": False, "reason": "error"}
+    print(f"Frontier: {result}")
+    return result
+
+
+def main():
+    """CLI: full pass by default; --no-send is a pure read path (fetch + map +
+    print the candidate; no sends, no staging, no seen-store or ledger writes)."""
+    if "--no-send" not in sys.argv:
+        return run_cli()
+    seen = load_seen()
+    items = _collect_new(seen)
+    print(f"\n🧭 Argo Frontier (dry run) — {len(items)} new item(s)")
+    if not items:
+        print("No new frontier items.\n")
+        return
+    result = _map_levers(items)
+    if result is None:
+        print("Mapper unavailable (no model/key or call failed).\n")
+        return
+    if not result.get("relevant"):
+        print("Mapper: nothing relevant to the stack this run.\n")
+        return
+    print("Candidate lever (nothing sent, staged, or recorded):")
+    print(json.dumps(result, indent=2))
+    print()
+
+
+if __name__ == "__main__":
+    main()
