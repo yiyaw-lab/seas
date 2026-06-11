@@ -45,6 +45,7 @@ COMMANDS = {
     "project": ("argo_project", "main"),
     "watch": ("argo_watch", "main"),
     "reflect": ("argo_self", "reflect_cli"),
+    "diagnose": ("argo_diagnose", "run_cli"),
 }
 
 
@@ -139,6 +140,12 @@ def main():
             # traceback so the failure is diagnosable, never silently swallowed.
             log.error("schedule command %s failed: %s",
                       sched["command"], exc, exc_info=True)
+            try:  # also record it so the diagnostic loop can spot a flapping job
+                import argo_incidents
+                argo_incidents.record_incident(
+                    "scheduler_task_error", f"{sched['command']}: {exc}", str(exc))
+            except Exception:
+                pass
         finally:
             fired.add(key)
 

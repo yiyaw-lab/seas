@@ -18,6 +18,7 @@ Reuses, doesn't duplicate: fetch_signals._fetch_url (urllib + certifi TLS).
 Later phases add repo-read (C), self-status (D), and gated self-heal (E) tools.
 """
 
+import ast
 import functools
 import ipaddress
 import json
@@ -947,17 +948,59 @@ PENDING_HEAL_PATH = ROOT / "data" / "argo_pending_heal.json"
 HEAL_ACTIONS = {
     "reregister_webhook": "re-register the Telegram webhook to WEBHOOK_URL",
     "refetch_signals": "refetch the frontier signal feeds",
+    # Self-fix: draft a fix PR for a recurring failure the diagnostic loop caught.
+    # Staged by argo_diagnose with a payload; run on the user's FIX reply. Still
+    # never merges -- it only opens a PR a human reviews.
+    "propose_fix": "draft a fix (with a reproduction test) and open a PR for review",
 }
 
 
-def _stage_pending(action):
-    """Record a single pending heal action for the CONFIRM shortcut to pick up."""
+def _stage_pending(action, payload=None):
+    """Record a single pending heal action for the CONFIRM/FIX shortcut to pick up. An
+    optional payload carries action-specific data (the propose_fix diagnosis/files)."""
     from datetime import datetime, timezone
     PENDING_HEAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    argo_store.save_json(PENDING_HEAL_PATH, {
+    rec = {
         "action": action,
         "staged_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    })
+    }
+    if payload is not None:
+        rec["payload"] = payload
+    argo_store.save_json(PENDING_HEAL_PATH, rec)
+
+
+def stage_fix_proposal(payload):
+    """Stage a propose_fix action carrying a diagnosis payload (called by argo_diagnose
+    when a confident fix is ready to offer behind the FIX gate)."""
+    _stage_pending("propose_fix", payload)
+
+
+def _peek_pending_payload():
+    """Read the staged payload WITHOUT clearing it (the IGNORE path needs the incident
+    key to mute the right cluster). Returns the payload dict or None."""
+    if not PENDING_HEAL_PATH.exists():
+        return None
+    try:
+        return (json.loads(PENDING_HEAL_PATH.read_text()) or {}).get("payload")
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def decline_pending_fix():
+    """User replied IGNORE: drop the staged fix and mute its cluster for 7 days so the
+    diagnostic loop won't re-nudge it."""
+    from datetime import datetime, timedelta, timezone
+    payload = _peek_pending_payload()
+    clear_pending_heal()
+    key = (payload or {}).get("incident_key")
+    if key:
+        try:
+            import argo_incidents
+            until = (datetime.now(timezone.utc) + timedelta(days=7)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            argo_incidents.mark(key, status="muted", muted_until=until)
+        except Exception:
+            log.warning("decline_pending_fix: could not mute %s", key, exc_info=True)
 
 
 def _heal(action):
@@ -1006,6 +1049,7 @@ def run_pending_heal():
         PENDING_HEAL_PATH.unlink(missing_ok=True)
         return "Pending action was unreadable; cleared it."
     action = pending.get("action")
+    payload = pending.get("payload")
     PENDING_HEAL_PATH.unlink(missing_ok=True)  # one-shot, clear before running
     try:
         if action == "reregister_webhook":
@@ -1016,6 +1060,8 @@ def run_pending_heal():
             import fetch_signals
             fetch_signals.main()
             return "Refetched the signal feeds. ✅"
+        if action == "propose_fix":
+            return _run_propose_fix(payload or {})
         return f"Unknown staged action '{action}'."
     except Exception as exc:
         return f"Heal action '{action}' failed: {type(exc).__name__}: {exc}"
@@ -1089,6 +1135,153 @@ def _gh_write(method, path, body):
     return False, f"{type(last).__name__}: {last} {detail}"
 
 
+# --- proposal gates: repro-test required + wire-check (run BEFORE any GitHub write) --
+# A fix that isn't testable, or whose new code is never called, can't even open a PR.
+# This encodes the repo's hard-won lesson ("verify fix is wired not just written") as a
+# mechanical, stdlib-`ast` check, so a confidently-wrong fix is caught before it ships.
+
+def _is_test_file(path):
+    name = path.rsplit("/", 1)[-1]
+    return path.startswith("tests/") and name.startswith("test_") and name.endswith(".py")
+
+
+def _toplevel_defs(tree):
+    return {n.name for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def _referenced_names(files):
+    """Every identifier USED (Name/Attribute/import alias) across the given payload
+    files -- the set a symbol must appear in to count as actually wired in."""
+    refs = set()
+    for path, content in files.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                refs.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                refs.add(node.attr)
+            elif isinstance(node, ast.alias):
+                # both the alias and the real module base, so `import x as m` still
+                # counts x as referenced (relevance) and m as referenced (wiring).
+                refs.add(node.name.split(".")[0])
+                if node.asname:
+                    refs.add(node.asname)
+    return refs
+
+
+def _validate_files(files):
+    if len(files) > MAX_PROPOSE_FILES:
+        return f"Too many files ({len(files)}); max {MAX_PROPOSE_FILES} per proposal."
+    for p, c in files.items():
+        if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
+            return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
+        if p.startswith("/") or ".." in p:
+            return f"Refused: unsafe path '{p}'."
+    return None
+
+
+def _proposal_gate(files):
+    """Return a refusal string if the proposal isn't safe to open, else None:
+      1. it MUST include a reproduction test under tests/ (so CI can prove fail->pass);
+      2. every new .py file must parse, and each top-level def/class in a NEW file must be
+         referenced somewhere in the proposal (not written-but-never-called);
+      3. the reproduction test must exercise a changed module (not an empty placeholder)."""
+    test_files = [p for p in files if _is_test_file(p)]
+    if not test_files:
+        return ("A fix proposal must include a reproduction test under tests/ "
+                "(tests/test_*.py) so CI can prove it fails before and passes after.")
+    refs = _referenced_names(files)
+    changed_modules = []
+    for path, content in files.items():
+        if not path.endswith(".py") or _is_test_file(path):
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError as exc:
+            return f"Refused: '{path}' does not parse ({exc.msg})."
+        module = path.rsplit("/", 1)[-1][:-3]
+        changed_modules.append(module)
+        if (ROOT / path).exists():
+            continue  # existing file: can't diff to find NEW symbols; trust repro + CI
+        for name in _toplevel_defs(tree):
+            # The symbol NAME itself must be used somewhere (called/instantiated/
+            # referenced), not merely have its module imported -- importing a module
+            # whose new function is never called is exactly the bug this guards.
+            if name not in refs:
+                return (f"Refused: new symbol '{name}' in {path} is defined but never "
+                        f"called from anywhere in the proposal (wired not just written).")
+    if changed_modules:
+        test_refs = _referenced_names({p: files[p] for p in test_files})
+        if not any(m in test_refs for m in changed_modules):
+            return ("Refused: the reproduction test does not reference any changed module "
+                    f"({', '.join(changed_modules)}); it must exercise the fix.")
+    return None
+
+
+def _open_pr(title, description, files):
+    """Create a NEW branch, write the files, open a PR. Returns (ok, info) where info on
+    success is {pr_number, url, head_sha, branch}, else (False, error_string). Never
+    touches the default branch."""
+    import base64
+    import re as _re
+    from datetime import datetime, timezone
+
+    ok, ref = _gh_write("GET", f"/repos/{PROPOSE_REPO}/git/ref/heads/{PROPOSE_BASE}", None)
+    if not ok:
+        return False, f"Couldn't read base branch: {ref}"
+    base_sha = ref.get("object", {}).get("sha")
+    if not base_sha:
+        return False, "Couldn't resolve base branch SHA."
+    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "change"
+    branch = f"argo/{slug}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+    ok, res = _gh_write("POST", f"/repos/{PROPOSE_REPO}/git/refs",
+                        {"ref": f"refs/heads/{branch}", "sha": base_sha})
+    if not ok:
+        return False, f"Couldn't create branch: {res}"
+    for path, content in files.items():
+        okc, cur = _gh_write("GET",
+                             f"/repos/{PROPOSE_REPO}/contents/{path}?ref={branch}", None)
+        sha = cur.get("sha") if okc and isinstance(cur, dict) else None
+        body = {"message": f"{title}: {path}",
+                "content": base64.b64encode(content.encode()).decode(), "branch": branch}
+        if sha:
+            body["sha"] = sha
+        okw, resw = _gh_write("PUT", f"/repos/{PROPOSE_REPO}/contents/{path}", body)
+        if not okw:
+            return False, f"Couldn't write '{path}': {resw}"
+    prbody = (f"{description}\n\n---\n*Proposed by Argo (self-create, propose-only). "
+              f"Review and merge to deploy; Argo cannot merge this itself.*")
+    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls",
+                       {"title": title, "head": branch, "base": PROPOSE_BASE, "body": prbody})
+    if not ok:
+        return False, f"Branch + files created ({branch}), but opening the PR failed: {pr}"
+    return True, {"pr_number": pr.get("number"), "url": pr.get("html_url", "(no url)"),
+                  "head_sha": pr.get("head", {}).get("sha"), "branch": branch}
+
+
+def _propose_change_impl(title, description, files_json):
+    """Validate -> gate (repro + wire-check) -> open PR. Returns (text, info_or_None) so
+    both the MCP tool (text) and the self-fix path (info, for the ledger) can use it."""
+    try:
+        files = json.loads(files_json)
+        assert isinstance(files, dict) and files
+    except Exception:
+        return "files_json must be a non-empty JSON object of {path: contents}.", None
+    err = _validate_files(files) or _proposal_gate(files)
+    if err:
+        return err, None
+    ok, info = _open_pr(title, description, files)
+    if not ok:
+        return info, None
+    return f"Opened PR for review: {info['url']}", info
+
+
 @mcp.tool()
 @with_deadline(120)  # chains 5+ GitHub calls; generous but far under 300s
 def propose_change(title: str, description: str, files_json: str) -> str:
@@ -1102,68 +1295,126 @@ def propose_change(title: str, description: str, files_json: str) -> str:
     files_json: a JSON object mapping repo file paths to their FULL new contents,
       e.g. '{"src/foo.py": "...file text..."}'. Max 5 files, 40KB each.
 
+    A fix proposal MUST include a reproduction test under tests/ (tests/test_*.py) that
+    fails before and passes after; proposals whose new code is never called are refused.
+
     Returns the PR URL on success. Opens against a NEW branch only; cannot touch
     the default branch."""
-    import re as _re
-    from datetime import datetime, timezone
+    text, _info = _propose_change_impl(title, description, files_json)
+    return text
 
-    # Parse + validate the file map.
+
+def _check_proposal_ci(pr_number):
+    """Read a PR's merge state + the 'Tests' CI conclusion via the propose token.
+    Returns {merged, state, merged_at, head_sha, ci_conclusion}. ci_conclusion is
+    'unknown' when the token can't read check-runs (PR-only scope) or no test run exists
+    yet, 'pending' while running, else the run's conclusion -- we NEVER fabricate green."""
+    ok, pr = _gh_write("GET", f"/repos/{PROPOSE_REPO}/pulls/{pr_number}", None)
+    if not ok or not isinstance(pr, dict):
+        return {"merged": False, "state": "unknown", "merged_at": None,
+                "head_sha": None, "ci_conclusion": "unknown"}
+    head_sha = pr.get("head", {}).get("sha")
+    out = {"merged": bool(pr.get("merged")), "state": pr.get("state", "open"),
+           "merged_at": pr.get("merged_at"), "head_sha": head_sha,
+           "ci_conclusion": "unknown"}
+    if head_sha:
+        ok2, runs = _gh_write(
+            "GET", f"/repos/{PROPOSE_REPO}/commits/{head_sha}/check-runs", None)
+        if ok2 and isinstance(runs, dict):
+            tests = [r for r in runs.get("check_runs", [])
+                     if "test" in (r.get("name", "") or "").lower()]
+            if tests:
+                if all(r.get("status") == "completed" for r in tests):
+                    out["ci_conclusion"] = (
+                        "success" if all(r.get("conclusion") == "success" for r in tests)
+                        else next((r.get("conclusion") for r in tests
+                                   if r.get("conclusion") != "success"), "failure"))
+                else:
+                    out["ci_conclusion"] = "pending"
+    return out
+
+
+_AUTHOR_SYSTEM = ("You are Argo, writing a minimal, correct fix for one of your own "
+                  "recurring bugs. You draft a PR a human reviews; you never merge.")
+_AUTHOR_PROMPT = (
+    "Diagnosis and suggested fix:\n{diagnosis}\n{suggestion}\n\n"
+    "Current contents of the suspected files (may be truncated):\n{files}\n\n"
+    'Return ONLY a JSON object: {{"files": {{"<path>": "<full new file contents>"}}}}.\n'
+    "Requirements:\n"
+    "- Make the SMALLEST change that fixes the bug; return the FULL new contents of each "
+    "file you change.\n"
+    "- INCLUDE a test under tests/ named test_*.py that FAILS on the current code and "
+    "PASSES with your fix, and that imports/exercises the changed module.\n"
+    "- Any new function or class you add must actually be called (wired in), not just "
+    "defined.\n"
+    "- Standard library only; no new dependencies. Plain ASCII, no em dashes.")
+
+
+def _author_fix_files(payload):
+    """Premium model call: given the diagnosis + the current contents of the suspected
+    files, draft {path: full_new_contents} INCLUDING a tests/test_*.py reproduction.
+    Returns the files dict or None. Guarded; never raises."""
+    import argo_observe as observe
+    suspected = [f for f in (payload.get("suspected_files") or [])
+                 if isinstance(f, str) and (ROOT / f).exists()][:MAX_PROPOSE_FILES - 1]
+    current = {}
+    for f in suspected:
+        try:
+            current[f] = (ROOT / f).read_text()[:MAX_PROPOSE_BYTES]
+        except OSError:
+            pass
+    model = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
+    prov = observe.provider_for(model)
+    if not prov or not os.environ.get(prov["key_env"]):
+        model = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
+        prov = observe.provider_for(model)
+        if not prov or not os.environ.get(prov["key_env"]):
+            return None
+    prompt = _AUTHOR_PROMPT.format(
+        diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
+        files=json.dumps(current, indent=2)[:30000] or "(no current files)")
     try:
-        files = json.loads(files_json)
-        assert isinstance(files, dict) and files
+        # Opus rejects the temperature param; pass None so observe omits it (the gotcha).
+        raw = observe.chat_with_mcp(
+            _AUTHOR_SYSTEM, [{"role": "user", "content": prompt}], model, temperature=None)
     except Exception:
-        return "files_json must be a non-empty JSON object of {path: contents}."
-    if len(files) > MAX_PROPOSE_FILES:
-        return f"Too many files ({len(files)}); max {MAX_PROPOSE_FILES} per proposal."
-    for p, c in files.items():
-        if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
-            return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
-        if p.startswith("/") or ".." in p:
-            return f"Refused: unsafe path '{p}'."
+        log.error("author_fix: model call failed", exc_info=True)
+        return None
+    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    files = obj.get("files") if isinstance(obj, dict) else None
+    if isinstance(files, dict) and files and all(isinstance(v, str) for v in files.values()):
+        return files
+    return None
 
-    # 1. Resolve the base branch head SHA (read with the propose token).
-    ok, ref = _gh_write("GET", f"/repos/{PROPOSE_REPO}/git/ref/heads/{PROPOSE_BASE}", None)
-    if not ok:
-        return f"Couldn't read base branch: {ref}"
-    base_sha = ref.get("object", {}).get("sha")
-    if not base_sha:
-        return "Couldn't resolve base branch SHA."
 
-    # 2. Create a NEW branch off base (never write to base itself).
-    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "change"
-    branch = f"argo/{slug}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
-    ok, res = _gh_write("POST", f"/repos/{PROPOSE_REPO}/git/refs",
-                        {"ref": f"refs/heads/{branch}", "sha": base_sha})
-    if not ok:
-        return f"Couldn't create branch: {res}"
-
-    # 3. Write each file onto the new branch (PUT contents API; base64).
-    import base64
-    for path, content in files.items():
-        # need the file's current sha if it already exists, to update it
-        okc, cur = _gh_write("GET",
-                             f"/repos/{PROPOSE_REPO}/contents/{path}?ref={branch}", None)
-        sha = cur.get("sha") if okc and isinstance(cur, dict) else None
-        payload = {
-            "message": f"{title}: {path}",
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": branch,
-        }
-        if sha:
-            payload["sha"] = sha
-        okw, resw = _gh_write("PUT", f"/repos/{PROPOSE_REPO}/contents/{path}", payload)
-        if not okw:
-            return f"Couldn't write '{path}': {resw}"
-
-    # 4. Open the PR (base = default branch; head = our new branch).
-    body = (f"{description}\n\n---\n*Proposed by Argo (self-create, propose-only). "
-            f"Review and merge to deploy; Argo cannot merge this itself.*")
-    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls",
-                       {"title": title, "head": branch, "base": PROPOSE_BASE,
-                        "body": body})
-    if not ok:
-        return f"Branch + files created ({branch}), but opening the PR failed: {pr}"
-    return f"Opened PR for review: {pr.get('html_url', '(no url)')}"
+def _run_propose_fix(payload):
+    """FIX path: draft the fix files, run them through the propose gate + open the PR,
+    and record the PR in the proposal ledger so verify/confirm can follow it to
+    resolution. Honest acks only -- proposed and pending review, never 'fixed.'"""
+    files = _author_fix_files(payload)
+    if not files:
+        return ("I couldn't draft a fix I trust for that one (no small, testable change). "
+                "I'll leave it for you rather than open a shaky PR.")
+    text, info = _propose_change_impl(
+        payload.get("title", "Argo self-fix"), payload.get("description", ""),
+        json.dumps(files))
+    if not info:
+        return f"I drafted a fix but it didn't pass my own checks, so I didn't open it: {text}"
+    try:
+        import argo_diagnose
+        argo_diagnose.append_proposal(
+            info["pr_number"], info["url"], payload.get("belief_id"),
+            payload.get("incident_key"), head_sha=info.get("head_sha"))
+    except Exception:
+        log.error("propose_fix: could not record proposal in ledger", exc_info=True)
+    return (f"Drafted a fix with a reproduction test and opened {info['url']} for your "
+            f"review, pending CI. I can't merge it myself.")
 
 
 def mcp_asgi_app():

@@ -390,6 +390,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     # detect that phantom (return_tool_events).
     events = []
     if mcp_servers:
+        name = "?"  # last tool_use name; a result block follows its own use
         for b in response.content:
             bt = getattr(b, "type", "")
             if bt == "mcp_tool_use":
@@ -400,6 +401,12 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                 snippet = str(getattr(b, "content", ""))[:200]
                 if getattr(b, "is_error", False):
                     log.warning("mcp tool_result ERROR: %s", snippet)
+                    try:  # feed the diagnostic loop; never let it break a chat turn
+                        import argo_incidents
+                        argo_incidents.record_incident(
+                            "tool_error", f"{name}: {snippet}", snippet)
+                    except Exception:
+                        pass
                 else:
                     log.info("mcp tool_result ok: %s", snippet)
 

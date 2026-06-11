@@ -47,3 +47,12 @@ TASTE_PATH = Path(os.environ.get("ARGO_TASTE_PATH", str(DATA / "taste_signals.js
 # above. argo_watch re-exports this as its module-level SEEN_PATH (the test patch
 # point), so load_seen/save_seen read the override at call time.
 SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
+# Self-diagnosis stores: the operational-failure ledger Argo reads back to spot its
+# own recurring problems, and the proposal ledger that joins a fix PR to the belief
+# it should resolve. Env-overridable for the same reason as the self-model: the live
+# bot writes these at chat/scheduler time, so point ARGO_INCIDENTS_PATH /
+# ARGO_PROPOSALS_PATH at the Railway volume or each redeploy wipes them. Both are
+# gitignored. argo_incidents/argo_diagnose re-export these as module-level constants
+# (the test patch points), so their helpers read the override at call time.
+INCIDENTS_PATH = Path(os.environ.get("ARGO_INCIDENTS_PATH", str(DATA / "argo_incidents.json")))
+PROPOSALS_PATH = Path(os.environ.get("ARGO_PROPOSALS_PATH", str(DATA / "argo_proposals.json")))

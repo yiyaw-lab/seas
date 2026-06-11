@@ -66,6 +66,12 @@ def try_send_message(text):
             return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
         log.error("telegram sendMessage failed: %s: %s", type(exc).__name__, exc)
+        try:  # surface repeated delivery failures to the diagnostic loop
+            import argo_incidents
+            argo_incidents.record_incident(
+                "delivery_failure", f"sendMessage {type(exc).__name__}: {exc}", str(exc))
+        except Exception:
+            pass
         return False
 
 

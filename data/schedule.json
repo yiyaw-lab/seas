@@ -1,5 +1,5 @@
 {
-  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect'.",
+  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect' | 'diagnose'.",
   "schedules": [
     {
       "name": "Weekly project (Fri)",
@@ -20,6 +20,13 @@
       "days": [6],
       "hour": 16,
       "command": "reflect",
+      "enabled": true
+    },
+    {
+      "name": "Self-diagnosis",
+      "days": "daily",
+      "hour": 13,
+      "command": "diagnose",
       "enabled": true
     }
   ]
