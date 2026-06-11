@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 
 import argo_paths
@@ -64,8 +65,14 @@ _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Levers in one of these states block re-proposing their feature slug; a terminal
 # lever blocks only while muted (confirmed blocks forever -- it's adopted).
-_IN_FLIGHT = ("nudge-ready", "nudged", "accepted", "pr_open", "merged_watch")
+_IN_FLIGHT = ("nudge-ready", "nudged", "evolving", "accepted", "pr_open",
+              "merged_watch")
 _TERMINAL = ("rejected", "killed", "failed")
+
+# Webhook updates run in parallel threads (one per Telegram message), so the
+# EVOLVE/SKIP gate serializes its peek-clear-claim section: without it, two
+# overlapping replies could both claim the same staged lever.
+_GATE_LOCK = threading.Lock()
 
 
 def _now():
@@ -398,13 +405,12 @@ def scan():
         # Infrastructure failure: do NOT update the seen-store, so the items are
         # not attempt-penalized for an outage (mirrors argo_watch's abort).
         return {"acted": False, "reason": "mapper unavailable"}
-    # The mapper ran: settle the chosen item, bump everything else it saw.
+    # The mapper ran: bump every item it saw. The chosen item is settled at
+    # MAX_ATTEMPTS only after a lever actually lands, so a mapper hit that the
+    # validation gates below reject is retried (up to the cap), not retired.
     chosen_title = (result.get("source_title") or "").strip().lower()
     for it in items:
-        if chosen_title and chosen_title in (it.get("title") or "").lower():
-            seen[it["_iid"]] = MAX_ATTEMPTS
-        else:
-            seen[it["_iid"]] = seen.get(it["_iid"], 0) + 1
+        seen[it["_iid"]] = seen.get(it["_iid"], 0) + 1
     save_seen(seen)
     if not result.get("relevant"):
         return {"acted": False, "reason": "nothing relevant"}
@@ -440,19 +446,33 @@ def scan():
     }
     data["levers"].append(lever)
     _save_ledger(data)
+    if src_item:
+        seen[src_item["_iid"]] = MAX_ATTEMPTS
+        save_seen(seen)
     return _offer(lever["id"])
 
 
 # --- EVOLVE / SKIP (consumed by the webhook gate) --------------------------------
 
 def decline_pending():
-    """User replied SKIP: drop the staged lever and mute its feature for a month."""
-    lid = _peek_pending()
-    _clear_pending()
-    if not lid:
-        return "Nothing staged to skip right now."
-    lever = _update_lever(lid, status="rejected",
-                          muted_until=_mute_until(MUTE_DAYS_SKIP))
+    """User replied SKIP: drop the staged lever and mute its feature for a month.
+    Peek-clear-update runs under the gate lock so a SKIP can't race an EVOLVE
+    thread that is mid-claim on the same lever."""
+    with _GATE_LOCK:
+        lid = _peek_pending()
+        _clear_pending()
+        if not lid:
+            # An EVOLVE thread may have claimed the lever already (it clears the
+            # staging at claim time); tell the user instead of a bare "nothing".
+            busy = next((l for l in _load_ledger()["levers"]
+                         if l.get("status") == "evolving"), None)
+            if busy:
+                return (f"I'm already mid-evolve on {busy.get('feature')} (you said "
+                        "EVOLVE first). If the PR opens and you don't want it, just "
+                        "close it unmerged.")
+            return "Nothing staged to skip right now."
+        lever = _update_lever(lid, status="rejected",
+                              muted_until=_mute_until(MUTE_DAYS_SKIP))
     bid = (lever or {}).get("self_belief_id")
     if bid:
         argo_self.add_evidence(bid, "user skipped the proposal", supports=False)
@@ -495,20 +515,29 @@ def _rehearse_lever(lever):
 def accept_pending():
     """User replied EVOLVE: rehearse (major levers), record the world-model belief
     + dated prediction, then draft the PR through the existing propose path.
-    Returns the honest text for the webhook to send."""
-    lid = _peek_pending()
-    _clear_pending()
-    if not lid:
-        return "Nothing staged to evolve. I'll flag the next upgrade I spot."
-    lever = get_lever(lid)
-    if lever is None:
-        return ("I lost track of that lever (the staging outlived the ledger). "
-                "I'll re-flag it if it still matters.")
+    Returns the honest text for the webhook to send. The peek-clear-claim section
+    runs under the gate lock and flips the lever to 'evolving', so an overlapping
+    EVOLVE or SKIP can't double-process the slow rehearse/propose work below."""
+    with _GATE_LOCK:
+        lid = _peek_pending()
+        _clear_pending()
+        if not lid:
+            return "Nothing staged to evolve. I'll flag the next upgrade I spot."
+        lever = get_lever(lid)
+        if lever is None:
+            return ("I lost track of that lever (the staging outlived the ledger). "
+                    "I'll re-flag it if it still matters.")
+        if lever.get("status") != "nudged":
+            return (f"That lever is already {lever.get('status')}; nothing left "
+                    "for me to do here.")
+        _update_lever(lid, status="evolving")
     # Major levers must survive the debate first -- the same gate user projects get.
     if lever.get("magnitude") == "major":
         verdict, notes = _rehearse_lever(lever)
         if verdict is None:
-            _stage(lid)  # infrastructure failure: keep it staged so EVOLVE retries
+            # Infrastructure failure: put it back exactly as staged so EVOLVE retries.
+            _update_lever(lid, status="nudged")
+            _stage(lid)
             return (f"I couldn't run the rehearsal ({notes}). The lever is still "
                     "staged; reply EVOLVE to retry.")
         _update_lever(lid, rehearse={"verdict": verdict, "notes": notes[:500]})
@@ -592,9 +621,14 @@ def sync_proposal_outcomes():
                 # prediction (due later) stays the stronger, final grader.
                 if lever.get("prediction_id") and p.get("merged_at"):
                     argo_predictions.arm(lever["prediction_id"], p.get("merged_at"))
-                bid = lever.get("self_belief_id")
-                held = any(b.get("id") == bid and b.get("status") == "resolved"
-                           for b in argo_self.get_self_beliefs())
+                if "held" in p:
+                    held = bool(p["held"])  # confirm_deployed's settled verdict
+                else:
+                    # Legacy proposal rows predate the held stamp: re-derive it
+                    # from the self-belief that confirm_deployed resolved.
+                    bid = lever.get("self_belief_id")
+                    held = any(b.get("id") == bid and b.get("status") == "resolved"
+                               for b in argo_self.get_self_beliefs())
                 if held:
                     lever["status"] = "confirmed"
                     if wm_id:

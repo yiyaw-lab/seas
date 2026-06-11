@@ -143,7 +143,9 @@ class ConfirmDeployedTest(unittest.TestCase):
         with mock.patch.object(inc, "recurred_since",
                                side_effect=AssertionError("no incident to check")):
             dg.confirm_deployed()
-        self.assertTrue(dg._load_proposals()[0]["resolved"])
+        p = dg._load_proposals()[0]
+        self.assertTrue(p["resolved"])
+        self.assertIs(p["held"], True)  # stamped for downstream outcome sync
         belief = next(b for b in argo_self.get_self_beliefs() if b["id"] == bid)
         self.assertEqual(belief["status"], "resolved")
         self.assertEqual(len(self.sent), 1)
@@ -155,7 +157,9 @@ class ConfirmDeployedTest(unittest.TestCase):
         key = inc.record_incident("phantom_send", "claimed but no tool fired")
         self._merged_proposal(bid, key)  # incident seen after merged_at -> recurred
         dg.confirm_deployed()
-        self.assertTrue(dg._load_proposals()[0]["resolved"])
+        p = dg._load_proposals()[0]
+        self.assertTrue(p["resolved"])
+        self.assertIs(p["held"], False)
         belief = next(b for b in argo_self.get_self_beliefs() if b["id"] == bid)
         self.assertTrue(belief.get("refutations"))
         self.assertIn("didn't hold", self.sent[0])

@@ -211,6 +211,19 @@ class FunnelGateTest(EvolveBase):
             res = ev.scan()
         self.assertFalse(res["acted"])
         self.assertIn("affected files", res["reason"])
+        # The rejected mapper hit is attempt-bumped, not retired: the item stays
+        # eligible for a retry until MAX_ATTEMPTS.
+        self.assertEqual(ev.load_seen()["a"], 1)
+
+    def test_rejected_relevance_bumps_not_retires(self):
+        items = [{"title": "t", "summary": "", "link": "http://a",
+                  "source": "sdk", "_iid": "a"}]
+        with mock.patch.object(ev, "_collect_new", return_value=items), \
+             mock.patch.object(ev, "_map_levers",
+                               return_value={"relevant": False, "source_title": "t"}):
+            res = ev.scan()
+        self.assertFalse(res["acted"])
+        self.assertEqual(ev.load_seen()["a"], 1)
 
     def test_watch_seen_store_is_isolated(self):
         items = [{"title": "t", "summary": "", "link": "http://a",
@@ -245,6 +258,28 @@ class GateCommandsTest(EvolveBase):
     def test_decline_with_nothing_staged(self):
         self.assertIn("Nothing staged", ev.decline_pending())
 
+    def test_skip_during_inflight_evolve_does_not_reject(self):
+        # accept_pending claims the lever (status evolving, staging cleared) before
+        # its slow rehearse/propose work; a SKIP landing then must not fight it.
+        self._lever(id="EV-905", feature="busy_one", status="evolving")
+        text = ev.decline_pending()
+        self.assertIn("mid-evolve", text)
+        self.assertIn("busy_one", text)
+        self.assertEqual(ev.get_lever("EV-905")["status"], "evolving")
+
+    def test_accept_refuses_lever_not_nudged(self):
+        # A second EVOLVE (or one racing a SKIP) finds the lever already claimed
+        # or resolved: it must refuse instead of double-proposing.
+        self._lever(id="EV-906", feature="gone", status="rejected")
+        ev._stage("EV-906")
+        with mock.patch.object(ev, "_propose",
+                               side_effect=AssertionError("must not propose")), \
+             mock.patch.object(ev, "_rehearse_lever",
+                               side_effect=AssertionError("must not rehearse")):
+            text = ev.accept_pending()
+        self.assertIn("already rejected", text)
+        self.assertEqual(ev.get_lever("EV-906")["status"], "rejected")
+
     def test_accept_minor_drafts_pr_and_joins_ledger(self):
         lid = self._offer_seed()  # structured_outputs: minor, has a prediction spec
         captured = {}
@@ -277,7 +312,7 @@ class GateCommandsTest(EvolveBase):
         self.assertEqual(p["belief_id"], lever["world_belief_id"])
 
     def test_accept_major_kill_is_terminal(self):
-        self._lever(id="EV-901", feature="big_bet", magnitude="major")
+        self._lever(id="EV-901", feature="big_bet", magnitude="major", status="nudged")
         ev._stage("EV-901")
         with mock.patch.object(ev, "_rehearse_lever",
                                return_value=("KILL", "VERDICT: KILL - too risky")), \
@@ -291,7 +326,7 @@ class GateCommandsTest(EvolveBase):
         self.assertEqual(lever["rehearse"]["verdict"], "KILL")
 
     def test_accept_major_rehearse_failure_keeps_it_staged(self):
-        self._lever(id="EV-902", feature="big_bet2", magnitude="major")
+        self._lever(id="EV-902", feature="big_bet2", magnitude="major", status="nudged")
         ev._stage("EV-902")
         with mock.patch.object(ev, "_rehearse_lever", return_value=(None, "no model")), \
              mock.patch.object(ev, "_propose",
@@ -299,9 +334,17 @@ class GateCommandsTest(EvolveBase):
             text = ev.accept_pending()
         self.assertIn("still staged", text)
         self.assertTrue(ev.has_pending())  # retryable
+        # The claim is released too, so the retry EVOLVE passes the status check.
+        self.assertEqual(ev.get_lever("EV-902")["status"], "nudged")
+        with mock.patch.object(ev, "_rehearse_lever", return_value=("PROCEED", "ok")), \
+             mock.patch.object(ev, "_propose",
+                               return_value=("Drafted a fix and opened http://pr/303.",
+                                             {"pr_number": 303, "url": "http://pr/303"})):
+            ev.accept_pending()
+        self.assertEqual(ev.get_lever("EV-902")["status"], "pr_open")
 
     def test_accept_propose_failure_rests_a_week(self):
-        self._lever(id="EV-903", feature="meh", magnitude="minor")
+        self._lever(id="EV-903", feature="meh", magnitude="minor", status="nudged")
         ev._stage("EV-903")
         with mock.patch.object(ev, "_propose",
                                return_value=("I couldn't draft a fix I trust for that one.",
@@ -313,7 +356,7 @@ class GateCommandsTest(EvolveBase):
         self.assertIsNotNone(lever["muted_until"])
 
     def test_accept_tracks_pr_even_if_ledger_append_failed(self):
-        self._lever(id="EV-904", feature="lucky", magnitude="minor")
+        self._lever(id="EV-904", feature="lucky", magnitude="minor", status="nudged")
         ev._stage("EV-904")
         # _propose opened a real PR but the proposals-ledger write failed: the lever
         # must still go pr_open with the returned number, never "failed".
@@ -367,6 +410,26 @@ class SyncOutcomesTest(EvolveBase):
         self.assertEqual(ev.get_lever("EV-910")["status"], "confirmed")
         belief = wm.get_belief(wm_id)
         self.assertTrue(any("quiet" in e for e in belief["evidence"]))
+
+    def test_held_stamp_confirms_without_belief_join(self):
+        # confirm_deployed stamps the verdict on the proposal row; sync must trust
+        # it even when the belief-id plumbing diverges (belief never resolved here).
+        _, wm_id, _ = self._adopted_lever()
+        self._set_proposal(merged=True, merged_at="2026-06-10T00:00:00Z",
+                           resolved=True, held=True)
+        ev.sync_proposal_outcomes()
+        self.assertEqual(ev.get_lever("EV-910")["status"], "confirmed")
+        self.assertTrue(wm.get_belief(wm_id)["evidence"])
+
+    def test_held_false_fails_the_lever(self):
+        bid, wm_id, _ = self._adopted_lever()
+        argo_self.resolve_self_belief(bid, "stale resolution")  # stamp must win
+        self._set_proposal(merged=True, merged_at="2026-06-10T00:00:00Z",
+                           resolved=True, held=False)
+        ev.sync_proposal_outcomes()
+        lever = ev.get_lever("EV-910")
+        self.assertEqual(lever["status"], "failed")
+        self.assertTrue(wm.get_belief(wm_id)["refutations"])
 
     def test_ci_failure_fails_the_lever_and_refutes(self):
         _, wm_id, _ = self._adopted_lever()
