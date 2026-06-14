@@ -427,6 +427,15 @@ def _clean_reply(text):
     return re.sub(r"  +", " ", text)
 
 
+# Prepended when Argo answers on a tool-less fallback only because its
+# tool-capable (Claude) brain errored this turn -- so a silent degrade can't read
+# as normal service. Plain text, no markdown/em-dash (Argo voice rules).
+_FALLBACK_NOTICE = (
+    "heads up: my main brain is down right now (likely an API/credits issue), so "
+    "I'm on a backup that can't use tools this turn: no reading links, opening PRs, "
+    "or fetching live data. I'll answer from memory and flag what I can't verify.\n\n")
+
+
 def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     anthropic_only=False):
     """Run Argo's reply over the runnable models and persist both turns.
@@ -461,10 +470,12 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     hist = _recent_turns(chat_id)
 
     last_error = None
+    tooled_failed = False  # a tool-capable (anthropic) model errored earlier this turn
     for model in runnable:
+        is_anthropic = observe.provider_for(model)["name"] == "anthropic"
         try:
             tool_events = []
-            if observe.provider_for(model)["name"] == "anthropic":
+            if is_anthropic:
                 # Claude path: structured messages + MCP tools. Assistant turns are
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
@@ -517,6 +528,15 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
             # but no project tool actually fired, correct it honestly (the
             # deterministic route handles explicit asks; this catches the rest).
             reply = _guard_phantom_send(_clean_reply(raw.strip()), tool_events)
+            # If we're only answering because the tool-capable brain errored and we
+            # fell back to a tool-less model (e.g. Anthropic credits/outage -> gpt),
+            # say so plainly. A silent degrade to a no-tool brain is exactly how
+            # Argo ended up bluffing with no way for the user to know it couldn't
+            # read links or act this turn.
+            if tooled_failed and not is_anthropic:
+                reply = _FALLBACK_NOTICE + reply
+                _note_incident("model_failure", "tool-capable model failed; "
+                               "answered on tool-less fallback", str(last_error))
             # Persist both turns in one write so memory survives restarts.
             argo_memory.record_many(chat_id, [
                 (profile.name(), log_user_text),
@@ -530,6 +550,8 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     "Back tomorrow (or raise the cap).")
         except Exception as exc:
             last_error = exc
+            if is_anthropic:
+                tooled_failed = True
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
     return f"(Argo hit an error reaching the model: {last_error})"
 

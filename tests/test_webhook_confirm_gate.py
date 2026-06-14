@@ -274,5 +274,51 @@ class AntiBluffReattemptTest(unittest.TestCase):
         self.assertEqual(self.noted[0][0], "phantom_claim")
 
 
+class FallbackDegradeNoticeTest(unittest.TestCase):
+    """When the tool-capable (Claude) brain errors and Argo answers on a tool-less
+    fallback, it tells the user it's degraded instead of silently bluffing."""
+
+    def setUp(self):
+        self.noted = []
+        self.enterContext(mock.patch.object(
+            wh, "_note_incident", lambda *a, **k: self.noted.append(a)))
+        fake_mcp = types.ModuleType("argo_mcp_server")
+        fake_mcp.pending_heal_action = lambda: None
+        self.enterContext(mock.patch.dict(sys.modules, {"argo_mcp_server": fake_mcp}))
+        self.enterContext(mock.patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}))
+        # Two runnable models: a tool-capable claude, then a tool-less gpt fallback.
+        self.enterContext(mock.patch.object(wh, "_route_model", lambda t: "claude-x"))
+        self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["gpt-x"]))
+        self.enterContext(mock.patch.object(
+            observe, "provider_for",
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}
+            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY"}))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
+        self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
+        self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
+        self.enterContext(mock.patch.object(
+            wh.argo_memory, "record_many", lambda *a, **k: None))
+
+    def test_fallback_notice_when_claude_errors(self):
+        self.enterContext(mock.patch.object(
+            observe, "chat_with_mcp",
+            mock.Mock(side_effect=Exception("credit balance is too low"))))
+        self.enterContext(mock.patch.object(
+            observe, "generate_observations", lambda *a, **k: "here is what I know."))
+        out = wh._generate_reply(7, "read https://x.com and summarize", "read it")
+        self.assertTrue(out.startswith(wh._FALLBACK_NOTICE))
+        self.assertIn("here is what I know.", out)
+        self.assertTrue(any(n[0] == "model_failure" for n in self.noted))
+
+    def test_no_notice_when_claude_succeeds(self):
+        self.enterContext(mock.patch.object(
+            observe, "chat_with_mcp", mock.Mock(return_value=("all good.", []))))
+        out = wh._generate_reply(7, "hi", "hi")
+        self.assertEqual(out, "all good.")
+        self.assertFalse(any(n[0] == "model_failure" for n in self.noted))
+
+
 if __name__ == "__main__":
     unittest.main()
