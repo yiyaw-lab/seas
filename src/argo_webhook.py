@@ -549,10 +549,19 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 )
                 raw = observe.generate_observations(prompt, model)
 
+            # An empty model reply (e.g. a reasoning model spent its whole
+            # max_output_tokens budget before emitting visible text) must never be
+            # sent as a blank Telegram message -- treat it as a failure and try the
+            # next model, falling through to the honest error if none is left.
+            cleaned = _clean_reply(raw.strip()) if raw else ""
+            if not cleaned:
+                last_error = last_error or RuntimeError(f"{model} returned an empty reply")
+                log.warning("empty reply from %s; trying next model", model)
+                continue
             # Phantom-send backstop: if the model CLAIMS it sent/built a proposal
             # but no project tool actually fired, correct it honestly (the
             # deterministic route handles explicit asks; this catches the rest).
-            reply = _guard_phantom_send(_clean_reply(raw.strip()), tool_events)
+            reply = _guard_phantom_send(cleaned, tool_events)
             # If the tool-capable brain errored and we fell all the way back to a
             # TOOL-LESS path (no MCP server, or a non-tool model), say so plainly. A
             # silent degrade to a no-tool brain is how Argo ended up bluffing. When
@@ -617,9 +626,11 @@ _PR_CLAIM_RE = re.compile(
     r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
     r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
     r"(?:open|opened|ready|drafted|submitted|up|live)\b"
-    # PR used as a verb: "I'll PR it", "I'm gonna PR this into feeds.json".
+    # PR used as a verb on a specific object: "I'll PR it", "I'm gonna PR this".
+    # Object is a pronoun (it/this/that/them/those) -- NOT bare "a"/"the"/"in",
+    # which over-match prose like "we PR the changes via the dashboard".
     r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,20}"
-    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|the|a|in|into|up|over)\b"
+    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|them|those)\b"
     # Writing a repo file is a propose_change action: "I'll add the feed to
     # feeds.json", "I'm editing feeds.json". (feeds live in the repo.)
     r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,35}"

@@ -223,6 +223,12 @@ class PhantomClaimGateTest(unittest.TestCase):
         self.assertEqual(wh._guard_phantom_send(msg, []), msg)
         self.assertFalse(self.noted)
 
+    def test_pr_verb_prose_not_blocked(self):  # FP guard: "PR the/a" in prose (review #1)
+        for msg in ("we PR the changes via the dashboard.",
+                    "I PR a lot of repos in general."):
+            self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
     def test_looked_it_up_claim_blocked(self):  # colloquial read verb (recall)
         out = wh._guard_phantom_send("I looked it up and the latest is v3.", [])
         self.assertIn("didn't actually fetch", out)

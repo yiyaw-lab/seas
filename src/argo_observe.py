@@ -428,6 +428,13 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     return (text, events) if return_tool_events else text
 
 
+# Reasoning models (gpt-5*) spend tokens on hidden reasoning that counts against
+# max_output_tokens, so the chat default (1024) can be fully consumed before any
+# visible text -- the turn returns empty. Floor the Responses budget so a fallback
+# answer has room. (A cap, not a target -- billed only for tokens actually produced.)
+_OPENAI_MIN_OUTPUT_TOKENS = 4096
+
+
 def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
                           temperature, return_tool_events):
     """GPT counterpart to chat_with_mcp: the OpenAI Responses API talking to the
@@ -457,7 +464,7 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
             "model": model,
             "instructions": system,
             "input": [{"role": m["role"], "content": m["content"]} for m in messages],
-            "max_output_tokens": max_tokens,
+            "max_output_tokens": max(max_tokens, _OPENAI_MIN_OUTPUT_TOKENS),
         }
         if tools:
             kwargs["tools"] = tools
@@ -468,15 +475,15 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
 
     response = _guarded("openai", do_call, f"responses/{model}")
 
-    # Receipt: each tool the connector fired is an `mcp_call` output item. Mirror the
-    # Anthropic telemetry (log ok/error, feed tool errors to the diagnose loop) and
-    # hand back the fired-tool names so the phantom-claim gate tells action from bluff.
+    # Receipt: each tool the connector fired is an `mcp_call` output item. Only a
+    # SUCCEEDED call counts toward the receipt -- a failed propose_change must not
+    # back an "I opened a PR" claim (the phantom-claim gate keys off this list), so an
+    # errored call is logged + fed to the diagnose loop but kept OUT of `events`.
     events = []
     for item in (getattr(response, "output", None) or []):
         if getattr(item, "type", "") != "mcp_call":
             continue
         name = getattr(item, "name", "?")
-        events.append(name)
         err = getattr(item, "error", None)
         if err:
             log.warning("openai mcp_call ERROR: %s", str(err)[:200])
@@ -487,6 +494,7 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
             except Exception:
                 pass
         else:
+            events.append(name)
             log.info("openai mcp_call ok: %s", name)
 
     # output_text is the SDK's aggregated assistant text; fall back to walking the

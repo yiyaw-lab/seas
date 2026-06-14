@@ -25,22 +25,24 @@ import argo_observe as observe
 import argo_webhook as wh
 
 
-def _fake_openai_module(capture=None):
-    """A stand-in `openai` module whose client records the create() kwargs."""
+def _fake_openai_module(capture=None, output=None, output_text=None):
+    """A stand-in `openai` module whose client records the create() kwargs and
+    returns a canned Responses object. Defaults to one successful propose_change
+    call plus a message; pass `output`/`output_text` to model other shapes."""
+    if output is None:
+        output = [
+            SimpleNamespace(type="mcp_call", name="propose_change", error=None),
+            SimpleNamespace(type="message", content=[
+                SimpleNamespace(text="Opened the PR for review: link")]),
+        ]
+        output_text = "Opened the PR for review: link"
     mod = types.ModuleType("openai")
 
     class _Responses:
         def create(self, **kwargs):
             if capture is not None:
                 capture.update(kwargs)
-            return SimpleNamespace(
-                output=[
-                    SimpleNamespace(type="mcp_call", name="propose_change", error=None),
-                    SimpleNamespace(type="message", content=[
-                        SimpleNamespace(text="Opened the PR for review: link")]),
-                ],
-                output_text="Opened the PR for review: link",
-            )
+            return SimpleNamespace(output=output, output_text=output_text)
 
     class _Client:
         def __init__(self, **_):
@@ -83,6 +85,31 @@ class OpenAiMcpChatTest(unittest.TestCase):
         self.assertEqual(tool["require_approval"], "never")
         # gpt-5* rejects a custom temperature -> it must be omitted.
         self.assertNotIn("temperature", cap)
+        # Reasoning headroom: the output budget is floored so reasoning can't starve
+        # the visible reply (review #2).
+        self.assertGreaterEqual(cap["max_output_tokens"], 4096)
+
+    def test_errored_tool_call_is_not_a_receipt(self):
+        # A failed propose_change must NOT count toward the receipt, else it would
+        # back a phantom "I opened a PR" claim (review #3).
+        output = [
+            SimpleNamespace(type="mcp_call", name="read_findings", error=None),
+            SimpleNamespace(type="mcp_call", name="propose_change",
+                            error={"message": "auth failed"}),
+            SimpleNamespace(type="message", content=[SimpleNamespace(text="done")]),
+        ]
+        self.enterContext(mock.patch.dict(
+            sys.modules, {"openai": _fake_openai_module(output=output, output_text="done")}))
+        # argo_incidents.record_incident hits a real ledger; stub it.
+        import argo_incidents
+        self.enterContext(mock.patch.object(
+            argo_incidents, "record_incident", lambda *a, **k: None))
+        servers = [{"name": "argo", "url": "https://x/mcp/mcp",
+                    "authorization_token": "tok"}]
+        _, events = observe.chat_with_mcp(
+            "SYS", [{"role": "user", "content": "open a PR"}], "gpt-5.5",
+            mcp_servers=servers, return_tool_events=True)
+        self.assertEqual(events, ["read_findings"])  # only the succeeded call
 
     def test_no_server_means_no_tools_sent(self):
         cap = {}
@@ -136,6 +163,18 @@ class OpenAiToolFallbackTest(unittest.TestCase):
         self.assertEqual(out, "Opened the PR for review: link")
         self.assertFalse(out.startswith(wh._FALLBACK_NOTICE))   # it HAS tools
         self.assertFalse(self.noted)  # receipt-backed claim, no incident
+
+    def test_empty_gpt_reply_is_not_sent(self):
+        # An empty reply (e.g. reasoning ate the whole token budget) must not be sent
+        # as a blank message -- it falls through to the honest error (review #2).
+        chat = mock.Mock(side_effect=[
+            Exception("credit balance is too low"),  # claude down
+            ("", []),                                # gpt returns nothing usable
+        ])
+        self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
+        out = wh._generate_reply(7, "what's new", "what's new")
+        self.assertTrue(out.startswith("(Argo hit an error"))
+        self.assertNotEqual(out.strip(), "")
 
 
 if __name__ == "__main__":
