@@ -14,6 +14,7 @@ PENDING_HEAL_PATH pointed at a tmp dir.
 Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 """
 
+import os
 import sys
 import tempfile
 import types
@@ -129,6 +130,148 @@ class PendingHealActionTest(unittest.TestCase):
     def test_none_on_corrupt_file(self):
         self.path.write_text("{not json")
         self.assertIsNone(self.srv.pending_heal_action())
+
+
+class PhantomClaimGateTest(unittest.TestCase):
+    """The claim<->receipt gate (wh._classify_claim / _guard_phantom_send):
+    suppress action-claims with no backing tool in tool_events, pass backed ones."""
+
+    def setUp(self):
+        self.noted = []
+        self.enterContext(mock.patch.object(
+            wh, "_note_incident", lambda *a, **k: self.noted.append(a)))
+        # The CONFIRM row imports argo_mcp_server for the staging check; fake it
+        # (nothing staged by default; a test sets self.pending to stage one).
+        self.pending = None
+        fake_mcp = types.ModuleType("argo_mcp_server")
+        fake_mcp.pending_heal_action = lambda: self.pending
+        self.enterContext(mock.patch.dict(sys.modules, {"argo_mcp_server": fake_mcp}))
+
+    def test_pr_claim_without_propose_change_blocked(self):
+        msg = "I'm opening a PR for that now."
+        out = wh._guard_phantom_send(msg, [])
+        self.assertNotEqual(out, msg)
+        self.assertIn("haven't actually opened a PR", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_link_claim_without_fetch_blocked(self):
+        out = wh._guard_phantom_send("I read the article and it says X.", [])
+        self.assertIn("didn't actually fetch", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_pr_claim_with_receipt_passes(self):
+        msg = "Opened the PR for review: github.com/x/y/pull/3"
+        self.assertEqual(wh._guard_phantom_send(msg, ["propose_change"]), msg)
+        self.assertFalse(self.noted)
+
+    def test_link_claim_with_receipt_passes(self):
+        msg = "Per the page, the latest release is v2."
+        self.assertEqual(wh._guard_phantom_send(msg, ["web_fetch"]), msg)
+        self.assertFalse(self.noted)
+
+    def test_confirm_prompt_without_staging_blocked(self):
+        out = wh._guard_phantom_send("Reply CONFIRM and I'll fix it.", [])
+        self.assertIn("nothing staged behind a CONFIRM", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_confirm_prompt_with_staged_heal_passes(self):
+        self.pending = "reregister_webhook"
+        msg = "I've staged it. Reply CONFIRM to run it."
+        self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
+    def test_confirm_prompt_with_heal_tool_fired_passes(self):
+        msg = "Staged the reregister. Reply CONFIRM to run it."
+        self.assertEqual(wh._guard_phantom_send(msg, ["reregister_webhook"]), msg)
+        self.assertFalse(self.noted)
+
+    def test_project_legacy_phantom_send_unchanged(self):
+        out = wh._guard_phantom_send("Sending your proposal over now.", [])
+        self.assertIn("didn't actually build anything", out)
+        self.assertEqual(self.noted[0][0], "phantom_send")  # legacy kind preserved
+
+    def test_gpt4o_path_action_claim_blocked(self):
+        # The tool-less branch always yields tool_events == [], so any PR claim
+        # there is a bluff the terminal guard must catch.
+        out = wh._guard_phantom_send("I'm opening a PR for that.", [])
+        self.assertIn("haven't actually opened a PR", out)
+
+    def test_put_up_pr_claim_blocked(self):  # colloquial verb (recall)
+        out = wh._guard_phantom_send("I put up a PR with the changes.", [])
+        self.assertIn("haven't actually opened a PR", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_looked_it_up_claim_blocked(self):  # colloquial read verb (recall)
+        out = wh._guard_phantom_send("I looked it up and the latest is v3.", [])
+        self.assertIn("didn't actually fetch", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_pr_workflow_advice_not_blocked(self):  # FP guard: advice, not a claim
+        msg = ("The workflow involves creating a branch, committing changes, "
+               "and opening a PR for review.")
+        self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
+    def test_conditional_pr_offer_not_blocked(self):
+        msg = "I can open a PR if you want."
+        self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
+    def test_honest_pr_blocker_not_blocked(self):
+        msg = "I can't open a PR: ARGO_PROPOSE_TOKEN is missing."
+        self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
+
+class AntiBluffReattemptTest(unittest.TestCase):
+    """_generate_reply re-prompts the model ONCE when a PR/CONFIRM claim has no
+    backing tool, then suppresses if it still bluffs. Pure: the brain is stubbed."""
+
+    def setUp(self):
+        self.noted = []
+        self.enterContext(mock.patch.object(
+            wh, "_note_incident", lambda *a, **k: self.noted.append(a)))
+        fake_mcp = types.ModuleType("argo_mcp_server")
+        fake_mcp.pending_heal_action = lambda: None  # nothing staged
+        self.enterContext(mock.patch.dict(sys.modules, {"argo_mcp_server": fake_mcp}))
+        # Force exactly one runnable anthropic model, and a pure brain.
+        self.enterContext(mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}))
+        self.enterContext(mock.patch.object(wh, "_route_model", lambda t: "claude-x"))
+        self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["claude-x"]))
+        self.enterContext(mock.patch.object(
+            observe, "provider_for",
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
+        self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
+        self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
+        self.enterContext(mock.patch.object(
+            wh.argo_memory, "record_many", lambda *a, **k: None))
+
+    def test_reattempt_then_real_pr(self):
+        chat = mock.Mock(side_effect=[
+            ("I'm opening a PR now.", []),                       # 1st: bluff
+            ("Opened the PR for review: link", ["propose_change"]),  # 2nd: real
+        ])
+        self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
+        out = wh._generate_reply(7, "open a PR for the fix", "open a PR for the fix")
+        self.assertEqual(chat.call_count, 2)
+        retry_messages = chat.call_args_list[1].args[1]
+        self.assertIn("propose_change", retry_messages[-1]["content"])
+        self.assertIn("[system note", retry_messages[-1]["content"])
+        self.assertEqual(out, "Opened the PR for review: link")
+        self.assertFalse(self.noted)  # self-corrected -> no incident
+
+    def test_reattempt_still_bluffs_suppressed_once(self):
+        chat = mock.Mock(side_effect=[
+            ("I'm opening a PR now.", []),  # 1st: bluff
+            ("Yeah, the PR is up.", []),    # 2nd: still a bluff
+        ])
+        self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
+        out = wh._generate_reply(7, "open a PR", "open a PR")
+        self.assertEqual(chat.call_count, 2)  # recursion guard: no 3rd call
+        self.assertEqual(out, wh._PR_NUDGE)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
 
 
 if __name__ == "__main__":

@@ -41,8 +41,9 @@ INCIDENTS_PATH = argo_paths.INCIDENTS_PATH
 # Fixed kinds so a typo can't spawn a phantom bucket; an unknown kind coerces to "other"
 # (typos collapse into one harmless cluster instead of proliferating).
 INCIDENT_KINDS = frozenset({
-    "phantom_send", "budget_exceeded", "model_failure", "tool_error",
-    "circuit_open", "scheduler_task_error", "delivery_failure", "other",
+    "phantom_send", "phantom_claim", "budget_exceeded", "model_failure",
+    "tool_error", "circuit_open", "scheduler_task_error", "delivery_failure",
+    "other",
 })
 
 MAX_SAMPLES = 3        # keep the few most recent example messages per cluster

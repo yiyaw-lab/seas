@@ -40,6 +40,7 @@ import os
 import re
 import threading
 import time
+from collections import namedtuple
 from pathlib import Path
 
 try:
@@ -345,6 +346,12 @@ def build_system_prompt(p=None):
     "plainly to the user, do NOT pretend you did the thing or guess the result. "
     "Never say a feed/change is 'already there' unless you actually read the file "
     "and saw it. "
+    "ENFORCED: a code gate checks every reply against the tools that actually "
+    "fired this turn. If you say you opened a PR, read a link/page, or tell the "
+    "user to reply CONFIRM without the matching tool call in the same turn, your "
+    "message is replaced with an honest correction and logged as an incident. So "
+    "never narrate an action you didn't take: call the tool, or name the exact "
+    "blocker. "
     "Do NOT claim you 'only get a weekly pull' or 'can't fetch live data' when a "
     "fetch tool is present, that's false. If a URL is outside the approved list, "
     "say so plainly. If no tool is available this turn, then say what you can "
@@ -462,6 +469,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
                 # (string or image-block list).
+                system = build_system_prompt()
                 messages = [
                     {
                         "role": "assistant" if t["role"] == "Argo" else "user",
@@ -470,9 +478,30 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     for t in hist
                 ] + [{"role": "user", "content": final_content}]
                 raw, tool_events = observe.chat_with_mcp(
-                    build_system_prompt(), messages, model,
+                    system, messages, model,
                     mcp_servers=MCP_SERVERS, return_tool_events=True,
                 )
+                # Anti-bluff re-attempt: if the reply narrates a doable-in-turn
+                # action (a PR / a CONFIRM) but no backing tool fired, re-prompt
+                # ONCE with the exact gap so the model actually calls the tool (or
+                # names the blocker) instead of bluffing. One retry only; the
+                # terminal _guard_phantom_send below suppresses if it still has no
+                # receipt. Tool-less (gpt-4o) turns skip this -- a retry can't fire
+                # a tool they don't have, so the guard suppresses them directly.
+                # Only text turns re-attempt: an image/document turn carries block
+                # content, and re-sending it for a second vision pass is slow with
+                # little upside -- the terminal guard still suppresses any bluff.
+                v = _classify_claim(_clean_reply(raw.strip()), tool_events)
+                if v is not None and v.reattemptable and isinstance(final_content, str):
+                    log.info("anti-bluff re-attempt: %s", v.incident_sig)
+                    raw, tool_events = observe.chat_with_mcp(
+                        system,
+                        messages + [
+                            {"role": "assistant", "content": raw},
+                            {"role": "user", "content": v.gap_note},
+                        ],
+                        model, mcp_servers=MCP_SERVERS, return_tool_events=True,
+                    )
             else:
                 # Fallback path (gpt-4o): the original single string prompt. Only
                 # reached for text turns (anthropic_only guards images away).
@@ -505,36 +534,144 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     return f"(Argo hit an error reaching the model: {last_error})"
 
 
-# Project tools that produce a real artifact. If a reply claims it sent or built a
-# proposal but NONE of these fired, the claim is a phantom.
+# --- Claim<->receipt gate -------------------------------------------------
+# A reply can CLAIM an action the model never took: "opening a PR" with no
+# propose_change, "I read the link" with no fetch, "reply CONFIRM" with nothing
+# staged. tool_events is the receipt -- the tools that actually fired this turn
+# (argo_observe.chat_with_mcp). A claim with no backing tool in the receipt is a
+# phantom and must never reach the user. _classify_claim does the detection;
+# _generate_reply re-prompts the model once for the doable-in-turn classes
+# (PR/CONFIRM) before falling back to _guard_phantom_send's honest suppression.
+
+# Project tools that produce a real artifact (legacy class, kept verbatim).
 _PROJECT_TOOLS = frozenset({
     "new_project", "add_project", "project_too_complex", "recommend_project",
     "get_latest_project", "scaffold_project", "rehearse_project",
 })
+# Tools that back a PR claim, a read/link claim, and a CONFIRM prompt.
+_PR_TOOLS = frozenset({"propose_change"})
+_LINK_READ_TOOLS = frozenset({
+    "web_fetch", "study_url", "github_read_file", "github_list",
+    "verify_feed", "read_findings", "read_self", "read_taste",
+})
+_HEAL_TOOLS = frozenset({"reregister_webhook", "refetch_signals"})
+
 _PHANTOM_CLAIM_RE = re.compile(
     r"captured your idea"
     r"|putting (a|the|your) project together"
     r"|(sending|sent|drafting|building|shaping)\b[^.!?\n]{0,40}\b(proposal|project)\b",
     re.IGNORECASE)
+# "I'm opening a PR", "I'll open the PR", "I put up a PR", "the PR is up". The
+# first-person lead (I/we/let me) is what separates an action CLAIM from PR
+# workflow ADVICE ("opening a PR for review involves..."), which must NOT trip.
+_PR_CLAIM_RE = re.compile(
+    r"\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
+    r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
+    r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
+    r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
+    r"(?:open|opened|ready|drafted|submitted|up|live)\b",
+    re.IGNORECASE)
+# "I read/checked/fetched the link", "I looked it up", "the page says", "per URL".
+_LINK_READ_CLAIM_RE = re.compile(
+    r"\bI(?:'ve| have)?\s+(?:just\s+)?(?:read|checked|looked at|reviewed|fetched"
+    r"|pulled|opened|visited|skimmed)\b[^.!?\n]{0,40}\b(?:link|page|article|url"
+    r"|site|repo|file|docs?|post|paper|release)\b"
+    r"|\bI(?:'ve| have)?\s+(?:just\s+)?(?:looked it up|looked up|checked the latest"
+    r"|did some digging|dug into it|searched (?:for|online))\b"
+    r"|\bthe (?:page|article|link|docs?|file|repo|post|paper|release)\b"
+    r"[^.!?\n]{0,20}\b(?:says?|shows?|states?|reads?|confirms?|mentions?)\b"
+    r"|\b(?:per|according to)\s+(?:https?://|the\s)",
+    re.IGNORECASE)
+# Model typing the CONFIRM ritual itself ("reply CONFIRM").
+_CONFIRM_PROMPT_RE = re.compile(
+    r"\b(?:reply|say|send|type|respond(?: with)?|hit)\b[^.!?\n]{0,15}\bCONFIRM\b",
+    re.IGNORECASE)
+# An action mentioned AFTER one of these is being OFFERED, not claimed ("I can
+# open a PR if you want"), or honestly declined ("I can't open a PR").
+_NONCOMMITTAL_RE = re.compile(
+    r"\b(?:can|can't|cannot|could|would|should|may|might|able to|happy to"
+    r"|want me to|do you want|shall i|if you)\b",
+    re.IGNORECASE)
+
+# What _classify_claim hands back about an unbacked claim. reattemptable=True means
+# the action is doable in one turn (PR/CONFIRM), so _generate_reply re-prompts the
+# model with gap_note before suppressing; else replacement is sent as-is.
+_Violation = namedtuple(
+    "_Violation", "reattemptable replacement gap_note incident_kind incident_sig")
+
+_PROJECT_NUDGE = ("hang on, I didn't actually build anything yet. say 'give me a "
+                  "proposal' and I'll ship one for real.")
+_PR_NUDGE = ("correction: I haven't actually opened a PR -- no propose_change ran. "
+             "Say 'propose it' and I'll open a real one for you to merge.")
+_READ_NUDGE = ("correction: I didn't actually fetch that -- no read tool ran, so I "
+               "won't pretend I saw it. Want me to pull it up for real?")
+_CONFIRM_NUDGE = ("correction: there's nothing staged behind a CONFIRM. Tell me "
+                  "what to do (e.g. 'reregister webhook') and I'll stage it for real.")
+
+_PR_GAP = ("\n\n[system note: you said you'd open a PR but no propose_change fired "
+           "this turn. Call propose_change now, or state the EXACT blocker (e.g. a "
+           "missing ARGO_PROPOSE_TOKEN, via check_config). Do NOT repeat the claim "
+           "without calling the tool.]")
+_CONFIRM_GAP = ("\n\n[system note: you told the user to reply CONFIRM but you "
+                "staged nothing (no reregister_webhook/refetch_signals call). Call "
+                "the heal tool now so there's something behind CONFIRM, or don't "
+                "ask for CONFIRM.]")
+
+
+def _claim_unbacked(claim_re, reply):
+    """True if claim_re matches reply somewhere the match span carries NO
+    non-committal marker, so an offer/decline ('I can open a PR if you want',
+    'I can't open a PR') doesn't count. The window spans the match itself (the
+    claim is first-person-anchored, so 'can'/'could'/etc. sit inside it) plus a
+    few leading chars for a marker that immediately precedes the subject."""
+    for m in claim_re.finditer(reply):
+        window = reply[max(0, m.start() - 4):m.end()]
+        if not _NONCOMMITTAL_RE.search(window):
+            return True
+    return False
+
+
+def _classify_claim(reply, tool_events):
+    """Return a _Violation if the reply makes an action-claim no tool in tool_events
+    backs, else None. Ordered: project -> PR -> link/read -> CONFIRM."""
+    fired = set(tool_events)
+    if not (fired & _PROJECT_TOOLS) and _PHANTOM_CLAIM_RE.search(reply):
+        return _Violation(False, _PROJECT_NUDGE, None, "phantom_send",
+                          "reply claimed a proposal but no project tool fired")
+    if not (fired & _PR_TOOLS) and _claim_unbacked(_PR_CLAIM_RE, reply):
+        return _Violation(True, _PR_NUDGE, _PR_GAP, "phantom_claim",
+                          "reply narrated a PR but propose_change never fired")
+    if not (fired & _LINK_READ_TOOLS) and _claim_unbacked(_LINK_READ_CLAIM_RE, reply):
+        return _Violation(False, _READ_NUDGE, None, "phantom_claim",
+                          "reply claimed it read a source but no read tool fired")
+    if _CONFIRM_PROMPT_RE.search(reply) and not (fired & _HEAL_TOOLS):
+        staged = None
+        try:  # late import + swallow: observability never breaks a chat turn
+            import argo_mcp_server
+            staged = argo_mcp_server.pending_heal_action()
+        except Exception:
+            staged = None
+        if staged is None:
+            return _Violation(True, _CONFIRM_NUDGE, _CONFIRM_GAP, "phantom_claim",
+                              "reply asked the user to reply CONFIRM with nothing staged")
+    return None
 
 
 def _guard_phantom_send(reply, tool_events):
-    """Stop a 'said sending, nothing landed' phantom from reaching the user: if the
-    reply asserts it sent/built a proposal but no project tool actually fired,
-    replace the false claim with an honest nudge and log it. The deterministic
-    proposal route covers explicit asks; this is the conversational backstop."""
-    if any(t in _PROJECT_TOOLS for t in tool_events):
+    """Terminal claim<->receipt backstop: if the reply makes an action-claim no tool
+    backs (opened a PR / read a link / asked for CONFIRM with nothing staged),
+    replace the false claim with an honest correction and log it. _generate_reply
+    re-prompts the doable classes (PR/CONFIRM) once before this fires; the
+    deterministic routes (FIX/EVOLVE/CONFIRM gates) open real PRs and never pass
+    through here."""
+    v = _classify_claim(reply, tool_events)
+    if v is None:
         return reply
-    if _PHANTOM_CLAIM_RE.search(reply):
-        log.warning("phantom send suppressed: reply claimed a proposal but no "
-                    "project tool fired (events=%s)", tool_events or "none")
-        # highest-signal incident: a self-caught lie about sending.
-        _note_incident("phantom_send",
-                       "reply claimed a proposal but no project tool fired",
-                       f"events={tool_events or 'none'}; reply={reply[:120]}")
-        return ("hang on, I didn't actually build anything yet. say 'give me a "
-                "proposal' and I'll ship one for real.")
-    return reply
+    log.warning("phantom claim suppressed: %s (events=%s)",
+                v.incident_sig, tool_events or "none")
+    _note_incident(v.incident_kind, v.incident_sig,
+                   f"events={tool_events or 'none'}; reply={reply[:120]}")
+    return v.replacement
 
 
 def _llm_reply(chat_id, user_text):
