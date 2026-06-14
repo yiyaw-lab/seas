@@ -349,8 +349,19 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     runs the tool loop and may return mcp_tool_use/mcp_tool_result blocks alongside
     text. Returns the joined text; with return_tool_events=True returns
     (text, [fired_tool_name, ...]) so a caller can tell a real send from a phantom.
-    Used by argo_webhook._llm_reply. Claude-only.
+
+    Dispatches by provider: Claude via the Anthropic MCP connector (below), GPT via
+    the OpenAI Responses API remote-MCP tool (_chat_with_mcp_openai). Both point at
+    the SAME remote MCP server, run the tool loop server-side, and return the SAME
+    (text, events) receipt -- so when the Claude brain is down the GPT fallback keeps
+    real tool access, and the webhook's anti-bluff claim<->receipt gate is unchanged.
+    Used by argo_webhook._llm_reply.
     """
+    provider = provider_for(model)
+    if provider and provider["name"] == "openai":
+        return _chat_with_mcp_openai(
+            system, messages, model, mcp_servers, max_tokens, temperature,
+            return_tool_events)
     import anthropic
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
@@ -414,6 +425,83 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
     )
+    return (text, events) if return_tool_events else text
+
+
+def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
+                          temperature, return_tool_events):
+    """GPT counterpart to chat_with_mcp: the OpenAI Responses API talking to the
+    SAME remote MCP server (Streamable HTTP) the Anthropic connector uses. OpenAI
+    runs the tool loop; each fired tool surfaces as an `mcp_call` output item, which
+    we collect as the receipt (same contract as the Anthropic path). `mcp_servers`
+    entries are the connector shape built by argo_webhook._build_mcp_servers
+    (name/url/authorization_token); None -> a plain tool-less Responses call."""
+    from openai import OpenAI  # lazy: no-key path needs no SDK
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"].strip())
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": s["name"],
+            "server_url": s["url"],
+            # The MCP server is our own bearer-gated, allowlist-enforced endpoint, so
+            # auto-approve calls -- there's no human in the loop on a chat turn.
+            "require_approval": "never",
+            "headers": {"Authorization": f"Bearer {s['authorization_token']}"},
+        }
+        for s in (mcp_servers or [])
+    ]
+
+    def do_call():
+        kwargs = {
+            "model": model,
+            "instructions": system,
+            "input": [{"role": m["role"], "content": m["content"]} for m in messages],
+            "max_output_tokens": max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        # gpt-5/o-series reject a custom temperature (accept only the default).
+        if temperature is not None and not _rejects_temperature(model):
+            kwargs["temperature"] = temperature
+        return client.responses.create(**kwargs)
+
+    response = _guarded("openai", do_call, f"responses/{model}")
+
+    # Receipt: each tool the connector fired is an `mcp_call` output item. Mirror the
+    # Anthropic telemetry (log ok/error, feed tool errors to the diagnose loop) and
+    # hand back the fired-tool names so the phantom-claim gate tells action from bluff.
+    events = []
+    for item in (getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "mcp_call":
+            continue
+        name = getattr(item, "name", "?")
+        events.append(name)
+        err = getattr(item, "error", None)
+        if err:
+            log.warning("openai mcp_call ERROR: %s", str(err)[:200])
+            try:  # feed the diagnostic loop; never let it break a chat turn
+                import argo_incidents
+                argo_incidents.record_incident(
+                    "tool_error", f"{name}: {err}", str(err)[:200])
+            except Exception:
+                pass
+        else:
+            log.info("openai mcp_call ok: %s", name)
+
+    # output_text is the SDK's aggregated assistant text; fall back to walking the
+    # message items if a version doesn't expose it.
+    text = getattr(response, "output_text", None)
+    if not text:
+        chunks = []
+        for item in (getattr(response, "output", None) or []):
+            if getattr(item, "type", "") != "message":
+                continue
+            for c in (getattr(item, "content", None) or []):
+                t = getattr(c, "text", None)
+                if t:
+                    chunks.append(t)
+        text = "".join(chunks)
     return (text, events) if return_tool_events else text
 
 

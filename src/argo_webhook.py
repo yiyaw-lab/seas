@@ -486,11 +486,19 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     last_error = None
     tooled_failed = False  # a tool-capable (anthropic) model errored earlier this turn
     for model in runnable:
-        is_anthropic = observe.provider_for(model)["name"] == "anthropic"
+        provider = observe.provider_for(model)["name"]
+        is_anthropic = provider == "anthropic"
+        # Tool path: Claude via the Anthropic connector, OR GPT via the OpenAI
+        # Responses remote-MCP connector when a server is configured -- so a Claude
+        # outage degrades to "different brain, same tools", not "no tools". GPT image
+        # turns can't reach here (anthropic_only filters them), so guard on a string.
+        use_mcp = is_anthropic or (
+            provider == "openai" and MCP_SERVERS is not None
+            and isinstance(final_content, str))
         try:
             tool_events = []
-            if is_anthropic:
-                # Claude path: structured messages + MCP tools. Assistant turns are
+            if use_mcp:
+                # Tool path: structured messages + MCP tools. Assistant turns are
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
                 # (string or image-block list).
@@ -511,8 +519,8 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # ONCE with the exact gap so the model actually calls the tool (or
                 # names the blocker) instead of bluffing. One retry only; the
                 # terminal _guard_phantom_send below suppresses if it still has no
-                # receipt. Tool-less (gpt-4o) turns skip this -- a retry can't fire
-                # a tool they don't have, so the guard suppresses them directly.
+                # receipt. Tool-less turns skip this (the else branch) -- a retry
+                # can't fire a tool they don't have, so the guard suppresses directly.
                 # Only text turns re-attempt: an image/document turn carries block
                 # content, and re-sending it for a second vision pass is slow with
                 # little upside -- the terminal guard still suppresses any bluff.
@@ -528,10 +536,11 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                         model, mcp_servers=MCP_SERVERS, return_tool_events=True,
                     )
             else:
-                # Fallback path (gpt-4o): the original single string prompt. Only
-                # reached for text turns (anthropic_only guards images away). This
-                # brain has no MCP tools, so _NO_TOOLS_CONSTRAINT stops it promising
-                # tool actions it can't take (the "says things it won't do" bug).
+                # Tool-less path: the original single string prompt, reached only
+                # when no MCP server is configured (or a non-tool provider). Text
+                # turns only (anthropic_only guards images away). This brain has no
+                # tools, so _NO_TOOLS_CONSTRAINT stops it promising tool actions it
+                # can't take (the "says things it won't do" bug).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
                     f"{build_system_prompt()}\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
@@ -544,12 +553,12 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
             # but no project tool actually fired, correct it honestly (the
             # deterministic route handles explicit asks; this catches the rest).
             reply = _guard_phantom_send(_clean_reply(raw.strip()), tool_events)
-            # If we're only answering because the tool-capable brain errored and we
-            # fell back to a tool-less model (e.g. Anthropic credits/outage -> gpt),
-            # say so plainly. A silent degrade to a no-tool brain is exactly how
-            # Argo ended up bluffing with no way for the user to know it couldn't
-            # read links or act this turn.
-            if tooled_failed and not is_anthropic:
+            # If the tool-capable brain errored and we fell all the way back to a
+            # TOOL-LESS path (no MCP server, or a non-tool model), say so plainly. A
+            # silent degrade to a no-tool brain is how Argo ended up bluffing. When
+            # the fallback still has tools (GPT via the Responses connector), use_mcp
+            # is True and no notice fires -- it can genuinely read links and act.
+            if tooled_failed and not use_mcp:
                 reply = _FALLBACK_NOTICE + reply
                 _note_incident("model_failure", "tool-capable model failed; "
                                "answered on tool-less fallback", str(last_error))

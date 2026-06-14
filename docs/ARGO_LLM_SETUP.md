@@ -80,6 +80,19 @@ ARGO_MODEL=claude-sonnet-4-6
 `ARGO_MODEL` takes precedence over the defaults. The matching provider key must
 be set, and that provider's SDK installed.
 
+### Tool access on the GPT fallback (Claude-outage failover)
+
+In the live chat (`argo_webhook`), the primary brain is Claude and the fallback is
+OpenAI. When `WEBHOOK_URL` and `ARGO_MCP_TOKEN` are set (production), the GPT
+fallback now reaches Argo's tools through the **OpenAI Responses API remote-MCP
+connector** — the same MCP server the Claude path uses. So a Claude outage degrades
+to "different brain, same tools" instead of a tool-less brain that bluffs about
+opening PRs or reading links. No tool wiring is duplicated; OpenAI runs the loop
+server-side, billed only for output tokens. This needs `openai>=1.66` (Responses
+API). To make the fallback `gpt-5.5` specifically, set `ARGO_MODEL=gpt-5.5` (note:
+that also selects the batch-observe model). With no MCP server configured (local
+dev), the GPT path stays a tool-less completion and says so honestly.
+
 ### Adding another provider
 
 Providers live in the `PROVIDERS` registry in `src/argo_observe.py`. Each entry
