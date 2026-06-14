@@ -435,6 +435,20 @@ _FALLBACK_NOTICE = (
     "I'm on a backup that can't use tools this turn: no reading links, opening PRs, "
     "or fetching live data. I'll answer from memory and flag what I can't verify.\n\n")
 
+# Appended to the tool-less fallback prompt. The gpt-4o brain has NO MCP tools, so
+# left to the normal system prompt (which describes Argo's tools) it cheerfully
+# promises to open PRs / edit feeds.json / fetch links -- the exact self-
+# contradiction that follows _FALLBACK_NOTICE ("can't use tools" then "I'll PR
+# it"). This forbids the promise at the source; _guard_phantom_send is the backstop.
+_NO_TOOLS_CONSTRAINT = (
+    "[HARD CONSTRAINT for this turn: you have NO tools available. You cannot open or "
+    "draft a PR, edit or add to any file (including feeds.json), read or fetch any "
+    "link or live data, or stage a CONFIRM/heal action. Do NOT say you are doing, "
+    "about to do, or will do any of these now or 'right after' -- you cannot this "
+    "turn. Answer from memory only. If an action is needed, OFFER it as a next step "
+    "the user can trigger (e.g. 'say propose it and I'll open a real PR'), never as "
+    "something you are performing now.]")
+
 
 def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     anthropic_only=False):
@@ -515,10 +529,12 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     )
             else:
                 # Fallback path (gpt-4o): the original single string prompt. Only
-                # reached for text turns (anthropic_only guards images away).
+                # reached for text turns (anthropic_only guards images away). This
+                # brain has no MCP tools, so _NO_TOOLS_CONSTRAINT stops it promising
+                # tool actions it can't take (the "says things it won't do" bug).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
-                    f"{build_system_prompt()}\n\n"
+                    f"{build_system_prompt()}\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
                     f"Conversation so far:\n{convo}\n\n"
                     f"{profile.name()}: {final_content}\n\nArgo:"
                 )
@@ -591,7 +607,16 @@ _PR_CLAIM_RE = re.compile(
     r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
     r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
     r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
-    r"(?:open|opened|ready|drafted|submitted|up|live)\b",
+    r"(?:open|opened|ready|drafted|submitted|up|live)\b"
+    # PR used as a verb: "I'll PR it", "I'm gonna PR this into feeds.json".
+    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,20}"
+    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|the|a|in|into|up|over)\b"
+    # Writing a repo file is a propose_change action: "I'll add the feed to
+    # feeds.json", "I'm editing feeds.json". (feeds live in the repo.)
+    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,35}"
+    r"\b(?:add(?:ed|ing)?|edit(?:ed|ing)?|updat(?:e|ed|ing)?|commit(?:ted|ting)?"
+    r"|writ(?:e|ing)|stag(?:e|ed|ing)|push(?:ed|ing)?|put(?:ting)?)\b"
+    r"[^.!?\n]{0,40}\bfeeds\.json\b",
     re.IGNORECASE)
 # "I read/checked/fetched the link", "I looked it up", "the page says", "per URL".
 _LINK_READ_CLAIM_RE = re.compile(
