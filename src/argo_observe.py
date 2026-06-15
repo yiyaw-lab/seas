@@ -337,6 +337,20 @@ def _rejects_temperature(model):
     return any(model.startswith(p) for p in _TEMPERATURE_REJECTING_PREFIXES)
 
 
+def _record_tool_error(name, detail):
+    """Feed a failed MCP tool call to the diagnose loop. Shared by both connector
+    telemetry loops (Anthropic mcp_tool_result, OpenAI mcp_call) so the incident
+    contract ('tool_error', 'name: detail') lives in one place. Never raises -- a
+    broken ledger must not break a chat turn, but the failure is logged, not
+    silently swallowed."""
+    try:
+        import argo_incidents
+        argo_incidents.record_incident("tool_error", f"{name}: {detail}",
+                                       str(detail)[:200])
+    except Exception:
+        log.debug("record_incident failed for tool %s", name, exc_info=True)
+
+
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                   temperature=1.0, return_tool_events=False):
     """Claude chat call with structured messages and optional MCP tool servers.
@@ -349,8 +363,19 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     runs the tool loop and may return mcp_tool_use/mcp_tool_result blocks alongside
     text. Returns the joined text; with return_tool_events=True returns
     (text, [fired_tool_name, ...]) so a caller can tell a real send from a phantom.
-    Used by argo_webhook._llm_reply. Claude-only.
+
+    Dispatches by provider: Claude via the Anthropic MCP connector (below), GPT via
+    the OpenAI Responses API remote-MCP tool (_chat_with_mcp_openai). Both point at
+    the SAME remote MCP server, run the tool loop server-side, and return the SAME
+    (text, events) receipt -- so when the Claude brain is down the GPT fallback keeps
+    real tool access, and the webhook's anti-bluff claim<->receipt gate is unchanged.
+    Used by argo_webhook._llm_reply.
     """
+    provider = provider_for(model)
+    if provider and provider["name"] == "openai":
+        return _chat_with_mcp_openai(
+            system, messages, model, mcp_servers, max_tokens, temperature,
+            return_tool_events)
     import anthropic
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
@@ -401,12 +426,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                 snippet = str(getattr(b, "content", ""))[:200]
                 if getattr(b, "is_error", False):
                     log.warning("mcp tool_result ERROR: %s", snippet)
-                    try:  # feed the diagnostic loop; never let it break a chat turn
-                        import argo_incidents
-                        argo_incidents.record_incident(
-                            "tool_error", f"{name}: {snippet}", snippet)
-                    except Exception:
-                        pass
+                    _record_tool_error(name, snippet)
                 else:
                     log.info("mcp tool_result ok: %s", snippet)
 
@@ -414,6 +434,86 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         block.text for block in response.content
         if getattr(block, "type", None) == "text"
     )
+    return (text, events) if return_tool_events else text
+
+
+# Reasoning models (gpt-5*) spend tokens on hidden reasoning that counts against
+# max_output_tokens, so the chat default (1024) can be fully consumed before any
+# visible text -- the turn returns empty. Floor the Responses budget so a fallback
+# answer has room. (A cap, not a target -- billed only for tokens actually produced.)
+_OPENAI_MIN_OUTPUT_TOKENS = 4096
+
+
+def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
+                          temperature, return_tool_events):
+    """GPT counterpart to chat_with_mcp: the OpenAI Responses API talking to the
+    SAME remote MCP server (Streamable HTTP) the Anthropic connector uses. OpenAI
+    runs the tool loop; each fired tool surfaces as an `mcp_call` output item, which
+    we collect as the receipt (same contract as the Anthropic path). `mcp_servers`
+    entries are the connector shape built by argo_webhook._build_mcp_servers
+    (name/url/authorization_token); None -> a plain tool-less Responses call."""
+    from openai import OpenAI  # lazy: no-key path needs no SDK
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"].strip())
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": s["name"],
+            "server_url": s["url"],
+            # The MCP server is our own bearer-gated, allowlist-enforced endpoint, so
+            # auto-approve calls -- there's no human in the loop on a chat turn.
+            "require_approval": "never",
+            "headers": {"Authorization": f"Bearer {s['authorization_token']}"},
+        }
+        for s in (mcp_servers or [])
+    ]
+
+    def do_call():
+        kwargs = {
+            "model": model,
+            "instructions": system,
+            "input": [{"role": m["role"], "content": m["content"]} for m in messages],
+            "max_output_tokens": max(max_tokens, _OPENAI_MIN_OUTPUT_TOKENS),
+        }
+        if tools:
+            kwargs["tools"] = tools
+        # gpt-5/o-series reject a custom temperature (accept only the default).
+        if temperature is not None and not _rejects_temperature(model):
+            kwargs["temperature"] = temperature
+        return client.responses.create(**kwargs)
+
+    response = _guarded("openai", do_call, f"responses/{model}")
+
+    # Receipt: each tool the connector fired is an `mcp_call` output item. Only a
+    # SUCCEEDED call counts toward the receipt -- a failed propose_change must not
+    # back an "I opened a PR" claim (the phantom-claim gate keys off this list), so an
+    # errored call is logged + fed to the diagnose loop but kept OUT of `events`.
+    events = []
+    for item in (getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "mcp_call":
+            continue
+        name = getattr(item, "name", "?")
+        err = getattr(item, "error", None)
+        if err:
+            log.warning("openai mcp_call ERROR: %s", str(err)[:200])
+            _record_tool_error(name, err)
+        else:
+            events.append(name)
+            log.info("openai mcp_call ok: %s", name)
+
+    # output_text is the SDK's aggregated assistant text; fall back to walking the
+    # message items if a version doesn't expose it.
+    text = getattr(response, "output_text", None)
+    if not text:
+        chunks = []
+        for item in (getattr(response, "output", None) or []):
+            if getattr(item, "type", "") != "message":
+                continue
+            for c in (getattr(item, "content", None) or []):
+                t = getattr(c, "text", None)
+                if t:
+                    chunks.append(t)
+        text = "".join(chunks)
     return (text, events) if return_tool_events else text
 
 
@@ -426,12 +526,14 @@ PROVIDERS = (
         "key_env": "OPENAI_API_KEY",
         "matches": lambda m: m.startswith(("gpt-", "o1", "o3", "o4")),
         "call": _call_openai,
+        "supports_mcp": True,  # via the OpenAI Responses remote-MCP connector
     },
     {
         "name": "anthropic",
         "key_env": "ANTHROPIC_API_KEY",
         "matches": lambda m: m.startswith("claude"),
         "call": _call_anthropic,
+        "supports_mcp": True,  # via the Anthropic MCP connector
     },
 )
 
@@ -442,6 +544,15 @@ def provider_for(model):
         if provider["matches"](model):
             return provider
     return None
+
+
+def supports_mcp(model):
+    """True if the model's provider can run the MCP tool loop (Anthropic connector
+    or OpenAI Responses). Drives whether a chat turn takes the structured tool path,
+    so the webhook never hardcodes provider names. Registry-driven: a new tool-capable
+    provider just sets supports_mcp=True on its row."""
+    p = provider_for(model)
+    return bool(p and p.get("supports_mcp"))
 
 
 def resolve_models():

@@ -201,6 +201,34 @@ class PhantomClaimGateTest(unittest.TestCase):
         self.assertIn("haven't actually opened a PR", out)
         self.assertEqual(self.noted[0][0], "phantom_claim")
 
+    def test_pr_as_verb_claim_blocked(self):  # "PR" used as a verb (screenshot)
+        out = wh._guard_phantom_send(
+            "I'll PR it into feeds.json and send the link right after.", [])
+        self.assertIn("haven't actually opened a PR", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_feeds_write_claim_blocked(self):  # repo write == propose_change (screenshot)
+        out = wh._guard_phantom_send(
+            "I'm going to actually add the blog feed to feeds.json right now.", [])
+        self.assertIn("haven't actually opened a PR", out)
+        self.assertEqual(self.noted[0][0], "phantom_claim")
+
+    def test_feeds_write_with_receipt_passes(self):
+        msg = "Added the blog feed to feeds.json, PR is up for review."
+        self.assertEqual(wh._guard_phantom_send(msg, ["propose_change"]), msg)
+        self.assertFalse(self.noted)
+
+    def test_conditional_feeds_write_not_blocked(self):  # FP guard: offer, not claim
+        msg = "I could add it to feeds.json if you want."
+        self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
+    def test_pr_verb_prose_not_blocked(self):  # FP guard: "PR the/a" in prose (review #1)
+        for msg in ("we PR the changes via the dashboard.",
+                    "I PR a lot of repos in general."):
+            self.assertEqual(wh._guard_phantom_send(msg, []), msg)
+        self.assertFalse(self.noted)
+
     def test_looked_it_up_claim_blocked(self):  # colloquial read verb (recall)
         out = wh._guard_phantom_send("I looked it up and the latest is v3.", [])
         self.assertIn("didn't actually fetch", out)
@@ -240,7 +268,8 @@ class AntiBluffReattemptTest(unittest.TestCase):
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["claude-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
-            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}))
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
+                       "supports_mcp": True}))
         self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
@@ -292,8 +321,10 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["gpt-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
-            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}
-            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY"}))
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
+                       "supports_mcp": True}
+            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY",
+                                     "supports_mcp": True}))
         self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
@@ -318,6 +349,19 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         out = wh._generate_reply(7, "hi", "hi")
         self.assertEqual(out, "all good.")
         self.assertFalse(any(n[0] == "model_failure" for n in self.noted))
+
+    def test_fallback_prompt_carries_no_tools_constraint(self):
+        # The tool-less brain must be told it has no tools, so it offers actions
+        # instead of promising them (the self-contradiction in the screenshot).
+        self.enterContext(mock.patch.object(
+            observe, "chat_with_mcp",
+            mock.Mock(side_effect=Exception("credit balance is too low"))))
+        captured = {}
+        self.enterContext(mock.patch.object(
+            observe, "generate_observations",
+            lambda prompt, model: captured.setdefault("prompt", prompt) or "from memory."))
+        wh._generate_reply(7, "add the feed", "add the feed")
+        self.assertIn(wh._NO_TOOLS_CONSTRAINT, captured["prompt"])
 
 
 if __name__ == "__main__":

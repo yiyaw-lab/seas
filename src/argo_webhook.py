@@ -435,6 +435,20 @@ _FALLBACK_NOTICE = (
     "I'm on a backup that can't use tools this turn: no reading links, opening PRs, "
     "or fetching live data. I'll answer from memory and flag what I can't verify.\n\n")
 
+# Appended to the tool-less fallback prompt. The gpt-4o brain has NO MCP tools, so
+# left to the normal system prompt (which describes Argo's tools) it cheerfully
+# promises to open PRs / edit feeds.json / fetch links -- the exact self-
+# contradiction that follows _FALLBACK_NOTICE ("can't use tools" then "I'll PR
+# it"). This forbids the promise at the source; _guard_phantom_send is the backstop.
+_NO_TOOLS_CONSTRAINT = (
+    "[HARD CONSTRAINT for this turn: you have NO tools available. You cannot open or "
+    "draft a PR, edit or add to any file (including feeds.json), read or fetch any "
+    "link or live data, or stage a CONFIRM/heal action. Do NOT say you are doing, "
+    "about to do, or will do any of these now or 'right after' -- you cannot this "
+    "turn. Answer from memory only. If an action is needed, OFFER it as a next step "
+    "the user can trigger (e.g. 'say propose it and I'll open a real PR'), never as "
+    "something you are performing now.]")
+
 
 def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     anthropic_only=False):
@@ -470,13 +484,23 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     hist = _recent_turns(chat_id)
 
     last_error = None
-    tooled_failed = False  # a tool-capable (anthropic) model errored earlier this turn
+    tooled_failed = False  # an MCP-capable model errored earlier this turn
     for model in runnable:
         is_anthropic = observe.provider_for(model)["name"] == "anthropic"
+        tool_capable = observe.supports_mcp(model)
+        # Tool path: any MCP-capable provider when a server is configured -- so a
+        # Claude outage degrades to "different brain, same tools", not "no tools".
+        # Anthropic also takes it WITHOUT a server (no completion fallback wired, and
+        # image turns need its structured/vision path); other providers' non-string
+        # (image) turns can't reach here -- anthropic_only filters them -- so guard
+        # on a string.
+        use_mcp = is_anthropic or (
+            tool_capable and MCP_SERVERS is not None
+            and isinstance(final_content, str))
         try:
             tool_events = []
-            if is_anthropic:
-                # Claude path: structured messages + MCP tools. Assistant turns are
+            if use_mcp:
+                # Tool path: structured messages + MCP tools. Assistant turns are
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
                 # (string or image-block list).
@@ -497,8 +521,8 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # ONCE with the exact gap so the model actually calls the tool (or
                 # names the blocker) instead of bluffing. One retry only; the
                 # terminal _guard_phantom_send below suppresses if it still has no
-                # receipt. Tool-less (gpt-4o) turns skip this -- a retry can't fire
-                # a tool they don't have, so the guard suppresses them directly.
+                # receipt. Tool-less turns skip this (the else branch) -- a retry
+                # can't fire a tool they don't have, so the guard suppresses directly.
                 # Only text turns re-attempt: an image/document turn carries block
                 # content, and re-sending it for a second vision pass is slow with
                 # little upside -- the terminal guard still suppresses any bluff.
@@ -514,26 +538,38 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                         model, mcp_servers=MCP_SERVERS, return_tool_events=True,
                     )
             else:
-                # Fallback path (gpt-4o): the original single string prompt. Only
-                # reached for text turns (anthropic_only guards images away).
+                # Tool-less path: the original single string prompt, reached only
+                # when no MCP server is configured (or a non-tool provider). Text
+                # turns only (anthropic_only guards images away). This brain has no
+                # tools, so _NO_TOOLS_CONSTRAINT stops it promising tool actions it
+                # can't take (the "says things it won't do" bug).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
-                    f"{build_system_prompt()}\n\n"
+                    f"{build_system_prompt()}\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
                     f"Conversation so far:\n{convo}\n\n"
                     f"{profile.name()}: {final_content}\n\nArgo:"
                 )
                 raw = observe.generate_observations(prompt, model)
 
+            # An empty model reply (e.g. a reasoning model spent its whole
+            # max_output_tokens budget before emitting visible text) must never be
+            # sent as a blank Telegram message -- treat it as a failure and try the
+            # next model, falling through to the honest error if none is left.
+            cleaned = _clean_reply(raw.strip()) if raw else ""
+            if not cleaned:
+                last_error = last_error or RuntimeError(f"{model} returned an empty reply")
+                log.warning("empty reply from %s; trying next model", model)
+                continue
             # Phantom-send backstop: if the model CLAIMS it sent/built a proposal
             # but no project tool actually fired, correct it honestly (the
             # deterministic route handles explicit asks; this catches the rest).
-            reply = _guard_phantom_send(_clean_reply(raw.strip()), tool_events)
-            # If we're only answering because the tool-capable brain errored and we
-            # fell back to a tool-less model (e.g. Anthropic credits/outage -> gpt),
-            # say so plainly. A silent degrade to a no-tool brain is exactly how
-            # Argo ended up bluffing with no way for the user to know it couldn't
-            # read links or act this turn.
-            if tooled_failed and not is_anthropic:
+            reply = _guard_phantom_send(cleaned, tool_events)
+            # If the tool-capable brain errored and we fell all the way back to a
+            # TOOL-LESS path (no MCP server, or a non-tool model), say so plainly. A
+            # silent degrade to a no-tool brain is how Argo ended up bluffing. When
+            # the fallback still has tools (GPT via the Responses connector), use_mcp
+            # is True and no notice fires -- it can genuinely read links and act.
+            if tooled_failed and not use_mcp:
                 reply = _FALLBACK_NOTICE + reply
                 _note_incident("model_failure", "tool-capable model failed; "
                                "answered on tool-less fallback", str(last_error))
@@ -550,7 +586,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     "Back tomorrow (or raise the cap).")
         except Exception as exc:
             last_error = exc
-            if is_anthropic:
+            if tool_capable:
                 tooled_failed = True
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
     return f"(Argo hit an error reaching the model: {last_error})"
@@ -591,7 +627,18 @@ _PR_CLAIM_RE = re.compile(
     r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
     r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
     r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
-    r"(?:open|opened|ready|drafted|submitted|up|live)\b",
+    r"(?:open|opened|ready|drafted|submitted|up|live)\b"
+    # PR used as a verb on a specific object: "I'll PR it", "I'm gonna PR this".
+    # Object is a pronoun (it/this/that/them/those) -- NOT bare "a"/"the"/"in",
+    # which over-match prose like "we PR the changes via the dashboard".
+    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,20}"
+    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|them|those)\b"
+    # Writing a repo file is a propose_change action: "I'll add the feed to
+    # feeds.json", "I'm editing feeds.json". (feeds live in the repo.)
+    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,35}"
+    r"\b(?:add(?:ed|ing)?|edit(?:ed|ing)?|updat(?:e|ed|ing)?|commit(?:ted|ting)?"
+    r"|writ(?:e|ing)|stag(?:e|ed|ing)|push(?:ed|ing)?|put(?:ting)?)\b"
+    r"[^.!?\n]{0,40}\bfeeds\.json\b",
     re.IGNORECASE)
 # "I read/checked/fetched the link", "I looked it up", "the page says", "per URL".
 _LINK_READ_CLAIM_RE = re.compile(
