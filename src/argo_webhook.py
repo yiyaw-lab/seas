@@ -484,16 +484,18 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     hist = _recent_turns(chat_id)
 
     last_error = None
-    tooled_failed = False  # a tool-capable (anthropic) model errored earlier this turn
+    tooled_failed = False  # an MCP-capable model errored earlier this turn
     for model in runnable:
-        provider = observe.provider_for(model)["name"]
-        is_anthropic = provider == "anthropic"
-        # Tool path: Claude via the Anthropic connector, OR GPT via the OpenAI
-        # Responses remote-MCP connector when a server is configured -- so a Claude
-        # outage degrades to "different brain, same tools", not "no tools". GPT image
-        # turns can't reach here (anthropic_only filters them), so guard on a string.
+        is_anthropic = observe.provider_for(model)["name"] == "anthropic"
+        tool_capable = observe.supports_mcp(model)
+        # Tool path: any MCP-capable provider when a server is configured -- so a
+        # Claude outage degrades to "different brain, same tools", not "no tools".
+        # Anthropic also takes it WITHOUT a server (no completion fallback wired, and
+        # image turns need its structured/vision path); other providers' non-string
+        # (image) turns can't reach here -- anthropic_only filters them -- so guard
+        # on a string.
         use_mcp = is_anthropic or (
-            provider == "openai" and MCP_SERVERS is not None
+            tool_capable and MCP_SERVERS is not None
             and isinstance(final_content, str))
         try:
             tool_events = []
@@ -584,7 +586,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                     "Back tomorrow (or raise the cap).")
         except Exception as exc:
             last_error = exc
-            if is_anthropic:
+            if tool_capable:
                 tooled_failed = True
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
     return f"(Argo hit an error reaching the model: {last_error})"

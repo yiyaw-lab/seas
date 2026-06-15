@@ -337,6 +337,20 @@ def _rejects_temperature(model):
     return any(model.startswith(p) for p in _TEMPERATURE_REJECTING_PREFIXES)
 
 
+def _record_tool_error(name, detail):
+    """Feed a failed MCP tool call to the diagnose loop. Shared by both connector
+    telemetry loops (Anthropic mcp_tool_result, OpenAI mcp_call) so the incident
+    contract ('tool_error', 'name: detail') lives in one place. Never raises -- a
+    broken ledger must not break a chat turn, but the failure is logged, not
+    silently swallowed."""
+    try:
+        import argo_incidents
+        argo_incidents.record_incident("tool_error", f"{name}: {detail}",
+                                       str(detail)[:200])
+    except Exception:
+        log.debug("record_incident failed for tool %s", name, exc_info=True)
+
+
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                   temperature=1.0, return_tool_events=False):
     """Claude chat call with structured messages and optional MCP tool servers.
@@ -412,12 +426,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                 snippet = str(getattr(b, "content", ""))[:200]
                 if getattr(b, "is_error", False):
                     log.warning("mcp tool_result ERROR: %s", snippet)
-                    try:  # feed the diagnostic loop; never let it break a chat turn
-                        import argo_incidents
-                        argo_incidents.record_incident(
-                            "tool_error", f"{name}: {snippet}", snippet)
-                    except Exception:
-                        pass
+                    _record_tool_error(name, snippet)
                 else:
                     log.info("mcp tool_result ok: %s", snippet)
 
@@ -487,12 +496,7 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
         err = getattr(item, "error", None)
         if err:
             log.warning("openai mcp_call ERROR: %s", str(err)[:200])
-            try:  # feed the diagnostic loop; never let it break a chat turn
-                import argo_incidents
-                argo_incidents.record_incident(
-                    "tool_error", f"{name}: {err}", str(err)[:200])
-            except Exception:
-                pass
+            _record_tool_error(name, err)
         else:
             events.append(name)
             log.info("openai mcp_call ok: %s", name)
@@ -522,12 +526,14 @@ PROVIDERS = (
         "key_env": "OPENAI_API_KEY",
         "matches": lambda m: m.startswith(("gpt-", "o1", "o3", "o4")),
         "call": _call_openai,
+        "supports_mcp": True,  # via the OpenAI Responses remote-MCP connector
     },
     {
         "name": "anthropic",
         "key_env": "ANTHROPIC_API_KEY",
         "matches": lambda m: m.startswith("claude"),
         "call": _call_anthropic,
+        "supports_mcp": True,  # via the Anthropic MCP connector
     },
 )
 
@@ -538,6 +544,15 @@ def provider_for(model):
         if provider["matches"](model):
             return provider
     return None
+
+
+def supports_mcp(model):
+    """True if the model's provider can run the MCP tool loop (Anthropic connector
+    or OpenAI Responses). Drives whether a chat turn takes the structured tool path,
+    so the webhook never hardcodes provider names. Registry-driven: a new tool-capable
+    provider just sets supports_mcp=True on its row."""
+    p = provider_for(model)
+    return bool(p and p.get("supports_mcp"))
 
 
 def resolve_models():

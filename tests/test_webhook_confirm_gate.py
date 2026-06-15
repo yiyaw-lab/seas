@@ -268,7 +268,8 @@ class AntiBluffReattemptTest(unittest.TestCase):
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["claude-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
-            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}))
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
+                       "supports_mcp": True}))
         self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
@@ -320,8 +321,10 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["gpt-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
-            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}
-            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY"}))
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
+                       "supports_mcp": True}
+            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY",
+                                     "supports_mcp": True}))
         self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
