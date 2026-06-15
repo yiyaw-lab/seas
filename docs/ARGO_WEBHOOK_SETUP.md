@@ -81,8 +81,23 @@ server binds `$PORT` / `0.0.0.0` automatically.
 > the webhook (the bot goes silent with no error). With `WEBHOOK_URL` set, the
 > next redeploy fixes it automatically; otherwise re-run `set_webhook.py`.
 
-Health check: visit `https://YOUR-RAILWAY-URL/` — it should say
-"Argo webhook is up."
+Health check: visit `https://YOUR-RAILWAY-URL/` — it returns a small JSON status
+(scheduler fires, signal-store age, open incidents).
+
+Verify a rotated secret actually deployed (operator-only): pass the
+`ARGO_MCP_TOKEN` bearer and the payload adds a `config` section with value-free
+fingerprints (length + `sha256[:8]`, never the secret):
+
+```bash
+curl -s -H "Authorization: Bearer $ARGO_MCP_TOKEN" https://YOUR-RAILWAY-URL/ \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["config"])'
+# compare a token's sha8 to your local copy:
+printf %s "$GITHUB_TOKEN" | sha256sum   # first 8 hex must match config.GITHUB_TOKEN.sha8
+```
+
+If the fingerprints differ, the running process is holding a stale value — redeploy
+so the new env var takes effect. A `has_surrounding_whitespace` flag means the
+stored value has a stray newline/space.
 
 ### Other hosts (Render / Fly / VPS)
 

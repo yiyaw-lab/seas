@@ -35,6 +35,8 @@ Run locally:  python src/argo_webhook.py   (then expose :8080 via a tunnel)
 Register URL: python src/set_webhook.py https://your-public-url/webhook
 """
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -1384,11 +1386,50 @@ def _already_handled(update_id):
         return False
 
 
-def _health_payload():
+# Secret env vars whose presence/identity an operator may need to verify in the
+# RUNNING process (e.g. "did my freshly-rotated GITHUB_TOKEN actually deploy?").
+# Reported as a value-free fingerprint, never the secret -- and only to a caller
+# that proves the operator bearer (see _operator_authed).
+_FINGERPRINT_VARS = (
+    "GITHUB_TOKEN", "GH_TOKEN", "ARGO_PROPOSE_TOKEN", "ARGO_MCP_TOKEN",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN",
+)
+
+
+def _secret_fingerprint(value):
+    """A non-reversible fingerprint of a secret, for config verification WITHOUT
+    leaking it: length + the first 8 hex of SHA-256 of the .strip()-ed value (the
+    form that actually authenticates). The operator compares it to their token
+    (`printf %s "$TOK" | sha256sum`) to confirm the live process holds the expected
+    one. 8 hex = 32 bits: enough to spot a stale/rotated token, far too little to
+    reconstruct it. None when unset; flags surrounding whitespace (a paste footgun)."""
+    if not value:
+        return None
+    stripped = value.strip()
+    fp = {"len": len(stripped),
+          "sha8": hashlib.sha256(stripped.encode()).hexdigest()[:8]}
+    if stripped != value:
+        fp["has_surrounding_whitespace"] = True
+    return fp
+
+
+def _operator_authed(request):
+    """True if the request carries the operator bearer (ARGO_MCP_TOKEN). Gates the
+    secret-fingerprint section of /health so it's never exposed on the public route.
+    Constant-time compare; False when no token is configured."""
+    if not ARGO_MCP_TOKEN:
+        return False
+    header = request.headers.get("Authorization", "")
+    sent = header[7:] if header.lower().startswith("bearer ") else ""
+    return hmac.compare_digest(sent, ARGO_MCP_TOKEN)
+
+
+def _health_payload(include_config=False):
     """Build the health/status JSON from LOCAL files only -- no network, never
     raises. Returns: status, UTC time, the last few scheduler fires, signal-store
     age, and a compact performance snapshot. The '/' route returns this on every
-    poll, so it must be cheap and incapable of hanging (CLAUDE.md contract)."""
+    poll, so it must be cheap and incapable of hanging (CLAUDE.md contract).
+    `include_config` adds value-free secret fingerprints (operator-bearer only)."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     payload = {"status": "ok", "time": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -1434,6 +1475,14 @@ def _health_payload():
     except Exception:
         payload["incidents"] = []
 
+    # Operator-only: value-free fingerprints of the configured secrets, so a stale
+    # or mis-pasted token in the running process is visible at a glance (a 401 alone
+    # can't tell "bad value" from "wrong scope"). Gated by _operator_authed upstream.
+    if include_config:
+        payload["config"] = {
+            var: _secret_fingerprint(os.environ.get(var)) for var in _FINGERPRINT_VARS
+        }
+
     return payload
 
 
@@ -1444,7 +1493,7 @@ def create_app():
 
     @app.get("/")
     def health():
-        return jsonify(_health_payload()), 200
+        return jsonify(_health_payload(include_config=_operator_authed(request))), 200
 
     @app.post("/webhook")
     def webhook():
