@@ -175,7 +175,9 @@ class OpenAiToolFallbackTest(unittest.TestCase):
         ])
         self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
         out = wh._generate_reply(7, "what's new", "what's new")
-        self.assertTrue(out.startswith("(Argo hit an error"))
+        # A clean, honest line -- NOT a blank message and NOT the raw provider error.
+        self.assertIn("trouble reaching", out)
+        self.assertNotIn("credit balance", out)  # no raw provider/billing detail leaked
         self.assertNotEqual(out.strip(), "")
 
 

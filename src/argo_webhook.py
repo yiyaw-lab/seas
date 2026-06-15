@@ -588,8 +588,13 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
             last_error = exc
             if tool_capable:
                 tooled_failed = True
+    # Every model failed. Log/record the real error for the operator (the incident
+    # ledger + console), but never leak the raw provider message to the user -- it
+    # carries billing notices, request ids, and reads like a crash.
+    log.error("all chat models failed this turn: %s", last_error)
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
-    return f"(Argo hit an error reaching the model: {last_error})"
+    return ("I'm having trouble reaching my brain right now. Give me a minute and "
+            "try me again.")
 
 
 # --- Claim<->receipt gate -------------------------------------------------
