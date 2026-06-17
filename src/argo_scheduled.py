@@ -49,13 +49,15 @@ COMMANDS = {
     "frontier": ("argo_evolve", "run_cli"),
 }
 
-# Commands that need the WEBHOOK's filesystem: their ledgers live on the Railway
-# volume and their FIX/EVOLVE gates read a staging file the webhook must see. The
-# Actions runner can't serve these (its checkout has no incident/evolution state,
-# and the webhook can never read what it stages there), so the webhook runs them
-# itself via local_loop() in a daemon thread. On Actions they stay structurally
-# inert (diagnose: empty ledger; frontier: its own GITHUB_ACTIONS guard).
-LOCAL_COMMANDS = ("diagnose", "frontier")
+# Commands that need the WEBHOOK's filesystem: their ledgers/inputs live on the
+# Railway volume and their gates read a staging file the webhook must see. The
+# Actions runner can't serve these (its checkout has no incident/evolution state or
+# real project ratings, and the webhook can never read what it stages there), so the
+# webhook runs them itself via local_loop() in a daemon thread. On Actions they stay
+# structurally inert (diagnose: empty ledger; frontier: its own GITHUB_ACTIONS guard;
+# reflect: the projects log is empty there, so it no-ops below REFLECT_MIN_NEW before
+# any model call -- and a lesson it did write wouldn't be committed back anyway).
+LOCAL_COMMANDS = ("diagnose", "frontier", "reflect")
 LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
 LOCAL_INTERVAL_SECONDS = 15 * 60
 

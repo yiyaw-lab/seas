@@ -123,6 +123,8 @@ class LocalCommandsTest(unittest.TestCase):
              "command": "project", "enabled": True},
             {"name": "frontier", "days": "daily", "hour": [15],
              "command": "frontier", "enabled": True},
+            {"name": "weekly-reflection", "days": "daily", "hour": [15],
+             "command": "reflect", "enabled": True},
         ]}))
         self.calls = []
         self.enterContext(mock.patch.object(
@@ -137,11 +139,22 @@ class LocalCommandsTest(unittest.TestCase):
         self.assertEqual(sched.COMMANDS["frontier"], ("argo_evolve", "run_cli"))
         self.assertIn("frontier", sched.LOCAL_COMMANDS)
         self.assertIn("diagnose", sched.LOCAL_COMMANDS)
+        # reflect is volume-bound (its real project ratings live on the Railway
+        # volume, not a fresh Actions checkout), so it must run in the local loop too.
+        self.assertIn("reflect", sched.LOCAL_COMMANDS)
 
     def test_only_filter_fires_just_the_local_commands(self):
         ran = self._fire(only=("frontier",), state_path=self.local_state)
         self.assertEqual(ran, ["frontier"])
         self.assertEqual(self.calls, ["frontier"])
+
+    def test_reflect_fires_under_local_commands_filter(self):
+        # The fix: reflect must be reachable from the webhook's local loop
+        # (only=LOCAL_COMMANDS), not only the Actions runner where its project-ratings
+        # input is always empty. project (not volume-bound) stays out of the local pass.
+        ran = self._fire(only=sched.LOCAL_COMMANDS, state_path=self.local_state)
+        self.assertIn("reflect", ran)
+        self.assertNotIn("project", ran)
 
     def test_local_state_is_isolated_from_the_actions_state(self):
         self._fire(only=("frontier",), state_path=self.local_state)
