@@ -269,7 +269,11 @@ def investigate(signal, dry_run=False):
            f"{signal.get('summary','')}\n\n## SOURCES\n{sources_block}")
 
     import os
-    models = [m for m in observe.resolve_models()
+    # SEAS research can run a different (e.g. stronger) model than Argo's ARGO_MODEL
+    # fallback: ARGO_SEAS_MODEL wins when set, else resolve_models() (ARGO_MODEL).
+    # Falsy-guard so an unset/empty env never injects None/"" as a model.
+    preferred = os.environ.get("ARGO_SEAS_MODEL")
+    models = [m for m in (([preferred] if preferred else []) + observe.resolve_models())
               if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])]
     if not models:
         return "No API key available; cannot synthesize."
@@ -391,7 +395,11 @@ def auto_score_signals(signals, dry_run=False):
     prompt_template = SCORE_PROMPT_PATH.read_text()
 
     import os
-    models = [m for m in observe.resolve_models()
+    # SEAS research can run a different (e.g. stronger) model than Argo's ARGO_MODEL
+    # fallback: ARGO_SEAS_MODEL wins when set, else resolve_models() (ARGO_MODEL).
+    # Falsy-guard so an unset/empty env never injects None/"" as a model.
+    preferred = os.environ.get("ARGO_SEAS_MODEL")
+    models = [m for m in (([preferred] if preferred else []) + observe.resolve_models())
               if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])]
     if not models:
         print("  (no model available for scoring — skipping)")
