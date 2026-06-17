@@ -144,6 +144,14 @@ def fire_due(only=None, dry=False, state_path=None):
             continue
         due.append((sched, target_hour))
 
+    # Fire the earliest scheduled hour first. When a delayed or restarted pass finds
+    # several windows due at once (the grace window), an earlier-scheduled entry must
+    # still win any shared resource -- e.g. the evolution loop's one-nudge-a-day
+    # budget that gaps (16:00) and frontier (17:00) share -- regardless of the
+    # entries' order in schedule.json. Stable within an hour, so same-hour order is
+    # unchanged.
+    due.sort(key=lambda dt: dt[1])
+
     print(f"\n⏰ Argo schedule runner — {now:%Y-%m-%d %H:%M UTC}")
     if not due:
         print("Nothing due this hour.\n")

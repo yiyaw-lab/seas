@@ -464,7 +464,11 @@ def scan():
     # GATE 2: the spam ceiling.
     if _nudge_budget_left() <= 0:
         return {"acted": False, "reason": "daily nudge budget spent"}
-    # GATE 3 (free): a seeded lever ready to offer skips fetch + mapper entirely.
+    # GATE 3 (free): any nudge-ready lever skips fetch + mapper entirely -- a seed,
+    # or a gap-funnel lever stranded by a failed send (source filter omitted on
+    # purpose, so a transient Telegram outage recovers via whichever funnel runs
+    # next, not only the weekly gaps run). _nudge_text keys off lever["source"], so
+    # a gap lever re-offered here still reads in its inward voice.
     seed = next((l for l in _load_ledger()["levers"]
                  if l.get("status") == "nudge-ready"), None)
     if seed:
@@ -1073,7 +1077,9 @@ def run_gaps_cli():
     ledger + the staging file the EVOLVE gate reads, so on Actions it is
     structurally inert. The closing-the-loop work (sync_proposal_outcomes,
     score_due) stays with the daily 'frontier' run so it is not doubled here; this
-    command only adds the inward gap scan."""
+    command only adds the inward gap scan. (Load-bearing: frontier must stay enabled
+    daily -- gap levers' PR outcomes + predictions are synced/scored only by that
+    run. If frontier is ever disabled, move sync/score into this entrypoint.)"""
     if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("ARGO_EVOLUTION_PATH"):
         log.info("gaps: skipping on Actions (no shared filesystem with the webhook)")
         print("Gaps: skipped on Actions (no shared filesystem with the webhook).")

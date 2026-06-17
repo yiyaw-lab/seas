@@ -204,6 +204,44 @@ class ShippedScheduleTest(unittest.TestCase):
         for cmd in self.by_cmd:
             self.assertIn(cmd, sched.COMMANDS)
 
+    def test_capability_gaps_runs_before_frontier(self):
+        # gaps shares frontier's one-nudge-a-day budget; scheduling it an earlier
+        # hour lets a same-pass grace-window fire (sorted by hour) hand the weekly
+        # inward proposal that day's slot instead of frontier.
+        self.assertLess(self.by_cmd["gaps"]["hour"], self.by_cmd["frontier"]["hour"])
+
+
+class FireOrderTest(unittest.TestCase):
+    """When a delayed/restarted pass finds several windows due at once (the grace
+    window), the earlier scheduled hour must fire first so it wins any shared
+    resource -- the evolution loop's one-nudge-a-day budget that frontier (17:00)
+    and gaps (16:00) share. Guards against schedule.json array order deciding it."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.schedule = self.tmp / "schedule.json"
+        self.state = self.tmp / "state.json"
+        self.enterContext(mock.patch.object(sched, "SCHEDULE_PATH", self.schedule))
+        self.enterContext(mock.patch.object(sched, "STATE_PATH", self.state))
+        # Deliberately list the LATER hour first: only the hour-sort can fix order.
+        self.schedule.write_text(json.dumps({"schedules": [
+            {"name": "later", "days": "daily", "hour": [17], "command": "frontier",
+             "enabled": True},
+            {"name": "earlier", "days": "daily", "hour": [16], "command": "gaps",
+             "enabled": True},
+        ]}))
+        self.calls = []
+        self.enterContext(mock.patch.object(
+            sched, "run_command", lambda cmd: self.calls.append(cmd)))
+
+    def test_lower_hour_fires_first_when_both_due_in_one_pass(self):
+        # now=17:xx: hour 16 (within grace) and hour 17 (exact) are both due in one
+        # pass; gaps (16) must run before frontier (17) despite the array order.
+        with mock.patch.object(sched, "datetime") as dt:
+            dt.now.return_value = _now(17)
+            sched.fire_due(state_path=self.state)
+        self.assertEqual(self.calls, ["gaps", "frontier"])
+
 
 if __name__ == "__main__":
     unittest.main()
