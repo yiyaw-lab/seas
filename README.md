@@ -1,20 +1,31 @@
 <div align="center">
 
-# SEAS + Argo
+<img src="docs/assets/banner.svg" alt="SEAS + Argo — a frontier research engine and a self-improving agentic scout. Generation is free. Judgment isn't." width="100%" />
 
-**A frontier research engine and a self-improving agentic scout — judgment as the spine.**
-
-*Generation is free. Judgment isn't.*
+**A frontier research engine + a self-improving agentic scout — judgment as the spine.**
 
 [![Tests](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml/badge.svg)](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml)
 &nbsp;[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](https://www.python.org/)
 &nbsp;[![License](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
-&nbsp;[![Core](https://img.shields.io/badge/core-pure%20stdlib-success.svg)](requirements.txt)
 &nbsp;[![Argo](https://img.shields.io/badge/Argo-live%20on%20Railway%20%2B%20Telegram-7d4fff.svg)](#argo--frontier-scout-live-on-railway--telegram)
 
-**41 modules · ~12,000 lines · 315 tests, zero network · 10 pinned deps · a pure-stdlib core**
+[![Modules](https://img.shields.io/badge/modules-41-8b5cf6.svg)](src/)
+&nbsp;[![Lines](https://img.shields.io/badge/lines-~12k-8b5cf6.svg)](src/)
+&nbsp;[![Tests](https://img.shields.io/badge/tests-315_passing-3fb950.svg)](tests/)
+&nbsp;[![Deps](https://img.shields.io/badge/deps-10_stdlib_core-3fb950.svg)](requirements.txt)
+&nbsp;[![Loops](https://img.shields.io/badge/self--improvement_loops-3-7d4fff.svg)](#how-argo-improves-itself)
 
 </div>
+
+## At a glance
+
+| Stat | Value |
+|---|---|
+| **Code** | 41 modules · ~12,000 lines of Python 3.11 |
+| **Tests** | 315 · zero network · zero LLM · no real data files |
+| **Dependencies** | 10 pinned, at the I/O edge — a **pure-stdlib core** (gate, world model, probes) |
+| **Self-improvement loops** | 3 — self-diagnosis · frontier-evolution · capability-gap (all human-gated) |
+| **Live** | Argo on Railway + Telegram, behind a human merge gate |
 
 > Source-available (see [LICENSE](LICENSE)). Stdlib-first Python 3.11 — the core
 > (gate, world model, probes) is pure standard library; thin pinned deps live only
