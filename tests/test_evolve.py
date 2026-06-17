@@ -737,6 +737,23 @@ class GapProposerTest(EvolveBase):
         self.assertFalse(ev.has_pending())                  # nothing staged
         self.assertEqual(ev._load_ledger()["levers"], [])   # no ledger write
 
+    def test_frontier_gate3_prefers_stranded_gap_lever_over_seed(self):
+        # A gap lever whose send failed sits nudge-ready alongside the dogfood seeds;
+        # the daily frontier run's GATE 3 must re-offer the GAP lever (honor the slot
+        # gaps already tried to use), not the first seed in list order (Bugbot, #21).
+        ev.ensure_seeds()  # 3 nudge-ready seeds, source="seed", added first
+        self._lever(id="EV-950", feature="gap_feat", source="gap",
+                    status="nudge-ready", source_item={"title": "a gap"})
+        with mock.patch.object(ev, "_collect_new",
+                               side_effect=AssertionError("fetch must not run")), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan()
+        self.assertTrue(res["acted"])
+        self.assertEqual(res["lever"], "EV-950")            # gap lever wins, not a seed
+        self.assertEqual(ev.get_lever("EV-950")["status"], "nudged")
+        self.assertIn("gap in myself", self.sent[-1])       # inward voice preserved
+
 
 if __name__ == "__main__":
     unittest.main()

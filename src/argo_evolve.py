@@ -465,12 +465,15 @@ def scan():
     if _nudge_budget_left() <= 0:
         return {"acted": False, "reason": "daily nudge budget spent"}
     # GATE 3 (free): any nudge-ready lever skips fetch + mapper entirely -- a seed,
-    # or a gap-funnel lever stranded by a failed send (source filter omitted on
-    # purpose, so a transient Telegram outage recovers via whichever funnel runs
-    # next, not only the weekly gaps run). _nudge_text keys off lever["source"], so
-    # a gap lever re-offered here still reads in its inward voice.
-    seed = next((l for l in _load_ledger()["levers"]
-                 if l.get("status") == "nudge-ready"), None)
+    # or a gap-funnel lever stranded by a failed send (no source filter, so a
+    # transient Telegram outage recovers via whichever funnel runs next, not only the
+    # weekly gaps run). A stranded gap lever is preferred over seeds/frontier levers
+    # so the inward proposal that gaps already tried to deliver that day wins the
+    # shared slot back instead of a seed quietly taking it. _nudge_text keys off
+    # lever["source"], so a gap lever re-offered here still reads in its inward voice.
+    ready = [l for l in _load_ledger()["levers"] if l.get("status") == "nudge-ready"]
+    seed = next((l for l in ready if l.get("source") == "gap"),
+                ready[0] if ready else None)
     if seed:
         return _offer(seed["id"])
     # Fetch + dedup (network, but no model cost).
