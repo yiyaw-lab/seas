@@ -1083,32 +1083,46 @@ def refetch_signals() -> str:
 
 
 def run_pending_heal():
-    """Execute the staged heal action (called by the webhook CONFIRM shortcut at
-    L1). Returns a status string. Clears the pending file either way."""
-    if not PENDING_HEAL_PATH.exists():
+    """Execute the staged heal action (called by the webhook CONFIRM/FIX shortcut at
+    L1). Returns a status string. Clears the pending file either way.
+
+    The action is CLAIMED atomically -- os.replace the pending file to a private
+    per-thread name -- before it is read or run. Each Telegram update is handled in
+    its own thread, so two near-simultaneous CONFIRM/FIX replies (a double-tap, or
+    FIX while the slow first reply is still opening its PR) would otherwise both pass
+    the existence check and both run, opening two PRs for one incident. Only one
+    rename of the source can succeed; the loser sees no pending file and reports
+    nothing staged."""
+    claim = PENDING_HEAL_PATH.with_name(
+        f"{PENDING_HEAL_PATH.name}.claim.{os.getpid()}.{threading.get_ident()}")
+    try:
+        os.replace(PENDING_HEAL_PATH, claim)  # atomic claim; only one caller wins
+    except OSError:
         return "Nothing staged to confirm."
     try:
-        pending = json.loads(PENDING_HEAL_PATH.read_text())
-    except (ValueError, json.JSONDecodeError):
-        PENDING_HEAL_PATH.unlink(missing_ok=True)
-        return "Pending action was unreadable; cleared it."
-    action = pending.get("action")
-    payload = pending.get("payload")
-    PENDING_HEAL_PATH.unlink(missing_ok=True)  # one-shot, clear before running
-    try:
-        if action == "reregister_webhook":
-            import argo_webhook
-            argo_webhook.self_register_webhook()
-            return "Re-registered the webhook. ✅"
-        if action == "refetch_signals":
-            import fetch_signals
-            fetch_signals.main()
-            return "Refetched the signal feeds. ✅"
-        if action == "propose_fix":
-            return _run_propose_fix(payload or {})
-        return f"Unknown staged action '{action}'."
-    except Exception as exc:
-        return f"Heal action '{action}' failed: {type(exc).__name__}: {exc}"
+        try:
+            pending = json.loads(claim.read_text())
+        except (ValueError, json.JSONDecodeError):
+            return "Pending action was unreadable; cleared it."
+        action = pending.get("action")
+        payload = pending.get("payload")
+        try:
+            if action == "reregister_webhook":
+                import argo_webhook
+                argo_webhook.self_register_webhook()
+                return "Re-registered the webhook. ✅"
+            if action == "refetch_signals":
+                import fetch_signals
+                fetch_signals.main()
+                return "Refetched the signal feeds. ✅"
+            if action == "propose_fix":
+                return _run_propose_fix(payload or {})
+            return f"Unknown staged action '{action}'."
+        except Exception as exc:
+            log.warning("heal action %r failed", action, exc_info=True)
+            return f"Heal action '{action}' failed: {type(exc).__name__}: {exc}"
+    finally:
+        claim.unlink(missing_ok=True)
 
 
 def clear_pending_heal():
