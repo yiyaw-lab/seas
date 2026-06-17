@@ -34,6 +34,12 @@ class IsEnabledTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XAI_API_KEY": "k", "ARGO_GROK_SOURCE": "1"}):
             self.assertTrue(grok_search.is_enabled())
 
+    def test_off_with_whitespace_only_key(self):
+        # A key set to whitespace must read as disabled (secrets are stripped at read)
+        # rather than pass is_enabled() and waste a paid call that 401s on "Bearer ".
+        with mock.patch.dict(os.environ, {"XAI_API_KEY": "   ", "ARGO_GROK_SOURCE": "1"}):
+            self.assertFalse(grok_search.is_enabled())
+
 
 class ParseItemsTest(unittest.TestCase):
     def test_plain_json_array(self):
@@ -114,6 +120,14 @@ class CollectGrokTest(unittest.TestCase):
     def test_disabled_returns_empty(self):
         with mock.patch("grok_search.is_enabled", lambda: False):
             self.assertEqual(watch.collect_grok({}, []), [])
+
+    def test_disabled_logs_why(self):
+        # The silent-disable trap: an unset/drifted ARGO_GROK_SOURCE used to make
+        # collect_grok return [] with no log, so the source could sit dead invisibly.
+        with mock.patch("grok_search.is_enabled", lambda: False), \
+             self.assertLogs("argo_watch", level="INFO") as cm:
+            watch.collect_grok({}, [])
+        self.assertTrue(any("grok source off" in m for m in cm.output))
 
 
 if __name__ == "__main__":

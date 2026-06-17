@@ -137,6 +137,9 @@ def collect_grok(seen, already):
     except ImportError:
         return []
     if not grok_search.is_enabled():
+        log.info("grok source off (ARGO_GROK_SOURCE=%s, key_present=%s); RSS only",
+                 os.environ.get("ARGO_GROK_SOURCE"),
+                 bool((os.environ.get("XAI_API_KEY") or "").strip()))
         return []
     have = {_item_id(it) for it in already}
     out = []

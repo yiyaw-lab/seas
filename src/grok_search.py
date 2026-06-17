@@ -46,13 +46,13 @@ _PROMPT = (
 def is_enabled():
     """True only when a key is present AND the cost switch is on. Callers check this
     before fetch() so a no-key / switch-off deploy never makes the paid call."""
-    return bool(os.environ.get("XAI_API_KEY")) and \
+    return bool((os.environ.get("XAI_API_KEY") or "").strip()) and \
         os.environ.get("ARGO_GROK_SOURCE", "0") == "1"
 
 
 def _post(body, timeout):
     """POST to the xAI Responses API; return parsed JSON or None. Never raises."""
-    key = os.environ.get("XAI_API_KEY")
+    key = (os.environ.get("XAI_API_KEY") or "").strip()
     if not key:
         return None
     req = urllib.request.Request(
@@ -60,7 +60,7 @@ def _post(body, timeout):
         data=json.dumps(body).encode(),
         method="POST",
         headers={
-            "Authorization": "Bearer " + key.strip(),
+            "Authorization": "Bearer " + key,
             "Content-Type": "application/json",
             "User-Agent": "argo-seas/1.0",
         },
