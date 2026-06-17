@@ -34,6 +34,12 @@ jobs:
           ARGO_MODEL: ${{ vars.ARGO_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Optional Grok live X/web news source (grok_search). 'watch' runs HERE on
+          # Actions, not the Railway webhook, so these must be set as Actions
+          # secrets/vars -- a Railway-only ARGO_GROK_SOURCE never reaches this job.
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ARGO_GROK_SOURCE: ${{ vars.ARGO_GROK_SOURCE }}
+          XAI_SEARCH_MODEL: ${{ vars.XAI_SEARCH_MODEL }}
         run: python src/argo_scheduled.py
       - name: Commit updated data (seen-store, schedule state, signals)
         run: |
