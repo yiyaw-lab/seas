@@ -57,6 +57,7 @@ OUT_DIR = ROOT / "argo" / "observations"
 _BREAKERS = {
     "openai": argo_guard.CircuitBreaker("openai"),
     "anthropic": argo_guard.CircuitBreaker("anthropic"),
+    "xai": argo_guard.CircuitBreaker("xai"),
 }
 _BUDGET = argo_guard.DailyBudget()
 
@@ -257,6 +258,34 @@ def _call_openai(job, model, temperature=1.0):
         return client.chat.completions.create(**kwargs)
 
     response = _guarded("openai", do_call, f"openai/{model}")
+    return response.choices[0].message.content
+
+
+def _call_xai(job, model, temperature=1.0):
+    from openai import OpenAI  # lazy: xAI speaks the OpenAI chat-completions protocol
+
+    # api.x.ai/v1 is OpenAI-chat-completions compatible -- same SDK, just a different
+    # base_url + key. Strip the key (see _call_openai) to avoid an illegal
+    # Authorization header from a trailing newline/space. (xAI's tool/search lives
+    # behind a separate /v1/responses Agent Tools API, NOT this chat path -- see the
+    # PROVIDERS row's supports_mcp=False.)
+    client = OpenAI(api_key=os.environ["XAI_API_KEY"].strip(),
+                    base_url="https://api.x.ai/v1")
+
+    def do_call():
+        kwargs = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": job},
+            ],
+        }
+        # grok-* accepts a custom temperature (not in _TEMPERATURE_REJECTING_PREFIXES).
+        if temperature is not None and not _rejects_temperature(model):
+            kwargs["temperature"] = temperature
+        return client.chat.completions.create(**kwargs)
+
+    response = _guarded("xai", do_call, f"xai/{model}")
     return response.choices[0].message.content
 
 
@@ -534,6 +563,17 @@ PROVIDERS = (
         "matches": lambda m: m.startswith("claude"),
         "call": _call_anthropic,
         "supports_mcp": True,  # via the Anthropic MCP connector
+    },
+    {
+        "name": "xai",
+        "key_env": "XAI_API_KEY",
+        "matches": lambda m: m.startswith("grok"),
+        "call": _call_xai,
+        # Chat only: xAI's tools are a separate /v1/responses Agent Tools API, NOT
+        # the OpenAI-Responses remote-MCP path _chat_with_mcp_openai uses. False
+        # keeps grok off every tool loop (dispatch checks name=='openai'; the
+        # webhook's tool path is gated by supports_mcp).
+        "supports_mcp": False,
     },
 )
 
