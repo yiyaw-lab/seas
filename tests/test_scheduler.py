@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+import argo_paths
 import argo_scheduled as sched
 
 
@@ -125,6 +126,8 @@ class LocalCommandsTest(unittest.TestCase):
              "command": "frontier", "enabled": True},
             {"name": "weekly-reflection", "days": "daily", "hour": [15],
              "command": "reflect", "enabled": True},
+            {"name": "capability-gaps", "days": "daily", "hour": [15],
+             "command": "gaps", "enabled": True},
         ]}))
         self.calls = []
         self.enterContext(mock.patch.object(
@@ -142,6 +145,17 @@ class LocalCommandsTest(unittest.TestCase):
         # reflect is volume-bound (its real project ratings live on the Railway
         # volume, not a fresh Actions checkout), so it must run in the local loop too.
         self.assertIn("reflect", sched.LOCAL_COMMANDS)
+
+    def test_gaps_command_is_registered(self):
+        # The proactive capability-gap proposer: same volume + EVOLVE gate as
+        # frontier, so it must be reachable from the webhook's local loop.
+        self.assertEqual(sched.COMMANDS["gaps"], ("argo_evolve", "run_gaps_cli"))
+        self.assertIn("gaps", sched.LOCAL_COMMANDS)
+
+    def test_gaps_fires_under_local_commands_filter(self):
+        ran = self._fire(only=sched.LOCAL_COMMANDS, state_path=self.local_state)
+        self.assertIn("gaps", ran)
+        self.assertNotIn("project", ran)  # not volume-bound: stays on Actions
 
     def test_only_filter_fires_just_the_local_commands(self):
         ran = self._fire(only=("frontier",), state_path=self.local_state)
@@ -165,6 +179,30 @@ class LocalCommandsTest(unittest.TestCase):
         self.local_state.unlink()
         ran = self._fire(only=("frontier",), state_path=self.local_state)
         self.assertEqual(ran, ["frontier"])
+
+
+class ShippedScheduleTest(unittest.TestCase):
+    """Guards the live data/schedule.json. Enabling the frontier loop (and its
+    inward twin, gaps) is a data flip the webhook's local_loop reads at deploy time,
+    so a silent regression to enabled:false would re-inert them -- exactly the
+    'structurally inert' failure this repo keeps hitting. Reads the real file only;
+    no network."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = json.loads(Path(argo_paths.SCHEDULE_PATH).read_text())
+        cls.by_cmd = {s["command"]: s for s in cls.config["schedules"]}
+
+    def test_frontier_loop_is_enabled(self):
+        self.assertTrue(self.by_cmd["frontier"]["enabled"])
+
+    def test_capability_gaps_entry_present_and_enabled(self):
+        self.assertIn("gaps", self.by_cmd)
+        self.assertTrue(self.by_cmd["gaps"]["enabled"])
+
+    def test_every_scheduled_command_maps_to_a_handler(self):
+        for cmd in self.by_cmd:
+            self.assertIn(cmd, sched.COMMANDS)
 
 
 if __name__ == "__main__":

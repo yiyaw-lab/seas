@@ -47,6 +47,7 @@ COMMANDS = {
     "reflect": ("argo_self", "reflect_cli"),
     "diagnose": ("argo_diagnose", "run_cli"),
     "frontier": ("argo_evolve", "run_cli"),
+    "gaps": ("argo_evolve", "run_gaps_cli"),
 }
 
 # Commands that need the WEBHOOK's filesystem: their ledgers/inputs live on the
@@ -54,10 +55,13 @@ COMMANDS = {
 # Actions runner can't serve these (its checkout has no incident/evolution state or
 # real project ratings, and the webhook can never read what it stages there), so the
 # webhook runs them itself via local_loop() in a daemon thread. On Actions they stay
-# structurally inert (diagnose: empty ledger; frontier: its own GITHUB_ACTIONS guard;
-# reflect: the projects log is empty there, so it no-ops below REFLECT_MIN_NEW before
-# any model call -- and a lesson it did write wouldn't be committed back anyway).
-LOCAL_COMMANDS = ("diagnose", "frontier", "reflect")
+# structurally inert (diagnose: empty ledger; frontier/gaps: their own GITHUB_ACTIONS
+# guard + the same volume ledger; reflect: the projects log is empty there, so it
+# no-ops below REFLECT_MIN_NEW before any model call -- and a lesson it did write
+# wouldn't be committed back anyway). gaps is the inward twin of frontier (the
+# proactive capability-gap proposer), sharing frontier's evolution ledger + EVOLVE
+# gate, so it belongs in the same place for the same reason.
+LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps")
 LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
 LOCAL_INTERVAL_SECONDS = 15 * 60
 
