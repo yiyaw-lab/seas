@@ -754,6 +754,24 @@ class GapProposerTest(EvolveBase):
         self.assertEqual(ev.get_lever("EV-950")["status"], "nudged")
         self.assertIn("gap in myself", self.sent[-1])       # inward voice preserved
 
+    def test_accept_gap_lever_labels_pr_as_capability_gap(self):
+        # A gap-sourced PR body must read as a capability-gap upgrade, not an external
+        # "Frontier upgrade" (the nudge already uses gap copy) -- Bugbot, PR #21.
+        self._lever(id="EV-960", feature="gap_pr", source="gap", magnitude="minor",
+                    status="nudged")
+        ev._stage("EV-960")
+        captured = {}
+
+        def fake_propose(payload):
+            captured.update(payload)
+            return ("Drafted a fix and opened http://pr/960.",
+                    {"pr_number": 960, "url": "http://pr/960"})
+
+        with mock.patch.object(ev, "_propose", side_effect=fake_propose):
+            ev.accept_pending()
+        self.assertIn("Capability-gap upgrade", captured["description"])
+        self.assertNotIn("Frontier upgrade", captured["description"])
+
 
 if __name__ == "__main__":
     unittest.main()

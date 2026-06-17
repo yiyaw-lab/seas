@@ -810,9 +810,13 @@ def _run_accept(lid, lever):
             int(spec.get("days", 14)), source=f"evolution:{lid}")
     _update_lever(lid, status="accepted", world_belief_id=wm_id,
                   prediction_id=pred_id)
+    # Label the PR body by the lever's origin so a gap-sourced PR doesn't read as an
+    # external frontier change (the Telegram nudge already uses gap-specific copy).
+    kind_label = ("Capability-gap upgrade" if lever.get("source") == "gap"
+                  else "Frontier upgrade")
     payload = {
         "title": f"Argo evolution: adopt {lever.get('feature')}",
-        "description": (f"Frontier upgrade: {lever.get('lever', '')}\n\n"
+        "description": (f"{kind_label}: {lever.get('lever', '')}\n\n"
                         f"Expected benefit: {lever.get('expected_benefit', '')}\n"
                         f"Risk: {lever.get('risk', '')}\n"
                         f"Evolution lever: {lid}."),
