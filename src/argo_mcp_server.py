@@ -974,7 +974,7 @@ def run_reflection() -> str:
 # signals). No restart, no delete, no broadcast, no credential changes.
 
 HEAL_LEVEL = os.environ.get("ARGO_HEAL_LEVEL", "L0").upper()
-PENDING_HEAL_PATH = ROOT / "data" / "argo_pending_heal.json"
+PENDING_HEAL_PATH = argo_paths.PENDING_HEAL_PATH  # volume-backed; survives redeploys
 
 # Registry of allowed heal actions: name -> (human description, callable).
 # Callables are imported lazily inside _run_heal to avoid import cycles.
