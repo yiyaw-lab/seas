@@ -17,6 +17,8 @@ Stdlib only.
 """
 
 import json
+import os
+import tempfile
 
 
 def load_json(path, default=None):
@@ -32,5 +34,20 @@ def load_json(path, default=None):
 
 def save_json(path, data):
     """Write `data` as pretty JSON with a trailing newline -- the exact on-disk
-    format every Argo store already uses (indent=2, no sort_keys)."""
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    format every Argo store already uses (indent=2, no sort_keys).
+
+    Written atomically: a unique temp file in the same directory is written, then
+    swapped into place via os.replace (an atomic rename on the same filesystem), so
+    a crash/kill mid-write can't leave a truncated store. A corrupt store would otherwise read back as the default on
+    next load and silently reset dedup/scheduler state (re-firing already-sent
+    alerts) -- the failure this guards against."""
+    text = json.dumps(data, indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                               prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
