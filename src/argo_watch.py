@@ -3,7 +3,8 @@ Argo V2 — Phase G: the tripwire (proactive frontier alerts).
 
 Flips Argo from reactive to proactive. On a schedule (GitHub Actions cron,
 ~3-4x/day) this watcher:
-  1. fetches current items from the frontier feeds (fetch_signals.FEEDS),
+  1. fetches current items from the frontier feeds (fetch_signals.FEEDS), plus
+     optional live X/web items via Grok (grok_search) when ARGO_GROK_SOURCE=1,
   2. dedups against a seen-store (data/argo_seen.json) so only genuinely NEW
      items are considered,
   3. runs an LLM judge: "would a frontier builder want to know this today?",
@@ -125,6 +126,29 @@ def collect_new(seen):
     return new
 
 
+def collect_grok(seen, already):
+    """Optional live X/web frontier candidates via Grok (xAI Agent Tools), additive
+    to the RSS pool. Gated on ARGO_GROK_SOURCE=1 + XAI_API_KEY (a paid call). Dedups
+    against the seen-store AND the items already collected this run, so the same
+    story from RSS + Grok isn't double-judged. Failures degrade to [] inside
+    grok_search, so this never breaks the RSS tripwire."""
+    try:
+        import grok_search
+    except ImportError:
+        return []
+    if not grok_search.is_enabled():
+        return []
+    have = {_item_id(it) for it in already}
+    out = []
+    for item in grok_search.fetch():
+        iid = _item_id(item)
+        if iid and iid not in have and seen.get(iid, 0) < MAX_ATTEMPTS:
+            have.add(iid)
+            out.append(item)
+    log.info("grok source added %d new candidate(s)", len(out))
+    return out
+
+
 JUDGE_INSTRUCTIONS = """You are Argo, a frontier scout. Below are NEW items that
 just appeared on AI frontier feeds. Pick ONLY the ones a frontier builder would
 genuinely want to know about TODAY: real launches, new models, new tools/products,
@@ -230,6 +254,7 @@ def main():
     seen = load_seen()
 
     new_items = collect_new(seen)
+    new_items += collect_grok(seen, new_items)  # optional live X/web source
     print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
     alerts = judge(new_items)
