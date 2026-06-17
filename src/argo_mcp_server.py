@@ -755,6 +755,32 @@ def get_signal_freshness() -> str:
             f"({age_h:.1f}h ago).")
 
 
+@mcp.tool()
+@with_deadline(10)  # pure local read
+def get_tripwire_status() -> str:
+    """Report the tripwire dedup state: how many news items Argo has already sent
+    (so it won't repeat them) and when that store was last updated. Use when asked
+    about repeat news, deduping, or 'do you remember what you already sent'. The
+    store (data/argo_seen.json) IS the persistent sent-news log: it survives between
+    runs (the schedule workflow commits it back), so there is nothing to 'build' --
+    repeats only happen if a run fails to save it. Read this before claiming a
+    dedup gap."""
+    from datetime import datetime, timezone
+
+    path = argo_paths.SEEN_PATH
+    if not path.exists():
+        return ("Seen-store not on disk yet -- it's created on the first run that "
+                "sends news, then persists between runs (committed back by the "
+                "schedule workflow). Dedup is by design; there's nothing to build.")
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+    data = argo_store.load_json(path, {})
+    n = len(data) if isinstance(data, (dict, list)) else "?"
+    return (f"{n} news items tracked as already-sent (won't repeat). Seen-store "
+            f"last updated {mtime:%Y-%m-%d %H:%M UTC} ({age_h:.1f}h ago); it "
+            f"persists between runs, so repeats only happen if a run fails to save.")
+
+
 # --- V3 H0.1: read SEAS findings (the SEAS->Argo coupling) -------------------
 # SEAS produces findings (findings/F-*.md) — what the research engine believes is
 # true. Until now they sat in a directory Argo never read. This tool lets Argo

@@ -105,5 +105,35 @@ class AttemptsGatingTest(unittest.TestCase):
         self.assertNotIn("settled", eligible)       # == MAX_ATTEMPTS
 
 
+class TripwireStatusTest(unittest.TestCase):
+    """get_tripwire_status (MCP tool) reports the REAL dedup state, so Argo stops
+    guessing 'no dedup memory' and offering to build a log that already exists."""
+
+    def setUp(self):
+        import argo_mcp_server as srv
+        import argo_paths
+        self.srv = srv
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.tmp / "argo_seen.json"
+        # The tool reads argo_paths.SEEN_PATH at call time, so patch it there.
+        self.enterContext(mock.patch.object(argo_paths, "SEEN_PATH", self.path))
+
+    def test_absent_store_says_persistent_by_design(self):
+        out = self.srv.get_tripwire_status()
+        self.assertIn("persist", out.lower())
+        self.assertIn("nothing to build", out.lower())
+
+    def test_counts_tracked_items_dict_format(self):
+        self.path.write_text(json.dumps({"a": 3, "b": 1, "c": 3}))
+        out = self.srv.get_tripwire_status()
+        self.assertIn("3 news items", out)
+        self.assertIn("persist", out.lower())
+
+    def test_counts_legacy_list_format(self):
+        self.path.write_text(json.dumps(["a", "b"]))
+        out = self.srv.get_tripwire_status()
+        self.assertIn("2 news items", out)
+
+
 if __name__ == "__main__":
     unittest.main()
