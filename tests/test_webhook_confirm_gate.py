@@ -321,10 +321,15 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["gpt-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
-            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
-                       "supports_mcp": True}
-            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY",
-                                     "supports_mcp": True}))
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}
+            if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY"}))
+        # The code routes via observe.supports_mcp(model) (a function, not a provider
+        # key) and the module-level wh.MCP_SERVERS (built from .env at import). Pin
+        # both so the test path can't shift under a changed .env: both models are
+        # tool-capable, and by default no connector is configured -> the gpt fallback
+        # is genuinely tool-less (a test overrides MCP_SERVERS to verify tools-kept).
+        self.enterContext(mock.patch.object(observe, "supports_mcp", lambda m: True))
+        self.enterContext(mock.patch.object(wh, "MCP_SERVERS", None))
         self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
@@ -362,6 +367,22 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
             lambda prompt, model: captured.setdefault("prompt", prompt) or "from memory."))
         wh._generate_reply(7, "add the feed", "add the feed")
         self.assertIn(wh._NO_TOOLS_CONSTRAINT, captured["prompt"])
+
+    def test_no_notice_when_gpt_fallback_keeps_tools(self):
+        # The headline of the peer's feature: Claude errors but the GPT fallback
+        # keeps the MCP tools (a server IS configured), so it can genuinely read
+        # links / act -- no degrade notice, no tool-less constraint.
+        self.enterContext(mock.patch.object(wh, "MCP_SERVERS", [{"name": "argo"}]))
+        chat = mock.Mock(side_effect=[
+            Exception("credit balance is too low"),         # claude-x errors
+            ("on it, pulled the page.", ["web_fetch"]),      # gpt-x WITH tools
+        ])
+        self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
+        out = wh._generate_reply(7, "read https://x.com", "read it")
+        self.assertEqual(chat.call_count, 2)
+        self.assertFalse(out.startswith(wh._FALLBACK_NOTICE))
+        self.assertIn("pulled the page", out)
+        self.assertFalse(any(n[0] == "model_failure" for n in self.noted))
 
 
 if __name__ == "__main__":

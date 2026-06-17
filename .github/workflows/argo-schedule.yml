@@ -45,5 +45,15 @@ jobs:
           # dedupe state actually persists across runs.
           git add data/argo_seen.json 2>/dev/null || true
           git add data/schedule_state.json 2>/dev/null || true
-          git commit -m "argo-schedule: update run state" || echo "No changes"
-          git push || echo "Nothing to push"
+          git commit -m "argo-schedule: update run state" || { echo "No changes"; exit 0; }
+          # Rebase-retry before pushing. This repo has other writers (seas-findings,
+          # human/agent pushes), so a bare `git push` loses the dedupe update to a
+          # non-fast-forward race -- and a lost seen-store update silently re-sends
+          # last run's news (the repeat-news bug). Retry; fail loudly if we truly
+          # can't land it, so a dropped update shows as a red run, not a silent no-op.
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push && exit 0
+            echo "push race (attempt $i) -- rebasing and retrying"
+            sleep $((RANDOM % 6 + 3))
+          done
+          echo "ERROR: could not push run state after 5 attempts"; exit 1
