@@ -27,10 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_http
+import argo_paths
 import argo_store
 
 ROOT = Path(__file__).resolve().parent.parent
-SIGNALS_PATH = ROOT / "data" / "signals.json"
+SIGNALS_PATH = argo_paths.SIGNALS_PATH  # single source of truth (see argo_paths)
 
 # How many feed items to turn into signals for one run. The store is a shared
 # pool: the observation path takes the top 3, project generation shuffles and

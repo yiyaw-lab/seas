@@ -17,12 +17,20 @@ _run_propose_fix (repro-test gate, protected-path denylist, PR-only token, human
 merge -- Argo still can't merge anything); CI-polling and the post-deploy quiet
 window are argo_diagnose's verify/confirm, which handle these PRs unchanged.
 
-Placement: this command needs the webhook's filesystem (volume ledgers + the
-staging file the EVOLVE gate reads), so it runs in the webhook's in-process
-scheduler (argo_scheduled.local_loop). On GitHub Actions it is structurally
-inert (the guard in run_cli), exactly like diagnose is there.
+A second, inward funnel (scan_gaps / the 'gaps' command) reuses this exact spine
+but reacts to Argo's OWN gaps instead of the external frontier: the proactive
+capability-gap proposer. Its signal is the honest "not used" list in the stack
+manifest plus Argo's unresolved self-beliefs. Same lever ledger, same EVOLVE/SKIP
+gate, same rehearse/propose/predict path and shared one-nudge-a-day budget; levers
+it mints are tagged source="gap".
+
+Placement: these commands need the webhook's filesystem (volume ledgers + the
+staging file the EVOLVE gate reads), so they run in the webhook's in-process
+scheduler (argo_scheduled.local_loop). On GitHub Actions they are structurally
+inert (the guard in run_cli/run_gaps_cli), exactly like diagnose is there.
 
 Run:  python3 src/argo_evolve.py            (one full pass: sync, score, scan)
+      python3 src/argo_evolve.py --gaps     (one inward capability-gap scan)
       python3 src/argo_evolve.py --no-send  (dry run: fetch + map + print only,
                                              no sends, no writes)
 """
@@ -354,7 +362,12 @@ def _slug(s):
 
 def _nudge_text(lever):
     src = ((lever.get("source_item") or {}).get("title") or "").strip()
-    head = (f"frontier update: {src}. " if src else "frontier idea: ")
+    if lever.get("source") == "gap":
+        # The inward twin: this lever came from my own gap list, not a release.
+        head = (f"i spotted a gap in myself: {src}. " if src
+                else "i spotted a gap in myself. ")
+    else:
+        head = (f"frontier update: {src}. " if src else "frontier idea: ")
     return (head
             + f"i could adopt {lever.get('feature')}: {lever.get('lever')} "
             + f"expected benefit: {lever.get('expected_benefit')} "
@@ -451,9 +464,16 @@ def scan():
     # GATE 2: the spam ceiling.
     if _nudge_budget_left() <= 0:
         return {"acted": False, "reason": "daily nudge budget spent"}
-    # GATE 3 (free): a seeded lever ready to offer skips fetch + mapper entirely.
-    seed = next((l for l in _load_ledger()["levers"]
-                 if l.get("status") == "nudge-ready"), None)
+    # GATE 3 (free): any nudge-ready lever skips fetch + mapper entirely -- a seed,
+    # or a gap-funnel lever stranded by a failed send (no source filter, so a
+    # transient Telegram outage recovers via whichever funnel runs next, not only the
+    # weekly gaps run). A stranded gap lever is preferred over seeds/frontier levers
+    # so the inward proposal that gaps already tried to deliver that day wins the
+    # shared slot back instead of a seed quietly taking it. _nudge_text keys off
+    # lever["source"], so a gap lever re-offered here still reads in its inward voice.
+    ready = [l for l in _load_ledger()["levers"] if l.get("status") == "nudge-ready"]
+    seed = next((l for l in ready if l.get("source") == "gap"),
+                ready[0] if ready else None)
     if seed:
         return _offer(seed["id"])
     # Fetch + dedup (network, but no model cost).
@@ -508,6 +528,161 @@ def scan():
     if src_item:
         seen[src_item["_iid"]] = MAX_ATTEMPTS
         save_seen(seen)
+    return _offer(lever["id"])
+
+
+# --- the proactive capability-gap proposer (the inward twin of scan) -------------
+#
+# scan() reacts to the EXTERNAL frontier (new releases). This reacts to the gap
+# between what Argo IS and what it could be: the honest "not used" list in the
+# stack manifest plus Argo's own unresolved self-beliefs. It feeds the SAME lever
+# ledger and the SAME EVOLVE/SKIP gate, and draws from the same one-pending /
+# one-nudge-a-day guards via the shared _meta -- only the signal source differs, so
+# an internal-gap lever rehearses, proposes, and scores exactly like a frontier
+# one. Levers it mints carry source="gap".
+
+_GAP_SYSTEM = ("You are Argo, looking inward for ONE concrete upgrade that closes a "
+               "real gap in your own capabilities. Be skeptical and honest: propose "
+               "nothing speculative, never invent a capability, and only name files "
+               "from the provided list. Most runs, nothing is worth a change.")
+
+_GAP_PROMPT = (
+    "KNOWN GAPS IN YOURSELF (your stack manifest's 'not used' list and your own "
+    "unresolved self-beliefs):\n{gaps}\n\n"
+    "YOUR CURRENT STACK (stack_manifest.json):\n{manifest}\n\n"
+    "WHAT YOU BELIEVE ABOUT YOURSELF:\n{self_beliefs}\n\n"
+    "Features already proposed or adopted (do NOT propose these again):\n{taken}\n\n"
+    "Your source files (affected_files may only use paths from this list):\n{files}\n\n"
+    "If exactly one of these gaps is worth closing now with a concrete, small, "
+    "self-contained change, reply with ONLY a JSON object, no prose, no markdown, "
+    "with these keys:\n"
+    '  "relevant": true\n'
+    '  "gap": the gap you are closing, in a few words\n'
+    '  "feature": short snake_case slug for the capability (e.g. '
+    '"usage_cost_telemetry")\n'
+    '  "lever": one plain sentence: the concrete change to make\n'
+    '  "affected_files": a list of 1-3 paths from the list above\n'
+    '  "expected_benefit": one plain sentence\n'
+    '  "risk": one plain sentence\n'
+    '  "magnitude": "minor" for a contained change, "major" for a new call path or '
+    "new dependency surface\n"
+    "If no gap is worth a change right now (most runs), reply with exactly: NONE\n"
+    "No em dashes."
+)
+
+
+def _collect_gaps():
+    """The inward signal source (pure read, no model call): the honest 'not used'
+    list from the stack manifest plus Argo's own unresolved self-beliefs of kind
+    'issue'. Returns plain-string descriptions for the mapper to choose ONE from."""
+    gaps = []
+    manifest = argo_store.load_json(MANIFEST_PATH, {})
+    for g in manifest.get("api_features_not_used") or []:
+        if isinstance(g, str) and g.strip():
+            gaps.append(f"stack gap: {g.strip()}")
+    try:
+        for b in argo_self.get_self_beliefs(kind="issue"):
+            if b.get("status") == "resolved":
+                continue
+            gaps.append(f"self issue (confidence {b.get('confidence')}): "
+                        f"{b.get('claim')}")
+    except Exception:
+        log.error("evolve: reading self-beliefs for gaps failed", exc_info=True)
+    return gaps
+
+
+def _map_gap(gaps):
+    """One guarded model call (mirrors _map_levers): known gaps -> ONE lever dict,
+    {} for an explicit NONE, or None on infrastructure failure (so a NONE and an
+    outage stay distinguishable). Routed through argo_observe so the DailyBudget +
+    circuit breaker apply."""
+    import argo_observe as observe
+    model = _resolve_model()
+    if model is None:
+        log.warning("evolve: no model available for the gap mapper")
+        return None
+    prompt = _GAP_PROMPT.format(
+        gaps="\n".join(f"- {g}" for g in gaps) or "(none)",
+        manifest=json.dumps(argo_store.load_json(MANIFEST_PATH, {}), indent=2)[:4000],
+        self_beliefs=argo_self.format_self_for_prompt() or "(none yet)",
+        taken=", ".join(sorted(_active_features())) or "(none)",
+        files="\n".join(_repo_files()) or "(unavailable)")
+    try:
+        if observe.provider_for(model)["name"] == "anthropic":
+            raw = observe.chat_with_mcp(
+                _GAP_SYSTEM, [{"role": "user", "content": prompt}], model,
+                temperature=0)
+        else:
+            raw = observe.generate_observations(prompt, model, temperature=0)
+    except Exception:
+        log.error("evolve: gap mapper call failed", exc_info=True)
+        return None
+    if (raw or "").strip().upper() == "NONE":
+        return {}
+    # Neither NONE nor parseable JSON is a model failure, not a verdict: None.
+    return _parse_json(raw)
+
+
+def scan_gaps():
+    """Run the inward funnel once (the proactive capability-gap proposer). Same
+    free-gates-before-the-paid-call order as scan(); returns a summary dict, never
+    raises out to the scheduler."""
+    # Recover claims orphaned by a crash before the gates run (shared with scan()).
+    _sweep_stale_claims()
+    # GATE 1: one staged lever at a time -- shared with the frontier funnel, so a
+    # frontier lever awaiting EVOLVE/SKIP also blocks the gap funnel (and vice versa).
+    if has_pending():
+        return {"acted": False, "reason": "pending lever awaiting EVOLVE/SKIP"}
+    # GATE 2: the shared daily nudge ceiling (frontier and gaps draw one budget, so
+    # the two funnels together still nudge at most once a day).
+    if _nudge_budget_left() <= 0:
+        return {"acted": False, "reason": "daily nudge budget spent"}
+    # GATE 3 (free): a gap lever already minted but undelivered (a prior send failed)
+    # is re-offered without burning a fresh model call.
+    ready = next((l for l in _load_ledger()["levers"]
+                  if l.get("status") == "nudge-ready" and l.get("source") == "gap"),
+                 None)
+    if ready:
+        return _offer(ready["id"])
+    gaps = _collect_gaps()
+    if not gaps:
+        return {"acted": False, "reason": "no open capability gaps"}
+    result = _map_gap(gaps)
+    if result is None:
+        return {"acted": False, "reason": "gap mapper unavailable"}
+    if not result.get("relevant"):
+        return {"acted": False, "reason": "no gap worth closing this run"}
+    feature = _slug(result.get("feature"))
+    if not feature:
+        return {"acted": False, "reason": "gap mapper returned no feature slug"}
+    if feature in _active_features():
+        return {"acted": False, "reason": f"feature already tracked: {feature}"}
+    files = [f for f in (result.get("affected_files") or [])
+             if isinstance(f, str) and (ROOT / f).exists()]
+    if not files or len(files) > MAX_AFFECTED_FILES:
+        return {"acted": False, "reason": "affected files missing or too many"}
+    magnitude = result.get("magnitude") if result.get("magnitude") in ("minor", "major") else "major"
+    data = _load_ledger()
+    lever = {
+        "id": _next_id(data["levers"]), "created_at": _now_iso(),
+        "source": "gap",
+        "source_item": {"title": (result.get("gap") or "").strip()
+                        or "an internal capability gap"},
+        "feature": feature, "lever": (result.get("lever") or "").strip(),
+        "affected_files": files,
+        "expected_benefit": (result.get("expected_benefit") or "").strip(),
+        "risk": (result.get("risk") or "").strip(),
+        # nudge-ready (not "new") so a failed nudge send is retried by GATE 3 next
+        # scan, mirroring the frontier funnel.
+        "magnitude": magnitude, "status": "nudge-ready", "muted_until": None,
+        "self_belief_id": None, "world_belief_id": None,
+        # No precomputable metric for a gap lever, so no dated prediction -- the
+        # benefit lands as belief evidence, honestly unscored (like prompt_caching).
+        "prediction_id": None, "prediction_spec": None,
+        "pr_number": None, "rehearse": None,
+    }
+    data["levers"].append(lever)
+    _save_ledger(data)
     return _offer(lever["id"])
 
 
@@ -635,9 +810,13 @@ def _run_accept(lid, lever):
             int(spec.get("days", 14)), source=f"evolution:{lid}")
     _update_lever(lid, status="accepted", world_belief_id=wm_id,
                   prediction_id=pred_id)
+    # Label the PR body by the lever's origin so a gap-sourced PR doesn't read as an
+    # external frontier change (the Telegram nudge already uses gap-specific copy).
+    kind_label = ("Capability-gap upgrade" if lever.get("source") == "gap"
+                  else "Frontier upgrade")
     payload = {
         "title": f"Argo evolution: adopt {lever.get('feature')}",
-        "description": (f"Frontier upgrade: {lever.get('lever', '')}\n\n"
+        "description": (f"{kind_label}: {lever.get('lever', '')}\n\n"
                         f"Expected benefit: {lever.get('expected_benefit', '')}\n"
                         f"Risk: {lever.get('risk', '')}\n"
                         f"Evolution lever: {lid}."),
@@ -899,23 +1078,60 @@ def run_cli():
     return result
 
 
+def run_gaps_cli():
+    """Scheduler entrypoint (the 'gaps' command): the proactive capability-gap
+    proposer. Shares run_cli's placement guard -- it needs the webhook's volume
+    ledger + the staging file the EVOLVE gate reads, so on Actions it is
+    structurally inert. The closing-the-loop work (sync_proposal_outcomes,
+    score_due) stays with the daily 'frontier' run so it is not doubled here; this
+    command only adds the inward gap scan. (Load-bearing: frontier must stay enabled
+    daily -- gap levers' PR outcomes + predictions are synced/scored only by that
+    run. If frontier is ever disabled, move sync/score into this entrypoint.)"""
+    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("ARGO_EVOLUTION_PATH"):
+        log.info("gaps: skipping on Actions (no shared filesystem with the webhook)")
+        print("Gaps: skipped on Actions (no shared filesystem with the webhook).")
+        return {"acted": False, "reason": "actions-no-volume"}
+    try:
+        result = scan_gaps()
+    except Exception:
+        log.error("gaps: scan_gaps failed", exc_info=True)
+        result = {"acted": False, "reason": "error"}
+    print(f"Gaps: {result}")
+    return result
+
+
 def main():
-    """CLI: full pass by default; --no-send is a pure read path (fetch + map +
-    print the candidate; no sends, no staging, no seen-store or ledger writes)."""
-    if "--no-send" not in sys.argv:
-        return run_cli()
-    seen = load_seen()
-    items = _collect_new(seen)
-    print(f"\n🧭 Argo Frontier (dry run) — {len(items)} new item(s)")
-    if not items:
-        print("No new frontier items.\n")
-        return
-    result = _map_levers(items)
+    """CLI: a full pass by default; --gaps selects the inward capability-gap funnel
+    instead of the frontier one; --no-send is a pure read path (collect + map + print
+    the candidate; no sends, no staging, no seen-store or ledger writes). --no-send
+    applies to whichever funnel is selected, so --gaps --no-send is a real dry run."""
+    dry = "--no-send" in sys.argv
+    gaps = "--gaps" in sys.argv
+    if not dry:
+        return run_gaps_cli() if gaps else run_cli()
+    # Dry run: collect + map + print only, for whichever funnel was selected. The
+    # one model call is fine (mirrors the frontier dry run); "no-send" means no
+    # Telegram send, no staging, no seen-store or ledger write.
+    if gaps:
+        items = _collect_gaps()
+        print(f"\n🧭 Argo Capability Gaps (dry run) — {len(items)} candidate gap(s)")
+        if not items:
+            print("No open capability gaps.\n")
+            return
+        result = _map_gap(items)
+    else:
+        seen = load_seen()
+        items = _collect_new(seen)
+        print(f"\n🧭 Argo Frontier (dry run) — {len(items)} new item(s)")
+        if not items:
+            print("No new frontier items.\n")
+            return
+        result = _map_levers(items)
     if result is None:
         print("Mapper unavailable (no model/key or call failed).\n")
         return
     if not result.get("relevant"):
-        print("Mapper: nothing relevant to the stack this run.\n")
+        print("Mapper: nothing relevant this run.\n")
         return
     print("Candidate lever (nothing sent, staged, or recorded):")
     print(json.dumps(result, indent=2))

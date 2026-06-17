@@ -47,6 +47,7 @@ COMMANDS = {
     "reflect": ("argo_self", "reflect_cli"),
     "diagnose": ("argo_diagnose", "run_cli"),
     "frontier": ("argo_evolve", "run_cli"),
+    "gaps": ("argo_evolve", "run_gaps_cli"),
 }
 
 # Commands that need the WEBHOOK's filesystem: their ledgers/inputs live on the
@@ -54,10 +55,13 @@ COMMANDS = {
 # Actions runner can't serve these (its checkout has no incident/evolution state or
 # real project ratings, and the webhook can never read what it stages there), so the
 # webhook runs them itself via local_loop() in a daemon thread. On Actions they stay
-# structurally inert (diagnose: empty ledger; frontier: its own GITHUB_ACTIONS guard;
-# reflect: the projects log is empty there, so it no-ops below REFLECT_MIN_NEW before
-# any model call -- and a lesson it did write wouldn't be committed back anyway).
-LOCAL_COMMANDS = ("diagnose", "frontier", "reflect")
+# structurally inert (diagnose: empty ledger; frontier/gaps: their own GITHUB_ACTIONS
+# guard + the same volume ledger; reflect: the projects log is empty there, so it
+# no-ops below REFLECT_MIN_NEW before any model call -- and a lesson it did write
+# wouldn't be committed back anyway). gaps is the inward twin of frontier (the
+# proactive capability-gap proposer), sharing frontier's evolution ledger + EVOLVE
+# gate, so it belongs in the same place for the same reason.
+LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps")
 LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
 LOCAL_INTERVAL_SECONDS = 15 * 60
 
@@ -139,6 +143,14 @@ def fire_due(only=None, dry=False, state_path=None):
                      sched.get("name"), key)
             continue
         due.append((sched, target_hour))
+
+    # Fire the earliest scheduled hour first. When a delayed or restarted pass finds
+    # several windows due at once (the grace window), an earlier-scheduled entry must
+    # still win any shared resource -- e.g. the evolution loop's one-nudge-a-day
+    # budget that gaps (16:00) and frontier (17:00) share -- regardless of the
+    # entries' order in schedule.json. Stable within an hour, so same-hour order is
+    # unchanged.
+    due.sort(key=lambda dt: dt[1])
 
     print(f"\n⏰ Argo schedule runner — {now:%Y-%m-%d %H:%M UTC}")
     if not due:

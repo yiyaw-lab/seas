@@ -15,7 +15,7 @@ import argo_store
 from score import score_signal, qualifies
 
 ROOT = Path(__file__).resolve().parent.parent
-OPPORTUNITIES_PATH = ROOT / "data" / "opportunities.json"
+OPPORTUNITIES_PATH = argo_paths.OPPORTUNITIES_PATH  # single source of truth (argo_paths)
 
 
 def build(signals_path=None, opportunities_path=None):

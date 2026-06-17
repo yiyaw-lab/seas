@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+import argo_paths
 import argo_scheduled as sched
 
 
@@ -125,6 +126,8 @@ class LocalCommandsTest(unittest.TestCase):
              "command": "frontier", "enabled": True},
             {"name": "weekly-reflection", "days": "daily", "hour": [15],
              "command": "reflect", "enabled": True},
+            {"name": "capability-gaps", "days": "daily", "hour": [15],
+             "command": "gaps", "enabled": True},
         ]}))
         self.calls = []
         self.enterContext(mock.patch.object(
@@ -142,6 +145,17 @@ class LocalCommandsTest(unittest.TestCase):
         # reflect is volume-bound (its real project ratings live on the Railway
         # volume, not a fresh Actions checkout), so it must run in the local loop too.
         self.assertIn("reflect", sched.LOCAL_COMMANDS)
+
+    def test_gaps_command_is_registered(self):
+        # The proactive capability-gap proposer: same volume + EVOLVE gate as
+        # frontier, so it must be reachable from the webhook's local loop.
+        self.assertEqual(sched.COMMANDS["gaps"], ("argo_evolve", "run_gaps_cli"))
+        self.assertIn("gaps", sched.LOCAL_COMMANDS)
+
+    def test_gaps_fires_under_local_commands_filter(self):
+        ran = self._fire(only=sched.LOCAL_COMMANDS, state_path=self.local_state)
+        self.assertIn("gaps", ran)
+        self.assertNotIn("project", ran)  # not volume-bound: stays on Actions
 
     def test_only_filter_fires_just_the_local_commands(self):
         ran = self._fire(only=("frontier",), state_path=self.local_state)
@@ -165,6 +179,68 @@ class LocalCommandsTest(unittest.TestCase):
         self.local_state.unlink()
         ran = self._fire(only=("frontier",), state_path=self.local_state)
         self.assertEqual(ran, ["frontier"])
+
+
+class ShippedScheduleTest(unittest.TestCase):
+    """Guards the live data/schedule.json. Enabling the frontier loop (and its
+    inward twin, gaps) is a data flip the webhook's local_loop reads at deploy time,
+    so a silent regression to enabled:false would re-inert them -- exactly the
+    'structurally inert' failure this repo keeps hitting. Reads the real file only;
+    no network."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = json.loads(Path(argo_paths.SCHEDULE_PATH).read_text())
+        cls.by_cmd = {s["command"]: s for s in cls.config["schedules"]}
+
+    def test_frontier_loop_is_enabled(self):
+        self.assertTrue(self.by_cmd["frontier"]["enabled"])
+
+    def test_capability_gaps_entry_present_and_enabled(self):
+        self.assertIn("gaps", self.by_cmd)
+        self.assertTrue(self.by_cmd["gaps"]["enabled"])
+
+    def test_every_scheduled_command_maps_to_a_handler(self):
+        for cmd in self.by_cmd:
+            self.assertIn(cmd, sched.COMMANDS)
+
+    def test_capability_gaps_runs_before_frontier(self):
+        # gaps shares frontier's one-nudge-a-day budget; scheduling it an earlier
+        # hour lets a same-pass grace-window fire (sorted by hour) hand the weekly
+        # inward proposal that day's slot instead of frontier.
+        self.assertLess(self.by_cmd["gaps"]["hour"], self.by_cmd["frontier"]["hour"])
+
+
+class FireOrderTest(unittest.TestCase):
+    """When a delayed/restarted pass finds several windows due at once (the grace
+    window), the earlier scheduled hour must fire first so it wins any shared
+    resource -- the evolution loop's one-nudge-a-day budget that frontier (17:00)
+    and gaps (16:00) share. Guards against schedule.json array order deciding it."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.schedule = self.tmp / "schedule.json"
+        self.state = self.tmp / "state.json"
+        self.enterContext(mock.patch.object(sched, "SCHEDULE_PATH", self.schedule))
+        self.enterContext(mock.patch.object(sched, "STATE_PATH", self.state))
+        # Deliberately list the LATER hour first: only the hour-sort can fix order.
+        self.schedule.write_text(json.dumps({"schedules": [
+            {"name": "later", "days": "daily", "hour": [17], "command": "frontier",
+             "enabled": True},
+            {"name": "earlier", "days": "daily", "hour": [16], "command": "gaps",
+             "enabled": True},
+        ]}))
+        self.calls = []
+        self.enterContext(mock.patch.object(
+            sched, "run_command", lambda cmd: self.calls.append(cmd)))
+
+    def test_lower_hour_fires_first_when_both_due_in_one_pass(self):
+        # now=17:xx: hour 16 (within grace) and hour 17 (exact) are both due in one
+        # pass; gaps (16) must run before frontier (17) despite the array order.
+        with mock.patch.object(sched, "datetime") as dt:
+            dt.now.return_value = _now(17)
+            sched.fire_due(state_path=self.state)
+        self.assertEqual(self.calls, ["gaps", "frontier"])
 
 
 if __name__ == "__main__":

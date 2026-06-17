@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import argo_observe as observe
+import argo_paths
 import fetch_signals
 import firecrawl_client
 import probes
@@ -48,9 +49,9 @@ import seas_schema
 import world_model
 
 ROOT = Path(__file__).resolve().parent.parent
-SIGNALS_PATH = ROOT / "data" / "signals.json"
-OPPORTUNITIES_PATH = ROOT / "data" / "opportunities.json"
-FINDINGS_DIR = ROOT / "findings"
+SIGNALS_PATH = argo_paths.SIGNALS_PATH  # single source of truth (see argo_paths)
+OPPORTUNITIES_PATH = argo_paths.OPPORTUNITIES_PATH
+FINDINGS_DIR = argo_paths.FINDINGS_DIR
 RUNS_DIR = ROOT / "runs"
 
 MIN_SOURCES = 2            # need at least this many fetched sources to synthesize

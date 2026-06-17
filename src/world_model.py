@@ -26,13 +26,15 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import argo_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 # Env-overridable like the other live stores (argo_paths): the webhook and the
 # evolution loop write beliefs at runtime, so point ARGO_WORLD_MODEL_PATH at the
 # Railway volume or each redeploy resets to the committed copy.
 WORLD_MODEL_PATH = Path(os.environ.get("ARGO_WORLD_MODEL_PATH",
                                        str(ROOT / "data" / "world_model.json")))
-FINDINGS_DIR = ROOT / "findings"
+FINDINGS_DIR = argo_paths.FINDINGS_DIR  # single source of truth (see argo_paths)
 
 # Confidence is clamped to an open interval: a belief is never certain (1.0) and
 # never fully dead (0.0 -> it gets retired to 'refuted' status instead).

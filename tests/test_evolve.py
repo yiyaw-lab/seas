@@ -588,6 +588,190 @@ class PlacementGuardTest(EvolveBase):
         self.assertFalse(res["acted"])
         self.assertEqual(res["reason"], "actions-no-volume")
 
+    def test_run_gaps_cli_is_inert_on_actions_without_volume(self):
+        env = {k: v for k, v in os.environ.items() if k != "ARGO_EVOLUTION_PATH"}
+        env["GITHUB_ACTIONS"] = "true"
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(ev, "scan_gaps",
+                               side_effect=AssertionError("must not run on Actions")):
+            res = ev.run_gaps_cli()
+        self.assertFalse(res["acted"])
+        self.assertEqual(res["reason"], "actions-no-volume")
+
+
+class GapProposerTest(EvolveBase):
+    """The inward twin of the frontier funnel (scan_gaps): same gates, ledger, and
+    EVOLVE/SKIP gate as scan(), but the signal is Argo's OWN gaps. The gap mapper,
+    its collect step, and the Telegram send are patched so it tests hermetically --
+    no LLM, no network, no real data files."""
+
+    _RESULT = {"relevant": True, "gap": "no usage/cost telemetry",
+               "feature": "usage_cost_telemetry", "lever": "record per-call tokens",
+               "affected_files": ["src/argo_store.py"],
+               "expected_benefit": "cost claims become scorable",
+               "risk": "a write on every call path", "magnitude": "minor"}
+
+    def test_pending_slot_blocks_before_gap_mapper(self):
+        ev._stage("EV-001")
+        with mock.patch.object(ev, "_map_gap",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("pending", res["reason"])
+
+    def test_nudge_budget_blocks_before_gap_mapper(self):
+        # Shared budget: a frontier nudge already spent today blocks the gap funnel.
+        ev._record_nudge()
+        with mock.patch.object(ev, "_map_gap",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("budget", res["reason"])
+
+    def test_no_gaps_no_model_call(self):
+        with mock.patch.object(ev, "_collect_gaps", return_value=[]), \
+             mock.patch.object(ev, "_map_gap",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("no open capability gaps", res["reason"])
+
+    def test_gap_lever_lands_with_source_gap_and_stages(self):
+        with mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=self._RESULT):
+            res = ev.scan_gaps()
+        self.assertTrue(res["acted"])
+        lever = ev.get_lever(res["lever"])
+        self.assertEqual(lever["source"], "gap")
+        self.assertEqual(lever["feature"], "usage_cost_telemetry")
+        self.assertEqual(lever["status"], "nudged")
+        self.assertIsNone(lever["prediction_spec"])    # gap levers are unscored
+        self.assertTrue(lever["self_belief_id"])        # belief seeded at nudge
+        self.assertTrue(ev.has_pending())
+        self.assertEqual(ev._nudge_budget_left(), 0)     # shared budget consumed
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("gap in myself", self.sent[0])     # inward framing, not frontier
+        self.assertIn("EVOLVE", self.sent[0])
+
+    def test_gap_feature_dedup_against_active_features(self):
+        # A feature already in flight (here a frontier lever) must not be re-proposed
+        # by the inward funnel: the two funnels share one ledger and feature space.
+        self._lever(feature="usage_cost_telemetry", status="pr_open", pr_number=9)
+        with mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=self._RESULT):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("already tracked", res["reason"])
+
+    def test_nonexistent_affected_files_refused(self):
+        bad = dict(self._RESULT, affected_files=["src/nope_xyz.py"])
+        with mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=bad):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("affected files", res["reason"])
+
+    def test_undelivered_gap_lever_reoffered_without_model(self):
+        # A failed nudge send leaves the gap lever nudge-ready; the next scan must
+        # re-offer it via GATE 3 without burning another model call.
+        with mock.patch.object(ev, "_send", lambda t: False), \
+             mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=self._RESULT):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("nudge delivery failed", res["reason"])
+        lever = ev.get_lever(res["lever"])
+        self.assertEqual(lever["status"], "nudge-ready")
+        self.assertEqual(lever["source"], "gap")
+        bid = lever["self_belief_id"]
+        self.assertTrue(bid)                              # belief persisted pre-send
+        with mock.patch.object(ev, "_collect_gaps",
+                               side_effect=AssertionError("collect must not run")), \
+             mock.patch.object(ev, "_map_gap",
+                               side_effect=AssertionError("mapper must not run")):
+            res2 = ev.scan_gaps()
+        self.assertTrue(res2["acted"])
+        self.assertEqual(res2["lever"], res["lever"])     # same lever, re-offered
+        self.assertEqual(ev.get_lever(res2["lever"])["status"], "nudged")
+        self.assertEqual(ev.get_lever(res2["lever"])["self_belief_id"], bid)
+
+    def test_gap_mapper_none_means_nothing_worth_closing(self):
+        with mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value={}):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("no gap worth closing", res["reason"])
+
+    def test_gap_mapper_infrastructure_failure(self):
+        with mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=None):
+            res = ev.scan_gaps()
+        self.assertFalse(res["acted"])
+        self.assertIn("gap mapper unavailable", res["reason"])
+
+    def test_collect_gaps_reads_manifest_and_self_issues(self):
+        # The pure read step: manifest 'not used' entries plus unresolved self
+        # 'issue' beliefs become the candidate list; resolved issues drop out.
+        man = self.base / "manifest.json"
+        man.write_text('{"api_features_not_used": ["telemetry gap"]}')
+        argo_self.add_self_belief("I keep mis-parsing JSON", kind="issue",
+                                  source="test")
+        with mock.patch.object(ev, "MANIFEST_PATH", man):
+            gaps = ev._collect_gaps()
+        self.assertTrue(any("telemetry gap" in g for g in gaps))
+        self.assertTrue(any("mis-parsing JSON" in g for g in gaps))
+
+    def test_gaps_no_send_is_a_real_dry_run(self):
+        # `--gaps --no-send` must collect + map + print only -- no send, no staging,
+        # no ledger write -- like the frontier dry run (Bugbot finding, PR #21).
+        result = {"relevant": True, "feature": "f", "lever": "l",
+                  "affected_files": ["src/argo_store.py"], "expected_benefit": "b",
+                  "risk": "r", "magnitude": "minor", "gap": "g"}
+        with mock.patch.object(ev.sys, "argv", ["argo_evolve.py", "--gaps", "--no-send"]), \
+             mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=result), \
+             mock.patch.object(ev, "_offer",
+                               side_effect=AssertionError("dry run must not offer")):
+            ev.main()
+        self.assertEqual(self.sent, [])                     # nothing sent
+        self.assertFalse(ev.has_pending())                  # nothing staged
+        self.assertEqual(ev._load_ledger()["levers"], [])   # no ledger write
+
+    def test_frontier_gate3_prefers_stranded_gap_lever_over_seed(self):
+        # A gap lever whose send failed sits nudge-ready alongside the dogfood seeds;
+        # the daily frontier run's GATE 3 must re-offer the GAP lever (honor the slot
+        # gaps already tried to use), not the first seed in list order (Bugbot, #21).
+        ev.ensure_seeds()  # 3 nudge-ready seeds, source="seed", added first
+        self._lever(id="EV-950", feature="gap_feat", source="gap",
+                    status="nudge-ready", source_item={"title": "a gap"})
+        with mock.patch.object(ev, "_collect_new",
+                               side_effect=AssertionError("fetch must not run")), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            res = ev.scan()
+        self.assertTrue(res["acted"])
+        self.assertEqual(res["lever"], "EV-950")            # gap lever wins, not a seed
+        self.assertEqual(ev.get_lever("EV-950")["status"], "nudged")
+        self.assertIn("gap in myself", self.sent[-1])       # inward voice preserved
+
+    def test_accept_gap_lever_labels_pr_as_capability_gap(self):
+        # A gap-sourced PR body must read as a capability-gap upgrade, not an external
+        # "Frontier upgrade" (the nudge already uses gap copy) -- Bugbot, PR #21.
+        self._lever(id="EV-960", feature="gap_pr", source="gap", magnitude="minor",
+                    status="nudged")
+        ev._stage("EV-960")
+        captured = {}
+
+        def fake_propose(payload):
+            captured.update(payload)
+            return ("Drafted a fix and opened http://pr/960.",
+                    {"pr_number": 960, "url": "http://pr/960"})
+
+        with mock.patch.object(ev, "_propose", side_effect=fake_propose):
+            ev.accept_pending()
+        self.assertIn("Capability-gap upgrade", captured["description"])
+        self.assertNotIn("Frontier upgrade", captured["description"])
+
 
 if __name__ == "__main__":
     unittest.main()

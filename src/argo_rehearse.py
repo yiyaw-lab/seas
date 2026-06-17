@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_observe as observe
+import argo_paths
 import argo_store
 import profile
 from argo_log import get_logger
@@ -50,7 +51,7 @@ from argo_log import get_logger
 log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
+PROJECTS_LOG = argo_paths.PROJECTS_LOG  # single source of truth (see argo_paths)
 REHEARSAL_DIR = ROOT / "argo" / "rehearsals"
 
 # Sonnet for the three adversaries (cheap, parallel), Opus for the single judge
