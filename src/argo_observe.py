@@ -42,12 +42,13 @@ from datetime import datetime
 from pathlib import Path
 
 import argo_guard
+import argo_paths
 from argo_log import get_logger
 
 log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
-SIGNALS_PATH = ROOT / "data" / "signals.json"
+SIGNALS_PATH = argo_paths.SIGNALS_PATH  # single source of truth (see argo_paths)
 FINDING_PATH = ROOT / "findings" / "F-001-cognitive-operators.md"
 OUT_DIR = ROOT / "argo" / "observations"
 

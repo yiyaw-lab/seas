@@ -33,11 +33,12 @@ import time
 from pathlib import Path
 
 import argo_observe as observe
+import argo_paths
 import seas_finding as sf
 import seas_schema
 
 ROOT = Path(__file__).resolve().parent.parent
-SIGNALS_PATH = ROOT / "data" / "signals.json"
+SIGNALS_PATH = argo_paths.SIGNALS_PATH  # single source of truth (see argo_paths)
 RESULTS_PATH = ROOT / "data" / "benchmark_results.json"
 
 # Public list prices, USD per 1M tokens (input, output), for cost-benefit ranking.

@@ -31,6 +31,7 @@ from pathlib import Path
 
 import argo_memory
 import argo_observe as observe
+import argo_paths
 import argo_store
 import profile
 import send_telegram
@@ -38,8 +39,8 @@ import send_telegram
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "argo" / "projects"
 # Structured project log — one entry per generated project, so each can be rated
-# later (see argo_rate.py). Lives in data/ alongside argo_bets.json.
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
+# later (see argo_rate.py). Single source of truth lives in argo_paths.
+PROJECTS_LOG = argo_paths.PROJECTS_LOG
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 # One canonical invite appended to every project Argo sends, so all paths (the

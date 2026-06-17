@@ -28,8 +28,10 @@ import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import argo_paths
+
 ROOT = Path(__file__).resolve().parent.parent
-PROBES_PATH = ROOT / "data" / "probes.json"
+PROBES_PATH = argo_paths.PROBES_PATH  # single source of truth (see argo_paths)
 
 VALID_OUTCOMES = ("inconclusive", "premature", "unreachable")
 

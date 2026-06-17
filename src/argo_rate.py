@@ -32,10 +32,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_http
+import argo_paths
 import argo_store
 
 ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
+PROJECTS_LOG = argo_paths.PROJECTS_LOG  # single source of truth (see argo_paths)
 OFFSET_PATH = ROOT / "argo" / "telegram_offset.json"
 
 try:

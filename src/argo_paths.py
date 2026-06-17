@@ -30,6 +30,13 @@ SCHEDULE_PATH = DATA / "schedule.json"
 STATE_PATH = DATA / "schedule_state.json"
 FINDINGS_DIR = ROOT / "findings"
 
+# SEAS pipeline state under data/: opportunities.json + probes.json are regenerated
+# each run (no volume override -- rebuilt locally, not persisted like the chat/self
+# stores), and argo_bets.json is Argo's V1-era project-bet log.
+OPPORTUNITIES_PATH = DATA / "opportunities.json"
+PROBES_PATH = DATA / "probes.json"
+BETS_PATH = DATA / "argo_bets.json"
+
 # Env-overridable: the live bot mounts the chat log on a Railway volume so it
 # survives redeploys; tests point the profile at a temp file.
 CHAT_LOG_PATH = Path(os.environ.get("ARGO_CHAT_LOG", str(DATA / "argo_chat.json")))
