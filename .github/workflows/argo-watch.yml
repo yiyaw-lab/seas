@@ -40,7 +40,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Optional Grok live X/web news source (grok_search), opt-in via the switch.
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ARGO_GROK_SOURCE: ${{ secrets.ARGO_GROK_SOURCE }}
+          ARGO_GROK_SOURCE: ${{ vars.ARGO_GROK_SOURCE }}
           XAI_SEARCH_MODEL: ${{ vars.XAI_SEARCH_MODEL }}
         run: python src/argo_watch.py
 

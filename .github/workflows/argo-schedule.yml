@@ -38,7 +38,7 @@ jobs:
           # Actions, not the Railway webhook, so these must be set as Actions
           # secrets/vars -- a Railway-only ARGO_GROK_SOURCE never reaches this job.
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          ARGO_GROK_SOURCE: ${{ secrets.ARGO_GROK_SOURCE }}
+          ARGO_GROK_SOURCE: ${{ vars.ARGO_GROK_SOURCE }}
           XAI_SEARCH_MODEL: ${{ vars.XAI_SEARCH_MODEL }}
         run: python src/argo_scheduled.py
       - name: Commit updated data (seen-store, schedule state, signals)
