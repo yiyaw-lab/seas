@@ -68,6 +68,12 @@ EVOLUTION_PATH = Path(os.environ.get("ARGO_EVOLUTION_PATH",
                                      str(DATA / "argo_evolution.json")))
 PENDING_EVOLVE_PATH = Path(os.environ.get("ARGO_PENDING_EVOLVE_PATH",
                                           str(DATA / "argo_pending_evolve.json")))
+# Staged heal action behind the CONFIRM/FIX gate. The diagnostic loop stages it,
+# then waits (often hours) for the user's FIX reply -- a window that can span a
+# redeploy, so point ARGO_PENDING_HEAL_PATH at the Railway volume or the staged fix
+# is silently lost and FIX finds nothing staged. (Sibling of PENDING_EVOLVE_PATH.)
+PENDING_HEAL_PATH = Path(os.environ.get("ARGO_PENDING_HEAL_PATH",
+                                        str(DATA / "argo_pending_heal.json")))
 PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
                                        str(DATA / "argo_predictions.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
