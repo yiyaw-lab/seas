@@ -405,6 +405,16 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         return _chat_with_mcp_openai(
             system, messages, model, mcp_servers, max_tokens, temperature,
             return_tool_events)
+    if not (provider and provider["name"] == "anthropic"):
+        # Only Anthropic + OpenAI have an MCP tool path. A chat-only provider (e.g.
+        # xai/grok, supports_mcp=False) must never fall through to the Anthropic
+        # client below -- fail loudly with a clear pointer instead of a confusing
+        # ANTHROPIC_API_KEY/SDK crash. (Today every caller gates on supports_mcp;
+        # this guards a future one.)
+        raise ValueError(
+            f"chat_with_mcp has no tool path for model {model!r} "
+            f"(provider {provider['name'] if provider else None}); use "
+            "generate_observations for chat-completions-only providers")
     import anthropic
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
@@ -615,7 +625,7 @@ def generate_observations(job, model, temperature=1.0):
     if provider is None:
         raise RuntimeError(
             f"no known provider for model '{model}' "
-            "(expected gpt-*/o* for OpenAI or claude-* for Anthropic)"
+            "(expected gpt-*/o* OpenAI, claude-* Anthropic, or grok-* xAI)"
         )
     if not os.environ.get(provider["key_env"]):
         raise RuntimeError(

@@ -91,6 +91,9 @@ def count_failure_modes(critiques):
 
 def main():
     assigned = r._assign_adversary_models(r.ADVERSARIES)
+    if assigned is None:
+        print("No model providers available (set API keys). Aborting eval.")
+        return
     print(f"panel: {assigned} | extractor: {EXTRACTOR_MODEL}\n")
     rows = []
     for bet in BETS:

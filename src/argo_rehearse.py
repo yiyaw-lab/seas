@@ -547,7 +547,9 @@ def main():
     verdict, blueprint_path, summary = rehearse(project_id)
 
     print("\n=== Rehearse ===\n")
-    print(f"models: adversaries={_assign_adversary_models(ADVERSARIES)}  "
+    # The actual per-run assignment is logged inside rehearse(); here just show the
+    # configured preference (avoids a second _assign_adversary_models call + log).
+    print(f"models: adversaries(preferred)={ADVERSARY_PREFERRED}  "
           f"judge={JUDGE_MODEL}\n")
     print("SUMMARY:", summary)
     print("VERDICT:", verdict)

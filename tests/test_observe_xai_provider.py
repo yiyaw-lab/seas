@@ -41,6 +41,13 @@ class XaiRoutingTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"ARGO_MODEL": "grok-4.3"}):
             self.assertEqual(observe.resolve_models(), ["grok-4.3"])
 
+    def test_chat_with_mcp_rejects_grok(self):
+        # grok has no MCP tool path -> chat_with_mcp must raise a clear error, not
+        # fall through to the Anthropic client and crash. Raises before any SDK call.
+        with self.assertRaises(ValueError):
+            observe.chat_with_mcp("sys", [{"role": "user", "content": "hi"}],
+                                  "grok-4.3")
+
 
 class CallXaiTest(unittest.TestCase):
     @staticmethod
@@ -64,10 +71,11 @@ class CallXaiTest(unittest.TestCase):
         captured = {}
         with mock.patch.object(observe, "_guarded",
                                lambda p, do_call, label: do_call()), \
-                mock.patch.dict(os.environ, {"XAI_API_KEY": "k"}), \
+                mock.patch.dict(os.environ, {"XAI_API_KEY": "  k\n"}), \
                 mock.patch.dict(sys.modules, {"openai": self._fake_openai(captured)}):
             out = observe._call_xai("job", "grok-4.3", temperature=0.4)
         self.assertEqual(out, "ok")
+        self.assertEqual(captured["_api_key"], "k")  # key is .strip()-ed
         self.assertEqual(captured["_base_url"], "https://api.x.ai/v1")
         self.assertEqual(captured["model"], "grok-4.3")
         self.assertEqual(captured.get("temperature"), 0.4)
