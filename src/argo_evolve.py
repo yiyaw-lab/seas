@@ -1094,25 +1094,37 @@ def run_gaps_cli():
 
 
 def main():
-    """CLI: full frontier pass by default; --gaps runs one inward capability-gap
-    scan; --no-send is a pure read path (fetch + map + print the candidate; no
-    sends, no staging, no seen-store or ledger writes)."""
-    if "--gaps" in sys.argv:
-        return run_gaps_cli()
-    if "--no-send" not in sys.argv:
-        return run_cli()
-    seen = load_seen()
-    items = _collect_new(seen)
-    print(f"\n🧭 Argo Frontier (dry run) — {len(items)} new item(s)")
-    if not items:
-        print("No new frontier items.\n")
-        return
-    result = _map_levers(items)
+    """CLI: a full pass by default; --gaps selects the inward capability-gap funnel
+    instead of the frontier one; --no-send is a pure read path (collect + map + print
+    the candidate; no sends, no staging, no seen-store or ledger writes). --no-send
+    applies to whichever funnel is selected, so --gaps --no-send is a real dry run."""
+    dry = "--no-send" in sys.argv
+    gaps = "--gaps" in sys.argv
+    if not dry:
+        return run_gaps_cli() if gaps else run_cli()
+    # Dry run: collect + map + print only, for whichever funnel was selected. The
+    # one model call is fine (mirrors the frontier dry run); "no-send" means no
+    # Telegram send, no staging, no seen-store or ledger write.
+    if gaps:
+        items = _collect_gaps()
+        print(f"\n🧭 Argo Capability Gaps (dry run) — {len(items)} candidate gap(s)")
+        if not items:
+            print("No open capability gaps.\n")
+            return
+        result = _map_gap(items)
+    else:
+        seen = load_seen()
+        items = _collect_new(seen)
+        print(f"\n🧭 Argo Frontier (dry run) — {len(items)} new item(s)")
+        if not items:
+            print("No new frontier items.\n")
+            return
+        result = _map_levers(items)
     if result is None:
         print("Mapper unavailable (no model/key or call failed).\n")
         return
     if not result.get("relevant"):
-        print("Mapper: nothing relevant to the stack this run.\n")
+        print("Mapper: nothing relevant this run.\n")
         return
     print("Candidate lever (nothing sent, staged, or recorded):")
     print(json.dumps(result, indent=2))

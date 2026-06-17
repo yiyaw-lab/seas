@@ -721,6 +721,22 @@ class GapProposerTest(EvolveBase):
         self.assertTrue(any("telemetry gap" in g for g in gaps))
         self.assertTrue(any("mis-parsing JSON" in g for g in gaps))
 
+    def test_gaps_no_send_is_a_real_dry_run(self):
+        # `--gaps --no-send` must collect + map + print only -- no send, no staging,
+        # no ledger write -- like the frontier dry run (Bugbot finding, PR #21).
+        result = {"relevant": True, "feature": "f", "lever": "l",
+                  "affected_files": ["src/argo_store.py"], "expected_benefit": "b",
+                  "risk": "r", "magnitude": "minor", "gap": "g"}
+        with mock.patch.object(ev.sys, "argv", ["argo_evolve.py", "--gaps", "--no-send"]), \
+             mock.patch.object(ev, "_collect_gaps", return_value=["stack gap: x"]), \
+             mock.patch.object(ev, "_map_gap", return_value=result), \
+             mock.patch.object(ev, "_offer",
+                               side_effect=AssertionError("dry run must not offer")):
+            ev.main()
+        self.assertEqual(self.sent, [])                     # nothing sent
+        self.assertFalse(ev.has_pending())                  # nothing staged
+        self.assertEqual(ev._load_ledger()["levers"], [])   # no ledger write
+
 
 if __name__ == "__main__":
     unittest.main()
