@@ -93,10 +93,12 @@ only, no network, so it can never hang.
 boundaries (`json.JSONDecodeError`/`ValueError`, `urllib.error.*`/`OSError`,
 `KeyError`); reserve broad `except Exception` for the outermost net that must not
 crash a thread or a chat turn, and make that net log. Target under 500 lines per
-module. `argo_mcp_server.py`, `argo_webhook.py`, and `argo_observe.py` exceed that
-today — don't split them speculatively, but when one next needs a substantive
-change, extract one cohesive seam as part of that work (e.g. the
-rating/project-state helpers out of `argo_webhook`).
+module. `argo_mcp_server.py`, `argo_webhook.py`, `argo_evolve.py`, and
+`argo_observe.py` exceed that today — don't split them speculatively, but when one
+next needs a substantive change, extract one cohesive seam as part of that work.
+The rating helpers already came out as `argo_rating.py`; the project-state helpers
+`_target_project`/`_match_existing_project` are the next cohesive seam in
+`argo_webhook`.
 
 **Argo output rules** (already enforced in code via `_clean_reply`, keep them):
 plain text only — no markdown, no em dashes; sources cited like a human, never
