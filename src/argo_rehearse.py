@@ -43,7 +43,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import argo_observe as observe
+import argo_store
 import profile
+from argo_log import get_logger
+
+log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_LOG = ROOT / "data" / "argo_projects.json"
@@ -54,7 +58,17 @@ REHEARSAL_DIR = ROOT / "argo" / "rehearsals"
 # both in one place.
 # `or` not `.get(k, default)`: a set-but-empty CI var would otherwise win as "" and
 # defeat the default, leaving an unroutable model name (provider_for("") is None).
-ADVERSARY_MODEL = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
+# Per-role adversary models: genuinely DIFFERENT minds (different training, different
+# blind spots) make the stress test real instead of one model arguing with itself.
+# Defaults span the three providers; each is env-overridable. Graceful degradation
+# (when a key is missing) is handled by _assign_adversary_models. Judge stays premium.
+# `or` not `.get(k, default)`: a set-but-empty CI var would win as "" and defeat the
+# default, leaving an unroutable model name (provider_for("") is None).
+ADVERSARY_PREFERRED = {
+    "critic": os.environ.get("ARGO_REHEARSE_CRITIC_MODEL") or "claude-sonnet-4-6",
+    "user": os.environ.get("ARGO_REHEARSE_USER_MODEL") or "gpt-5",
+    "ops": os.environ.get("ARGO_REHEARSE_OPS_MODEL") or "grok-4.3",
+}
 JUDGE_MODEL = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
 
 # Append-only transcript of every model turn (each adversary + the judge), one
@@ -137,6 +151,44 @@ def _runnable(preferred):
     return None
 
 
+def _assign_adversary_models(roles):
+    """Assign each adversary role a model, preferring genuinely DISTINCT providers so
+    the panel is diverse minds, not one model thrice. Graceful degradation: a role
+    whose preferred model has no key takes another available model not yet used (to
+    preserve diversity); only when no fresh provider remains do roles share a model
+    (logged as degraded). Returns {role: model}, or None if NO provider key is set.
+
+    With 3 keys -> 3 distinct models; 2 keys -> 2 distinct (one role doubles up);
+    1 key -> all share, logged. Never crashes, never silently collapses."""
+    # Runnable models in preference order: each role's preferred first, then
+    # resolve_models() as backstop, deduped while preserving order.
+    available = []
+    for m in list(ADVERSARY_PREFERRED.values()) + observe.resolve_models():
+        p = observe.provider_for(m)
+        if p and os.environ.get(p["key_env"]) and m not in available:
+            available.append(m)
+    if not available:
+        return None
+
+    assigned, used = {}, set()
+    for role in roles:
+        pref = ADVERSARY_PREFERRED.get(role)
+        pick = pref if (pref and pref in available) else None
+        if pick is None or pick in used:
+            fresh = next((m for m in available if m not in used), None)
+            pick = fresh if fresh is not None else (pick or available[0])
+        assigned[role] = pick
+        used.add(pick)
+
+    distinct = len(set(assigned.values()))
+    if distinct < len(roles):
+        log.info("rehearse adversaries degraded to %d distinct model(s): %s",
+                 distinct, assigned)
+    else:
+        log.info("rehearse adversaries: %s", assigned)
+    return assigned
+
+
 def _call(system, prompt, model, temperature, max_tokens=1024):
     """Send one prompt to `model`, routing to its provider. Anthropic models use
     chat_with_mcp (no tools here, just the guarded messages call); others use
@@ -198,19 +250,22 @@ def _adversary_prompt(role_instructions, project_text):
     return f"{role_instructions}\n\nTHE BET:\n{project_text}\n"
 
 
-def run_adversaries(project_text, run_id="", project_id=""):
+def run_adversaries(project_text, run_id="", project_id="", assigned=None):
     """Run all three adversaries concurrently (wall-clock ~= one call) and return
-    {role: critique_text}. A role that errors returns a short note instead of
-    sinking the whole rehearsal -- the judge can still work with two critiques.
-    Each turn is logged to the transcript the moment it returns (success OR
-    failure), so a paid response is never lost even if another role or the judge
-    later fails."""
-    model = _runnable(ADVERSARY_MODEL)
-    if model is None:
+    {role: critique_text}, each on its assigned model (different minds -> diverse
+    critiques). A role that errors returns a short note instead of sinking the whole
+    rehearsal -- the judge can still work with two critiques. Each turn is logged to
+    the transcript the moment it returns (success OR failure), so a paid response is
+    never lost even if another role or the judge later fails. `assigned` is a
+    {role: model} map (computed via _assign_adversary_models if not given)."""
+    if assigned is None:
+        assigned = _assign_adversary_models(ADVERSARIES)
+    if assigned is None:
         return None  # no key; caller reports
 
     def one(item):
         role, instr = item
+        model = assigned[role]
         prompt = _adversary_prompt(instr, project_text)
         started = _now()
         try:
@@ -384,17 +439,17 @@ def _stamp_project(project_id, verdict, blueprint_path):
     """Record the rehearsal result on the project entry, mirroring how the webhook
     stamps selected/selected_at. Additive fields; existing readers ignore them.
     Best-effort: never raises (the rehearsal already happened)."""
-    log = argo_store.load_json(PROJECTS_LOG, None)
-    if not isinstance(log, list):
+    projects = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(projects, list):
         return
-    for entry in log:
+    for entry in projects:
         if entry.get("id") == project_id:
             entry["rehearsed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             entry["verdict"] = verdict
             entry["blueprint_path"] = str(blueprint_path.relative_to(ROOT))
             break
     try:
-        argo_store.save_json(PROJECTS_LOG, log)
+        argo_store.save_json(PROJECTS_LOG, projects)
     except OSError:
         pass
 
@@ -438,9 +493,10 @@ def rehearse(project_id=""):
     # re-run of the same project stays distinguishable (the blueprint .md is
     # overwritten, but the transcript is append-only -- every debate is kept).
     run_id = f"{pid}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
-    models = {"adversaries": ADVERSARY_MODEL, "judge": JUDGE_MODEL}
+    assigned = _assign_adversary_models(ADVERSARIES)
+    models = {"adversaries": assigned, "judge": JUDGE_MODEL}
 
-    critiques = run_adversaries(project_text, run_id, pid)
+    critiques = run_adversaries(project_text, run_id, pid, assigned)
     if critiques is None:
         _log_run(run_id, pid, "ERROR", None, models)
         return "ERROR", None, ("No model available to rehearse right now. Tell the "
@@ -491,7 +547,8 @@ def main():
     verdict, blueprint_path, summary = rehearse(project_id)
 
     print("\n=== Rehearse ===\n")
-    print(f"models: adversaries={ADVERSARY_MODEL}  judge={JUDGE_MODEL}\n")
+    print(f"models: adversaries={_assign_adversary_models(ADVERSARIES)}  "
+          f"judge={JUDGE_MODEL}\n")
     print("SUMMARY:", summary)
     print("VERDICT:", verdict)
     if blueprint_path:
