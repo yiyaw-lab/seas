@@ -6,6 +6,7 @@ is still in that old format), and the SEEN_CAP bound in argo_watch.
 Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 """
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -118,20 +119,25 @@ class TripwireStatusTest(unittest.TestCase):
         # The tool reads argo_paths.SEEN_PATH at call time, so patch it there.
         self.enterContext(mock.patch.object(argo_paths, "SEEN_PATH", self.path))
 
+    def _status(self):
+        # get_tripwire_status is an async MCP tool (with_deadline offloads it off the
+        # event loop); drive it to completion for the assertion.
+        return asyncio.run(self.srv.get_tripwire_status())
+
     def test_absent_store_says_persistent_by_design(self):
-        out = self.srv.get_tripwire_status()
+        out = self._status()
         self.assertIn("persist", out.lower())
         self.assertIn("nothing to build", out.lower())
 
     def test_counts_tracked_items_dict_format(self):
         self.path.write_text(json.dumps({"a": 3, "b": 1, "c": 3}))
-        out = self.srv.get_tripwire_status()
+        out = self._status()
         self.assertIn("3 news items", out)
         self.assertIn("persist", out.lower())
 
     def test_counts_legacy_list_format(self):
         self.path.write_text(json.dumps(["a", "b"]))
-        out = self.srv.get_tripwire_status()
+        out = self._status()
         self.assertIn("2 news items", out)
 
 
