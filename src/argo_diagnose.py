@@ -64,6 +64,21 @@ _DIAGNOSE_PROMPT = (
     "No em dashes. If you cannot point at a real cause, set confident_enough_to_propose "
     "to false and suspected_files to []."
 )
+# Structured-output schema mirroring the prompt's four keys. Enforced on the Anthropic
+# path via output_config so a malformed reply can't silently drop a diagnosis.
+# additionalProperties:false + no numeric/length constraints, to satisfy the API.
+_DIAGNOSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "diagnosis": {"type": "string"},
+        "suspected_files": {"type": "array", "items": {"type": "string"}},
+        "suggestion": {"type": "string"},
+        "confident_enough_to_propose": {"type": "boolean"},
+    },
+    "required": ["diagnosis", "suspected_files", "suggestion",
+                 "confident_enough_to_propose"],
+    "additionalProperties": False,
+}
 
 
 # --- small seams (patched in tests) -----------------------------------------
@@ -184,15 +199,32 @@ def _diagnose_cluster(cluster):
         files="\n".join(_repo_files()) or "(unavailable)")
     try:
         if observe.provider_for(model)["name"] == "anthropic":
-            raw = observe.chat_with_mcp(
-                _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
-                temperature=0.2)
+            try:
+                raw = observe.chat_with_mcp(
+                    _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
+                    temperature=0.2, output_schema=_DIAGNOSE_SCHEMA)
+            except Exception:
+                # Structured-output enforcement is best-effort: if the API rejects the
+                # schema (unsupported model / shape mismatch), fall back to a plain call
+                # so the loop degrades to the tolerant parser instead of going dark.
+                log.warning("diagnose: structured-output call failed; plain retry",
+                            exc_info=True)
+                raw = observe.chat_with_mcp(
+                    _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
+                    temperature=0.2)
         else:
             raw = observe.generate_observations(prompt, model, temperature=0.2)
     except Exception:
         log.error("diagnose: model call failed", exc_info=True)
         return None
-    return _parse_json(raw)
+    parsed = _parse_json(raw)
+    if parsed is None and (raw or "").strip():
+        # A non-empty but unparseable reply means the diagnosis is being dropped on the
+        # floor. Record it so this silent parse-failure class becomes measurable -- the
+        # hook the structured-output prediction is graded against.
+        argo_incidents.record_incident(
+            "model_failure", "diagnose json parse failed", sample=(raw or "")[:240])
+    return parsed
 
 
 def _nudge_budget_left():

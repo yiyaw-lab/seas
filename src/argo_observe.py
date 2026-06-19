@@ -382,7 +382,7 @@ def _record_tool_error(name, detail):
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
-                  temperature=1.0, return_tool_events=False):
+                  temperature=1.0, return_tool_events=False, output_schema=None):
     """Claude chat call with structured messages and optional MCP tool servers.
 
     Separate from generate_observations (the string-in/string-out helper the
@@ -432,6 +432,14 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     # just the ones that remember to pass None.
     if temperature is not None and not _rejects_temperature(model):
         kwargs["temperature"] = temperature
+    if output_schema is not None:
+        # Structured outputs (GA on Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5): force a
+        # schema-valid JSON reply so a malformed body can't silently drop a result. The
+        # caller passes a JSON Schema; it must use additionalProperties:false and no
+        # numeric/length constraints or the API 400s. Anthropic-only -- the OpenAI branch
+        # returned above and would need response_format instead.
+        kwargs["output_config"] = {
+            "format": {"type": "json_schema", "schema": output_schema}}
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
         # Each server must be referenced by exactly one mcp_toolset (2025-11-20).

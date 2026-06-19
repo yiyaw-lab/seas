@@ -15,6 +15,7 @@ from unittest import mock
 
 import argo_diagnose as dg
 import argo_incidents as inc
+import argo_observe as observe
 import argo_self
 
 
@@ -164,6 +165,66 @@ class ConfirmDeployedTest(unittest.TestCase):
         self.assertTrue(belief.get("refutations"))
         self.assertIn("didn't hold", self.sent[0])
         self.assertEqual(inc.get_cluster(key)["status"], "open")
+
+
+class DiagnoseClusterTest(unittest.TestCase):
+    """_diagnose_cluster: structured-output enforcement on the Anthropic path, a safe
+    fallback if the API rejects the schema, and the measurable incident on a parse drop."""
+
+    def setUp(self):
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(inc, "INCIDENTS_PATH", base / "inc.json"))
+        self.enterContext(mock.patch.object(dg, "_resolve_model", lambda: "claude-sonnet-4-6"))
+        self.enterContext(mock.patch.object(
+            observe, "provider_for",
+            lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}))
+        self.cluster = {"kind": "phantom_send", "count": 4,
+                        "fingerprint": "fp", "samples": ["s"]}
+
+    _GOOD = ('{"diagnosis":"d","suspected_files":[],"suggestion":"s",'
+             '"confident_enough_to_propose":false}')
+
+    def test_structured_schema_is_enforced(self):
+        captured = {}
+
+        def fake_chat(system, messages, model, **kw):
+            captured.update(kw)
+            return self._GOOD
+        with mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            out = dg._diagnose_cluster(self.cluster)
+        self.assertEqual(out["diagnosis"], "d")
+        self.assertEqual(captured.get("output_schema"), dg._DIAGNOSE_SCHEMA)
+
+    def test_falls_back_to_plain_when_structured_rejected(self):
+        calls = []
+
+        def fake_chat(system, messages, model, **kw):
+            calls.append(kw)
+            if "output_schema" in kw:
+                raise RuntimeError("400 unsupported output_config shape")
+            return self._GOOD
+        with mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            out = dg._diagnose_cluster(self.cluster)
+        self.assertEqual(out["diagnosis"], "d")          # degraded, not dark
+        self.assertEqual(len(calls), 2)
+        self.assertIn("output_schema", calls[0])
+        self.assertNotIn("output_schema", calls[1])
+
+    def test_parse_failure_records_measurable_incident(self):
+        with mock.patch.object(observe, "chat_with_mcp",
+                               lambda *a, **k: "sorry, prose not json"):
+            out = dg._diagnose_cluster(self.cluster)
+        self.assertIsNone(out)
+        clusters = inc.open_clusters(min_count=1, window_hours=999)
+        self.assertTrue(any(c["kind"] == "model_failure"
+                            and "parse" in (c.get("fingerprint") or "").lower()
+                            for c in clusters))
+
+    def test_empty_reply_records_no_incident(self):
+        # An empty reply is a different (already-handled) class -- don't double-count it.
+        with mock.patch.object(observe, "chat_with_mcp", lambda *a, **k: ""):
+            self.assertIsNone(dg._diagnose_cluster(self.cluster))
+        self.assertEqual(inc.open_clusters(min_count=1, window_hours=999), [])
 
 
 if __name__ == "__main__":
