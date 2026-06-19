@@ -1519,7 +1519,7 @@ def _health_payload():
         payload["performance"] = {
             k: perf.get(k) for k in (
                 "projects_total", "projects_rated", "mean_energy",
-                "energy_trend", "tripwire_seen", "tripwire_settled")
+                "energy_trend", "tripwire_seen", "tripwire_settled", "calibration")
         }
     except Exception:
         payload["performance"] = None

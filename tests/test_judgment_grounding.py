@@ -55,25 +55,81 @@ class JudgmentGroundingTest(unittest.TestCase):
             pred._evaluate({"kind": "project_shipped", "project_id": "P-999"},
                            "2026-01-01T00:00:00Z"))
 
+    # --- metric kind: project_mattered grades energy, but only on a SHIPPED bet ----
+    def test_project_mattered_metric_kind(self):
+        metric = {"kind": "project_mattered", "project_id": "P-001"}
+        self._seed_project(shipped=True, energy=pred.MATTERED_ENERGY_MIN)  # >= -> mattered
+        self.assertTrue(pred._evaluate(metric, "2026-01-01T00:00:00Z"))
+        self._seed_project(shipped=True, energy=pred.MATTERED_ENERGY_MIN - 1)  # < -> not
+        self.assertFalse(pred._evaluate(metric, "2026-01-01T00:00:00Z"))
+        self._seed_project(shipped=True)  # shipped but unrated -> unanswered, honest None
+        self.assertIsNone(pred._evaluate(metric, "2026-01-01T00:00:00Z"))
+        # NOT shipped, even rated high -> abstain, never a phantom belief move:
+        self._seed_project(dropped=True, energy=pred.MATTERED_ENERGY_MIN + 2)
+        self.assertIsNone(pred._evaluate(metric, "2026-01-01T00:00:00Z"))  # dropped
+        self._seed_project(energy=pred.MATTERED_ENERGY_MIN + 2)
+        self.assertIsNone(pred._evaluate(metric, "2026-01-01T00:00:00Z"))  # not yet shipped
+        self.assertIsNone(
+            pred._evaluate({"kind": "project_mattered", "project_id": "P-999"},
+                           "2026-01-01T00:00:00Z"))  # vanished -> None, never a miss
+
     # --- rehearse records on SHIP, records nothing on KILL --------------------
-    def test_ship_records_unarmed_prediction_and_belief(self):
+    def test_ship_records_both_predictions_and_beliefs(self):
         self._seed_project()
         reh._stamp_project("P-001", "SHIP", self.bp)
-        pid = self._entry().get("judgment_prediction_id")
-        self.assertIsNotNone(pid)
-        p = pred.get_prediction(pid)
-        self.assertEqual(p["metric"], {"kind": "project_shipped", "project_id": "P-001"})
-        self.assertIsNone(p["armed_at"])  # not selected -> clock not started
+        e = self._entry()
+        ship_id = e.get("judgment_prediction_id")
+        matter_id = e.get("judgment_mattered_prediction_id")
+        self.assertIsNotNone(ship_id)
+        self.assertIsNotNone(matter_id)
+        self.assertNotEqual(ship_id, matter_id)
+        self.assertEqual(pred.get_prediction(ship_id)["metric"],
+                         {"kind": "project_shipped", "project_id": "P-001"})
+        self.assertEqual(pred.get_prediction(matter_id)["metric"],
+                         {"kind": "project_mattered", "project_id": "P-001"})
+        # not selected -> neither clock started
+        self.assertIsNone(pred.get_prediction(ship_id)["armed_at"])
+        self.assertIsNone(pred.get_prediction(matter_id)["armed_at"])
+        # one belief per prediction, both SHIP-class, bound to distinct beliefs
         beliefs = wm.get_beliefs()
-        self.assertEqual(len(beliefs), 1)
-        self.assertIn("SHIP", beliefs[0]["claim"])
+        self.assertEqual(len(beliefs), 2)
+        self.assertTrue(all("SHIP" in b["claim"] for b in beliefs))
+        self.assertNotEqual(pred.get_prediction(ship_id)["belief_id"],
+                            pred.get_prediction(matter_id)["belief_id"])
 
     def test_kill_records_nothing(self):
         self._seed_project()
         reh._stamp_project("P-001", "KILL", self.bp)
         self.assertIsNone(self._entry().get("judgment_prediction_id"))
+        self.assertIsNone(self._entry().get("judgment_mattered_prediction_id"))
         self.assertEqual(pred._load(), [])
         self.assertEqual(wm.get_beliefs(), [])
+
+    def test_select_arms_both_predictions(self):
+        self._seed_project()
+        reh._stamp_project("P-001", "SHIP", self.bp)  # both unarmed (not selected)
+        argo_rating.select_latest_project(self.projects)
+        e = self._entry()
+        for field in ("judgment_prediction_id", "judgment_mattered_prediction_id"):
+            self.assertIsNotNone(pred.get_prediction(e[field])["armed_at"], field)
+
+    def test_mattered_belief_scores_up_on_high_energy(self):
+        # shipped + high energy: the "mattered" outcome is gradeable and True
+        self._seed_project(shipped=True, energy=pred.MATTERED_ENERGY_MIN + 2)
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        argo_rating.select_latest_project(self.projects)  # arms both
+        items = pred._load()  # backdate the mattered pred so it is due
+        matter_id = self._entry()["judgment_mattered_prediction_id"]
+        matter = next(p for p in items if p["id"] == matter_id)
+        matter["armed_at"] = "2026-05-01T00:00:00Z"
+        matter["due"] = "2026-05-15T00:00:00Z"
+        pred._save(items)
+        scored = pred.score_due()
+        self.assertEqual([s["id"] for s in scored], [matter_id])  # only the due one
+        self.assertTrue(scored[0]["correct"])
+        belief = wm.get_belief(pred.get_prediction(matter_id)["belief_id"])
+        self.assertIn("matters", belief["claim"])
+        self.assertAlmostEqual(belief["confidence"], 0.50)  # 0.30 seed + 0.20
 
     def test_ship_on_already_selected_project_arms_immediately(self):
         self._seed_project(selected=True)  # SELECT path rehearses AFTER marking selected
@@ -158,10 +214,13 @@ class JudgmentGroundingTest(unittest.TestCase):
         reh._stamp_project("P-001", "SHIP", self.bp)
         ship_pred = self._entry()["judgment_prediction_id"]
         ship_belief = pred.get_prediction(ship_pred)["belief_id"]
+        ship_matter = self._entry()["judgment_mattered_prediction_id"]
         reh._stamp_project("P-001", "REVISE", self.bp)           # verdict flips
         new_pred = self._entry()["judgment_prediction_id"]
         self.assertNotEqual(new_pred, ship_pred)                 # old retired, new recorded
         self.assertTrue(pred.get_prediction(ship_pred)["voided"])
+        self.assertTrue(pred.get_prediction(ship_matter)["voided"])  # mattered voided too
+        self.assertNotEqual(self._entry()["judgment_mattered_prediction_id"], ship_matter)
         new_belief = pred.get_prediction(new_pred)["belief_id"]
         self.assertNotEqual(new_belief, ship_belief)             # bound to the REVISE belief
         self.assertIn("REVISE", wm.get_belief(new_belief)["claim"])
@@ -173,10 +232,13 @@ class JudgmentGroundingTest(unittest.TestCase):
         reh._stamp_project("P-001", "SHIP", self.bp)
         argo_rating.select_latest_project(self.projects)  # armed
         pred_id = self._entry()["judgment_prediction_id"]
+        matter_id = self._entry()["judgment_mattered_prediction_id"]
         self.assertIsNotNone(pred.get_prediction(pred_id)["armed_at"])
         reh._stamp_project("P-001", "KILL", self.bp)       # verdict flips
         self.assertNotIn("judgment_prediction_id", self._entry())
+        self.assertNotIn("judgment_mattered_prediction_id", self._entry())
         self.assertTrue(pred.get_prediction(pred_id)["voided"])
+        self.assertTrue(pred.get_prediction(matter_id)["voided"])  # both voided
         # even if the bet is later marked shipped, the voided pred never scores
         items = pred._load()
         items[0]["armed_at"] = "2026-05-01T00:00:00Z"
@@ -199,15 +261,81 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertEqual((pid, state), ("P-001", "pending"))
         self.assertIsNotNone(pred.get_prediction(pred_id)["armed_at"])  # recovered
 
-    # --- round-3 fix: a failed void keeps ONE binding (no double-count) -------
-    def test_verdict_flip_with_void_failure_keeps_single_binding(self):
+    # --- review fix: a failed void keeps the EXISTING bindings (atomic, no double-count)
+    def test_verdict_flip_with_void_failure_keeps_existing_bindings(self):
         self._seed_project()
         reh._stamp_project("P-001", "SHIP", self.bp)
         ship_pred = self._entry()["judgment_prediction_id"]
-        with mock.patch.object(pred, "cancel", side_effect=OSError("disk")):
+        matter_pred = self._entry()["judgment_mattered_prediction_id"]
+        with mock.patch.object(pred, "cancel_many", side_effect=OSError("disk")):
             reh._stamp_project("P-001", "REVISE", self.bp)  # void fails
         self.assertEqual(self._entry()["judgment_prediction_id"], ship_pred)  # kept
-        self.assertEqual(len(pred._load()), 1)  # no duplicate recorded
+        self.assertEqual(self._entry()["judgment_mattered_prediction_id"], matter_pred)
+        self.assertEqual(len(pred._load()), 2)  # the original pair, no duplicates
+
+    # --- review fix: cancel_many voids atomically, skips missing/scored, idempotent ---
+    def test_cancel_many_atomic_and_idempotent(self):
+        b1, b2 = wm.add_belief("c1"), wm.add_belief("c2")
+        p1 = pred.record(b1, "claim1", {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        p2 = pred.record(b2, "claim2", {"kind": "project_mattered", "project_id": "P-001"}, 14)
+        voided = pred.cancel_many([p1, p2, "EVP-404"], "flip")  # missing id skipped
+        self.assertEqual({v["id"] for v in voided}, {p1, p2})
+        self.assertTrue(all(pred.get_prediction(x)["voided"] for x in (p1, p2)))
+        self.assertEqual(pred.cancel_many([p1, p2], "again"), [])  # already scored -> no-op
+
+    # --- review-2 fix: a partial arm keeps the binding, doesn't sink, self-heals -----
+    def test_partial_arm_failure_keeps_binding_and_recovers(self):
+        self._seed_project(selected=True, selected_at="2026-06-18 10:00 UTC")
+        real_arm = pred.arm
+        calls = {"n": 0}
+
+        def flaky_arm(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_arm(*a, **k)  # first arm (project_shipped) succeeds
+            raise OSError("disk")          # second arm (project_mattered) fails
+
+        with mock.patch.object(pred, "arm", side_effect=flaky_arm):
+            reh._stamp_project("P-001", "SHIP", self.bp)  # must NOT raise
+        e = self._entry()
+        ship_id = e["judgment_prediction_id"]
+        matter_id = e["judgment_mattered_prediction_id"]
+        # binding intact (atomic); one armed, one not (best-effort arming)
+        self.assertIsNotNone(pred.get_prediction(ship_id)["armed_at"])
+        self.assertIsNone(pred.get_prediction(matter_id)["armed_at"])
+        # self-heals: the SHIPPED/DROPPED touch re-arms the lagging prediction
+        argo_rating.set_project_outcome(self.projects, True)
+        self.assertIsNotNone(pred.get_prediction(matter_id)["armed_at"])
+
+    # --- review fix (blocker): a 2nd-record failure leaves NO half-bound entry --------
+    def test_partial_record_failure_leaves_no_half_state(self):
+        self._seed_project()
+        real_record = pred.record
+        calls = {"n": 0}
+
+        def flaky(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_record(*a, **k)  # project_shipped record succeeds
+            raise OSError("disk")            # project_mattered record fails
+
+        with mock.patch.object(pred, "record", side_effect=flaky):
+            reh._stamp_project("P-001", "SHIP", self.bp)
+        e = self._entry()
+        # all-or-nothing: not half-bound (no field set, verdict flag absent)
+        self.assertNotIn("judgment_prediction_id", e)
+        self.assertNotIn("judgment_mattered_prediction_id", e)
+        self.assertNotIn("judgment_verdict", e)
+        # the stray shipped pred from the failed attempt is unarmed -> can never score
+        self.assertTrue(all(p["armed_at"] is None for p in pred._load()))
+        # a clean re-rehearse recovers fully: a fresh, distinct, scorable pair
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        e = self._entry()
+        ship_id = e["judgment_prediction_id"]
+        matter_id = e["judgment_mattered_prediction_id"]
+        self.assertNotEqual(ship_id, matter_id)
+        self.assertEqual(pred.get_prediction(ship_id)["metric"]["kind"], "project_shipped")
+        self.assertEqual(pred.get_prediction(matter_id)["metric"]["kind"], "project_mattered")
 
     # --- round-3 fix: tie-break targets the later of two SELECTed bets --------
     def test_outcome_targets_later_of_two_selected(self):

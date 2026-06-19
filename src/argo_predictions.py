@@ -34,6 +34,13 @@ PREDICTIONS_PATH = argo_paths.PREDICTIONS_PATH
 # this to a tmp path (mock.patch.object(argo_predictions, "PROJECTS_LOG", ...)).
 PROJECTS_LOG = argo_paths.PROJECTS_LOG
 
+# The project-entry fields that hold a committed bet's judgment-prediction ids: the
+# project_shipped pred (judgment_prediction_id -- kept for step-1 back-compat) and the
+# energy-graded project_mattered pred. Defined here, the module both writers import, so
+# the set CANNOT silently diverge between argo_rehearse (records/voids them) and
+# argo_rating (arms them). Add a kind here -> both stay in lock-step.
+JUDGMENT_PRED_FIELDS = ("judgment_prediction_id", "judgment_mattered_prediction_id")
+
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -112,29 +119,55 @@ def get_prediction(pred_id):
     return next((x for x in _load() if x.get("id") == pred_id), None)
 
 
-def cancel(pred_id, reason=""):
-    """Void an armed prediction so score_due never grades it -- used when the premise
-    that recorded it is retracted (e.g. a re-rehearsal flips SHIP -> KILL, so the bet
-    must no longer move the verdict-class belief). Marks it scored with a null
-    outcome; the belief is left untouched. Idempotent. Returns it, or None."""
+def cancel_many(pred_ids, reason=""):
+    """Void several predictions in ONE atomic store write so score_due never grades
+    them -- used when a premise that recorded a SET of predictions is retracted together
+    (a verdict flip retires both the project_shipped and project_mattered bet at once).
+    Atomic by construction: all the still-unscored ids are marked in memory, then a
+    SINGLE _save persists them, so a partial failure can never leave one bet voided and
+    its sibling live (the save either lands for all or for none). Skips ids that are
+    missing or already scored (idempotent). Returns the list of prediction dicts voided."""
     items = _load()
-    p = next((x for x in items if x.get("id") == pred_id), None)
-    if p is None or p.get("scored_at"):
-        return None
-    p["scored_at"] = _now_iso()
-    p["correct"] = None
-    p["voided"] = True
-    p["void_reason"] = reason
-    _save(items)
-    log.info("prediction %s voided: %s", pred_id, reason or "(no reason)")
-    return p
+    by_id = {x.get("id"): x for x in items}
+    now = _now_iso()
+    voided = []
+    for pid in pred_ids:
+        p = by_id.get(pid)
+        if p is None or p.get("scored_at"):
+            continue
+        p["scored_at"] = now
+        p["correct"] = None
+        p["voided"] = True
+        p["void_reason"] = reason
+        voided.append(p)
+    if voided:
+        _save(items)
+        log.info("predictions voided: %s (%s)", [p["id"] for p in voided],
+                 reason or "(no reason)")
+    return voided
+
+
+def cancel(pred_id, reason=""):
+    """Void a single armed prediction so score_due never grades it -- used when the
+    premise that recorded it is retracted (e.g. a re-rehearsal flips SHIP -> KILL, so the
+    bet must no longer move the verdict-class belief). Marks it scored with a null
+    outcome; the belief is left untouched. Idempotent. Returns it, or None. Thin wrapper
+    over the atomic cancel_many."""
+    voided = cancel_many([pred_id], reason)
+    return voided[0] if voided else None
 
 
 # --- metric registry: only machine-checkable kinds ---------------------------
 
+# The 1-10 energy at or above which the operator's rating counts the bet as "it
+# mattered" (full credit) -- the external, human label the project_mattered kind
+# grades against. Shared with argo_calibration so "mattered" means one thing across
+# the belief grader and the surfaced calibration number.
+MATTERED_ENERGY_MIN = 7
+
 # Recognized metric kinds: a None verdict for one of these is an expected "no
 # outcome yet" pending state (logged quietly), not an unknown metric (which warns).
-_KNOWN_KINDS = ("incident_absent", "project_shipped")
+_KNOWN_KINDS = ("incident_absent", "project_shipped", "project_mattered")
 
 def _project_entry(project_id):
     """The project-log entry for `project_id`, or None. Reads the bare PROJECTS_LOG
@@ -160,6 +193,15 @@ def _evaluate(metric, armed_at):
           a SHIP/REVISE verdict's bet: True once the human marks it shipped, False
           once they mark it dropped, None while unreported. The None is the honest
           abstention -- an unreported bet is unknown, never a fabricated miss.
+      {"kind": "project_mattered", "project_id": "P-NNN"}
+          the same verdict's energy bet, gradeable ONLY once the bet SHIPPED: True when
+          the operator's 1-10 rating lands at/above MATTERED_ENERGY_MIN, False below,
+          None while unrated OR not-yet-shipped/dropped. A bet with no shipped artifact
+          has nothing to have mattered, so the honest answer is None (abstain) -- never a
+          belief move on a phantom outcome, and it keeps this belief coherent with the
+          calibration number, which counts a dropped bet as a ship-and-matter miss.
+          Graded against the user's OWN rating (an external label), never telemetry Argo
+          writes itself.
     """
     kind = (metric or {}).get("kind")
     if kind == "incident_absent":
@@ -178,6 +220,20 @@ def _evaluate(metric, armed_at):
         if entry.get("dropped"):
             return False
         return None
+    if kind == "project_mattered":
+        entry = _project_entry(metric.get("project_id"))
+        if entry is None:
+            return None
+        # Gradeable only once the bet shipped: a dropped/not-yet-shipped bet has no built
+        # artifact to have mattered, so abstain (None) rather than move the belief on a
+        # phantom outcome. (Ship-vs-drop is graded by project_shipped; this kind grades
+        # whether what SHIPPED was something the operator wanted.)
+        if not (entry.get("shipped") or entry.get("shipped_at")):
+            return None
+        energy = entry.get("energy")
+        if not isinstance(energy, (int, float)):
+            return None  # shipped but unrated -> did-it-matter unanswered -> abstain
+        return energy >= MATTERED_ENERGY_MIN
     return None
 
 

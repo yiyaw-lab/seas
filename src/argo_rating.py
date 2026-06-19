@@ -20,6 +20,21 @@ import argo_predictions
 import argo_store
 
 
+def _arm_judgment_predictions(target):
+    """Arm every judgment prediction bound to this committed bet (project_shipped + the
+    energy-graded project_mattered). SELECT arms both; the outcome path re-arms both.
+    arm() is idempotent, so this is safe to call repeatedly; a store hiccup on one
+    prediction must not block arming the other. Reads the field set from argo_predictions
+    (the shared source of truth) so it can never drift from what argo_rehearse records."""
+    for field in argo_predictions.JUDGMENT_PRED_FIELDS:
+        pred_id = target.get(field)
+        if pred_id:
+            try:
+                argo_predictions.arm(pred_id)
+            except OSError:
+                pass
+
+
 def parse_rating(text):
     """A bare number 1-10 (integers or decimals like 7.5) is an energy rating.
     Returns a float in [1, 10], or None. Must be the WHOLE message so prose like
@@ -97,16 +112,11 @@ def select_latest_project(projects_log, project_id=None):
     target["selected"] = True
     target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     argo_store.save_json(projects_log, log)
-    # Arm any judgment prediction already bound to this bet (from a prior standalone
+    # Arm any judgment predictions already bound to this bet (from a prior standalone
     # REHEARSE): the clock starts now that the user has committed. When SELECT itself
-    # triggers the rehearse, the prediction doesn't exist yet here -- rehearse arms
-    # it on the spot since the project is already marked selected. arm() is idempotent.
-    pred_id = target.get("judgment_prediction_id")
-    if pred_id:
-        try:
-            argo_predictions.arm(pred_id)
-        except OSError:
-            pass
+    # triggers the rehearse, the predictions don't exist yet here -- rehearse arms them
+    # on the spot since the project is already marked selected. arm() is idempotent.
+    _arm_judgment_predictions(target)
     return target.get("id")
 
 
@@ -161,11 +171,10 @@ def set_project_outcome(projects_log, shipped, project_id=None):
         return target.get("id"), "none"          # unrehearsed / killed / no pred record
     if p.get("scored_at"):
         return target.get("id"), "scored"         # already graded and locked
-    # Bound + unscored: ensure it is armed so the reported "pending" grade actually
-    # happens. arm() is idempotent (a no-op when SELECT already armed it); this also
-    # recovers the rare case where the SELECT-time arm was lost to a store hiccup.
-    try:
-        argo_predictions.arm(pred_id)
-    except OSError:
-        pass
+    # Bound + unscored: ensure both judgment predictions are armed so the reported
+    # "pending" grade actually happens. arm() is idempotent (a no-op when SELECT already
+    # armed them); this also recovers the rare case where a SELECT-time arm was lost to
+    # a store hiccup. The "pending" state tracks the project_shipped pred (above); the
+    # energy-graded project_mattered pred is armed alongside.
+    _arm_judgment_predictions(target)
     return target.get("id"), "pending"
