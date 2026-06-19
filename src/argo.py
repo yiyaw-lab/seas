@@ -27,9 +27,11 @@ from datetime import datetime
 from pathlib import Path
 
 import argo_paths
+from argo_log import get_logger
 
 ROOT = Path(__file__).resolve().parent.parent
 BETS_PATH = argo_paths.BETS_PATH  # single source of truth (see argo_paths)
+_LOG = get_logger(__name__)
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -131,9 +133,26 @@ EFFORT_LABELS = ("An evening", "A weekend", "A few days", "A week")
 
 
 def load_bets_log():
-    if BETS_PATH.exists():
+    if not BETS_PATH.exists():
+        return []
+    try:
         return json.loads(BETS_PATH.read_text())
-    return []
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Corrupt bets ledger: fail loud AND safe. Don't crash the caller, and
+        # don't silently reset to [] -- the next save_bets_log would persist that
+        # empty list and erase real bet history. Move the bad file aside so it
+        # stays recoverable, shout to the operator log, then start empty.
+        # (A prior .corrupt copy, if any, is overwritten -- the latest corruption
+        # is the one worth keeping, and the operator was alerted on the first.)
+        backup = BETS_PATH.with_name(BETS_PATH.name + ".corrupt")
+        try:
+            BETS_PATH.replace(backup)
+            preserved = str(backup)
+        except OSError:
+            preserved = "<could not preserve>"
+        _LOG.error("bets log at %s is corrupt (%s); preserved at %s, starting empty",
+                   BETS_PATH, exc, preserved, exc_info=True)
+        return []
 
 
 def save_bets_log(log):
