@@ -29,6 +29,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import argo_paths
+import argo_store
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBES_PATH = argo_paths.PROBES_PATH  # single source of truth (see argo_paths)
@@ -60,12 +61,7 @@ def _parse(ts):
 
 
 def _load():
-    if not PROBES_PATH.exists():
-        return {"probes": [], "ledger": {}}
-    try:
-        data = json.loads(PROBES_PATH.read_text())
-    except (json.JSONDecodeError, ValueError):
-        return {"probes": [], "ledger": {}}
+    data = argo_store.load_json(PROBES_PATH, default={"probes": [], "ledger": {}})
     data.setdefault("probes", [])
     data.setdefault("ledger", {})
     return data
@@ -73,7 +69,7 @@ def _load():
 
 def _save(data):
     PROBES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROBES_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    argo_store.save_json(PROBES_PATH, data)
 
 
 # --- Probes (dead-end memory) ------------------------------------------------
