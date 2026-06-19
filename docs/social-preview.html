@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1280px; height: 640px; overflow: hidden;
+    background: #0d1117;
+    font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+    color: #e6edf3;
+  }
+
+  /* subtle grid */
+  body::before {
+    content: '';
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(56,139,253,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(56,139,253,.04) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+
+  .wrap {
+    position: relative;
+    width: 1280px; height: 640px;
+    display: grid;
+    grid-template-columns: 1fr 1px 1fr;
+    gap: 0;
+  }
+
+  /* left — SEAS */
+  .left {
+    padding: 60px 56px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+
+  .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: .18em;
+    text-transform: uppercase; color: #388bfd;
+    margin-bottom: 18px;
+  }
+
+  .title {
+    font-size: 52px; font-weight: 700; line-height: 1.08;
+    letter-spacing: -.02em; color: #f0f6fc;
+  }
+  .title span { color: #388bfd; }
+
+  .tagline {
+    font-size: 17px; color: #8b949e; line-height: 1.55;
+    margin-top: 16px; max-width: 420px;
+  }
+
+  /* pipeline */
+  .pipeline {
+    display: flex; align-items: center; gap: 0;
+    margin-top: 36px;
+  }
+
+  .step {
+    font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: 6px 12px; border-radius: 6px;
+    border: 1px solid rgba(56,139,253,.25);
+    color: #8b949e;
+    white-space: nowrap;
+  }
+  .step.gate {
+    background: rgba(56,139,253,.12);
+    border-color: rgba(56,139,253,.5);
+    color: #388bfd;
+    font-weight: 700;
+  }
+  .step.finding { color: #3fb950; border-color: rgba(63,185,80,.35); }
+  .step.probe   { color: #f0883e; border-color: rgba(240,136,62,.35); }
+
+  .arrow {
+    color: #30363d; font-size: 15px; margin: 0 6px;
+  }
+  .branch { display: flex; flex-direction: column; gap: 6px; }
+
+  /* claim bar */
+  .claim {
+    margin-top: auto;
+    padding: 18px 20px;
+    background: rgba(56,139,253,.07);
+    border: 1px solid rgba(56,139,253,.18);
+    border-radius: 10px;
+  }
+  .claim-text {
+    font-size: 14px; font-style: italic; color: #c9d1d9;
+    line-height: 1.5;
+  }
+  .claim-text strong { color: #f0f6fc; font-style: normal; }
+
+  /* divider */
+  .divider {
+    background: #21262d;
+    width: 1px;
+    margin: 48px 0;
+  }
+
+  /* right — Argo */
+  .right {
+    padding: 60px 56px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+
+  .argo-title {
+    font-size: 52px; font-weight: 700; letter-spacing: -.02em; color: #f0f6fc;
+  }
+  .argo-title span { color: #3fb950; }
+  .argo-sub {
+    font-size: 17px; color: #8b949e; line-height: 1.55;
+    margin-top: 16px; max-width: 420px;
+  }
+
+  /* features */
+  .features { display: flex; flex-direction: column; gap: 14px; margin-top: 32px; }
+  .feat {
+    display: flex; align-items: flex-start; gap: 12px;
+  }
+  .feat-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #3fb950; margin-top: 6px; flex-shrink: 0;
+  }
+  .feat-text { font-size: 14px; color: #8b949e; line-height: 1.5; }
+  .feat-text strong { color: #c9d1d9; }
+
+  /* bottom bar */
+  .bottom {
+    grid-column: 1 / -1;
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 48px;
+    background: rgba(22,27,34,.95);
+    border-top: 1px solid #21262d;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 56px;
+  }
+  .bottom-left { font-size: 12px; color: #484f58; letter-spacing: .04em; }
+  .bottom-right {
+    display: flex; gap: 28px;
+  }
+  .pill {
+    font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: #484f58;
+    padding: 3px 10px; border-radius: 20px;
+    border: 1px solid #21262d;
+  }
+  .pill.blue { color: #388bfd; border-color: rgba(56,139,253,.3); }
+  .pill.green { color: #3fb950; border-color: rgba(63,185,80,.3); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- LEFT: SEAS -->
+  <div class="left">
+    <div>
+      <div class="eyebrow">Frontier Research Engine</div>
+      <div class="title">SEAS<span>.</span></div>
+      <div class="tagline">Turns frontier signals into genuine, evidence-grounded findings. A finding must be earned&nbsp;— the emission gate makes sure of it.</div>
+
+      <div class="pipeline">
+        <div class="step">Signal</div>
+        <div class="arrow">→</div>
+        <div class="step">Score</div>
+        <div class="arrow">→</div>
+        <div class="step gate">⊕ Gate</div>
+        <div class="arrow">→</div>
+        <div class="branch">
+          <div class="step finding">Finding</div>
+          <div class="step probe">Probe</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="claim">
+      <div class="claim-text">
+        Cited quotes must be <strong>real substrings</strong> of fetched sources.
+        Beliefs move only via <strong>evidence or scored predictions</strong> — never by assertion.
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- RIGHT: Argo -->
+  <div class="right">
+    <div>
+      <div class="eyebrow">Live Telegram Scout</div>
+      <div class="argo-title">Argo<span>.</span></div>
+      <div class="argo-sub">Always-on agentic companion. Watches the frontier, surfaces what matters, stress-tests ideas before you commit to them.</div>
+
+      <div class="features">
+        <div class="feat">
+          <div class="feat-dot"></div>
+          <div class="feat-text"><strong>REHEARSE</strong> — 3 role-locked critics + a judge → SHIP / REVISE / KILL</div>
+        </div>
+        <div class="feat">
+          <div class="feat-dot"></div>
+          <div class="feat-text"><strong>Tripwire</strong> — daily frontier sweep; alerts only what a builder would actually care about</div>
+        </div>
+        <div class="feat">
+          <div class="feat-dot"></div>
+          <div class="feat-text"><strong>Self-create</strong> — proposes new capabilities as PRs; never self-merges</div>
+        </div>
+        <div class="feat">
+          <div class="feat-dot"></div>
+          <div class="feat-text"><strong>Taste learning</strong> — screenshot → durable signal → shapes future project bets</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:1px"></div>
+  </div>
+
+  <!-- BOTTOM BAR -->
+  <div class="bottom">
+    <div class="bottom-left">github.com/yiyaw-lab/seas &nbsp;·&nbsp; Python 3.11 &nbsp;·&nbsp; stdlib-first core</div>
+    <div class="bottom-right">
+      <div class="pill blue">407 tests</div>
+      <div class="pill green">3 findings</div>
+      <div class="pill">Source-available</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
