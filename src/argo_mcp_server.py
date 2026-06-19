@@ -19,6 +19,7 @@ Later phases add repo-read (C), self-status (D), and gated self-heal (E) tools.
 """
 
 import ast
+import asyncio
 import functools
 import ipaddress
 import json
@@ -53,35 +54,54 @@ MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scrape
 TOOL_DEADLINE_DEFAULT = 45  # generous for a single network call, far under 300s
 
 
+def _settle(fut, payload):
+    """Deliver a with_deadline worker's (value, error) to its future, in the loop
+    thread. No-op if wait_for already cancelled the future on timeout."""
+    if not fut.cancelled():
+        fut.set_result(payload)
+
+
 def with_deadline(seconds=TOOL_DEADLINE_DEFAULT):
-    """Decorator: run a tool with a hard wall-clock cap. If it overruns, return a
-    clean timeout message instead of letting the call block to the 300s MCP
-    limit. Runs the body in a daemon worker thread and joins with a timeout; an
-    overrun thread is abandoned (daemon, so it can't keep the process alive) and
-    the connector gets an immediate, useful answer for this turn."""
+    """Decorator: run a sync tool body OFF the event loop with a hard wall-clock cap.
+
+    FastMCP runs a *sync* tool body inline on the asyncio event loop (func_metadata:
+    `return fn(...)`), so a tool that blocks for seconds -- a network fetch, a GitHub
+    PR chain, a full model call -- freezes the loop and starves the streamable-HTTP
+    transport; the Anthropic MCP connector then reports "Error while communicating
+    with MCP server" and the work (the PR, the project) silently never lands. So this
+    returns an ASYNC wrapper (wraps-preserved, which FastMCP correctly detects as
+    async) that runs the body in a FRESH DAEMON thread and awaits the result via the
+    loop. Daemon + fresh-per-call are deliberate, carried over from the old sync
+    version: a daemon can't block process exit on a redeploy, and a fresh thread (not
+    a shared pool) means an abandoned overrun never starves a later tool call.
+    wait_for enforces the cap and returns a relayable string on overrun (under the
+    300s MCP limit) instead of hanging to silence; the overrun thread is abandoned."""
     def decorator(fn):
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            result = {}
+        async def wrapper(*args, **kwargs):
+            loop = asyncio.get_running_loop()
+            done = loop.create_future()
 
             def run():
                 try:
-                    result["value"] = fn(*args, **kwargs)
+                    payload = (fn(*args, **kwargs), None)
                 except Exception as exc:  # surface, don't swallow into a hang
-                    result["error"] = f"{type(exc).__name__}: {exc}"
+                    payload = (None, f"{fn.__name__} failed: {type(exc).__name__}: {exc}")
+                try:
+                    loop.call_soon_threadsafe(_settle, done, payload)
+                except RuntimeError:
+                    pass  # loop already closed (we timed out / shut down); drop it
 
-            t = threading.Thread(target=run, daemon=True)
-            t.start()
-            t.join(seconds)
-            if t.is_alive():
+            threading.Thread(target=run, daemon=True).start()
+            try:
+                value, err = await asyncio.wait_for(done, timeout=seconds)
+            except asyncio.TimeoutError:
                 return (f"Timed out after {seconds}s running {fn.__name__} "
                         f"(under the 300s limit, so you get this instead of "
                         f"silence). The service may be slow right now — tell the "
                         f"user plainly and suggest retrying; do not pretend it "
                         f"succeeded.")
-            if "error" in result:
-                return f"{fn.__name__} failed: {result['error']}"
-            return result.get("value", "(no result)")
+            return err if err is not None else value
         return wrapper
     return decorator
 
@@ -1348,7 +1368,7 @@ def _propose_change_impl(title, description, files_json):
 
 
 @mcp.tool()
-@with_deadline(120)  # chains 5+ GitHub calls; generous but far under 300s
+@with_deadline(120)  # chains 5+ GitHub calls; offloaded off-loop by the decorator
 def propose_change(title: str, description: str, files_json: str) -> str:
     """Propose a new capability or fix by opening a GitHub PR for human review.
     Argo NEVER merges or deploys this itself — it drafts; a human approves.

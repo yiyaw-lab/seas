@@ -586,14 +586,30 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
         except observe.argo_guard.DailyBudget.BudgetExceeded:
             # Hard daily cap hit: stop immediately, don't try other models.
             _note_incident("budget_exceeded", "daily call budget reached")
-            return ("Argo's hit its daily call budget, taking a breather. "
-                    "Back tomorrow (or raise the cap).")
+            budget_text = ("Argo's hit its daily call budget, taking a breather. "
+                           "Back tomorrow (or raise the cap).")
+            # Persist this turn too (same reason as the error path below): else the
+            # next message has no memory Argo said it was taking a breather.
+            argo_memory.record_many(chat_id, [
+                (profile.name(), log_user_text),
+                ("Argo", budget_text),
+            ])
+            return budget_text
         except Exception as exc:
             last_error = exc
             if tool_capable:
                 tooled_failed = True
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
-    return f"(Argo hit an error reaching the model: {last_error})"
+    error_text = f"(Argo hit an error reaching the model: {last_error})"
+    # Persist the failed turn too. Otherwise the next message ("why this error?")
+    # loads a history with neither the user's question nor this error reply, and Argo
+    # answers "what error?" -- amnesia about something it sent one turn ago. Mirrors
+    # the success-path record_many above so an errored turn survives like any other.
+    argo_memory.record_many(chat_id, [
+        (profile.name(), log_user_text),
+        ("Argo", error_text),
+    ])
+    return error_text
 
 
 # --- Claim<->receipt gate -------------------------------------------------
@@ -630,6 +646,13 @@ _PR_CLAIM_RE = re.compile(
     r"\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
     r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
     r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
+    # Softer verbs (write/try/wrap up) count as a PR CLAIM only when the PR is the
+    # near-direct object -- "I'll write the PR", "let me try the PR" -- NOT when it's
+    # mentioned downstream ("I'll try to explain the PR", "write you a summary of the
+    # PR"), which is honest talk, not a claim. Tight object gap, no {0,30} reach.
+    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
+    r"\b(?:writ(?:e|ing|ten)|tr(?:y|ying)|wrap(?:ped|ping)? up)\b"
+    r"\s+(?:the |a |this |that |my |your |our )?(?:PR|pull request)\b"
     r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
     r"(?:open|opened|ready|drafted|submitted|up|live)\b"
     # PR used as a verb on a specific object: "I'll PR it", "I'm gonna PR this".
@@ -704,6 +727,28 @@ def _claim_unbacked(claim_re, reply):
     return False
 
 
+def _pr_blocker():
+    """A concrete reason propose_change cannot open a PR right now, or None if the
+    config looks complete. Lets an unbacked PR claim name the real blocker ('repo
+    still points at the placeholder') instead of the generic 'say propose it', and
+    lets _classify_claim skip a pointless re-attempt -- re-prompting the model can't
+    conjure a missing token. Reads os.environ fresh (not the import-time constants in
+    argo_mcp_server) so a late-set var is seen."""
+    if MCP_SERVERS is None:
+        return ("no MCP server is wired (WEBHOOK_URL / ARGO_MCP_TOKEN unset), so I "
+                "can't run propose_change at all")
+    if not os.environ.get("ARGO_PROPOSE_TOKEN"):
+        return "ARGO_PROPOSE_TOKEN isn't set, so I can't push a branch to GitHub"
+    repo = os.environ.get("ARGO_PROPOSE_REPO", "")
+    # "your-org/your-repo" mirrors the PROPOSE_REPO default in argo_mcp_server.py --
+    # keep the two in sync. Not imported: argo_mcp_server is faked in tests and lazily
+    # imported here elsewhere to avoid a cycle, so a shared constant isn't worth it.
+    if not repo or repo == "your-org/your-repo":
+        return ("ARGO_PROPOSE_REPO still points at the placeholder repo, so there's "
+                "nowhere to open the PR")
+    return None
+
+
 def _classify_claim(reply, tool_events):
     """Return a _Violation if the reply makes an action-claim no tool in tool_events
     backs, else None. Ordered: project -> PR -> link/read -> CONFIRM."""
@@ -712,8 +757,19 @@ def _classify_claim(reply, tool_events):
         return _Violation(False, _PROJECT_NUDGE, None, "phantom_send",
                           "reply claimed a proposal but no project tool fired")
     if not (fired & _PR_TOOLS) and _claim_unbacked(_PR_CLAIM_RE, reply):
-        return _Violation(True, _PR_NUDGE, _PR_GAP, "phantom_claim",
-                          "reply narrated a PR but propose_change never fired")
+        blocker = _pr_blocker()
+        if blocker is None:
+            # Config is fine -- the model just didn't call the tool. Worth one
+            # re-attempt to make it actually fire propose_change.
+            return _Violation(True, _PR_NUDGE, _PR_GAP, "phantom_claim",
+                              "reply narrated a PR but propose_change never fired")
+        # A hard config blocker: re-prompting can't fix it, so don't retry --
+        # replace the bluff with the honest, specific reason so the user can act.
+        return _Violation(False,
+                          f"correction: I haven't opened a PR and can't right now -- "
+                          f"{blocker}. Flagging the config so you can fix it.",
+                          None, "phantom_claim",
+                          "reply narrated a PR but propose_change is misconfigured")
     if not (fired & _LINK_READ_TOOLS) and _claim_unbacked(_LINK_READ_CLAIM_RE, reply):
         return _Violation(False, _READ_NUDGE, None, "phantom_claim",
                           "reply claimed it read a source but no read tool fired")

@@ -24,7 +24,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
-PROJECTS_LOG = DATA / "argo_projects.json"
+# Env-overridable like the chat/self/taste stores: the live bot appends a new
+# project here every time it proposes one, so point ARGO_PROJECTS_PATH at the
+# Railway volume or each redeploy wipes the log and the project counter resets to
+# P-001 (the "every project is 001" bug). The webhook (interactive proposer) is the
+# volume reader/writer; the scheduled "project" job runs on Actions with its own
+# separate gitignored copy, so this override only persists the webhook's log (the two
+# logs were never shared -- different machines). Home modules re-export this as a
+# module-level constant (the test patch point), so their helpers read the override at
+# call time -- never read argo_paths.PROJECTS_LOG directly inside a helper.
+PROJECTS_LOG = Path(os.environ.get("ARGO_PROJECTS_PATH", str(DATA / "argo_projects.json")))
 SIGNALS_PATH = DATA / "signals.json"
 SCHEDULE_PATH = DATA / "schedule.json"
 STATE_PATH = DATA / "schedule_state.json"
