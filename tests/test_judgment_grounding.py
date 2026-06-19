@@ -142,6 +142,22 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertEqual(e["judgment_verdict"], "SHIP")                 # flag backfilled
         self.assertIsNotNone(e.get("judgment_mattered_prediction_id"))  # mattered backfilled
 
+    # --- cursorbot fix: an UNGROUNDED terminal bet can still be grounded later ---------
+    def test_terminal_but_unbound_bet_can_still_be_grounded(self):
+        # SELECT committed, then the grounding rehearse failed (no predictions), then
+        # SHIPPED marked it terminal. A later successful rehearse must STILL attach
+        # grounding -- the terminal freeze only protects already-bound bets.
+        self._seed_project(selected=True, selected_at="2026-06-18 10:00 UTC",
+                           shipped=True)  # terminal, but never grounded (no predictions)
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        e = self._entry()
+        self.assertIsNotNone(e.get("judgment_prediction_id"))           # grounded now
+        self.assertIsNotNone(e.get("judgment_mattered_prediction_id"))
+        self.assertEqual(e["judgment_verdict"], "SHIP")
+        # and it's armed (selected) so score_due will grade the committed outcome
+        self.assertIsNotNone(
+            pred.get_prediction(e["judgment_prediction_id"])["armed_at"])
+
     def test_kill_on_missing_judgment_verdict_still_voids(self):
         # KILL refuses the bet, so any bound prediction is retired -- even on a row with
         # no judgment_verdict (the void fires on the refused verdict, not on a flip).
