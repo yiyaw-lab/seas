@@ -146,7 +146,7 @@ class JudgmentGroundingTest(unittest.TestCase):
     def test_terminal_but_unbound_bet_can_still_be_grounded(self):
         # SELECT committed, then the grounding rehearse failed (no predictions), then
         # SHIPPED marked it terminal. A later successful rehearse must STILL attach
-        # grounding -- the terminal freeze only protects already-bound bets.
+        # grounding -- an unbound terminal bet has no graded binding to protect.
         self._seed_project(selected=True, selected_at="2026-06-18 10:00 UTC",
                            shipped=True)  # terminal, but never grounded (no predictions)
         reh._stamp_project("P-001", "SHIP", self.bp)
@@ -168,6 +168,49 @@ class JudgmentGroundingTest(unittest.TestCase):
         reh._stamp_project("P-001", "KILL", self.bp)
         self.assertTrue(pred.get_prediction(ship_id)["voided"])     # retired
         self.assertNotIn("judgment_prediction_id", self._entry())   # binding cleared
+
+    # --- audit fix: a field pointing at a VOIDED pred is re-recorded, not kept ---------
+    def test_voided_ship_binding_is_rerecorded_not_kept(self):
+        # A field left pointing at a VOIDED pred (e.g. a flip whose store-void succeeded
+        # but whose project-log save then failed) must be treated as absent and re-recorded
+        # -- never left bound to a pred that can never grade, with the other leg live.
+        self._seed_project()
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        ship_id = self._entry()["judgment_prediction_id"]
+        matter_id = self._entry()["judgment_mattered_prediction_id"]
+        pred.cancel(ship_id, "stale binding from a save failure")  # voided, still on entry
+        reh._stamp_project("P-001", "SHIP", self.bp)               # same-class re-rehearse
+        e = self._entry()
+        self.assertNotEqual(e["judgment_prediction_id"], ship_id)          # fresh live pred
+        self.assertFalse(pred.get_prediction(e["judgment_prediction_id"]).get("voided"))
+        self.assertEqual(e["judgment_mattered_prediction_id"], matter_id)  # live matter kept
+
+    # --- audit fix: arm() never (re)arms a settled (scored/voided) prediction ----------
+    def test_arm_is_noop_on_voided_prediction(self):
+        b = wm.add_belief("c")
+        p = pred.record(b, "claim", {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        pred.cancel(p, "voided")                                    # scored_at set, voided
+        pred.arm(p)
+        self.assertIsNone(pred.get_prediction(p)["armed_at"])       # stays unarmed/inert
+
+    # --- cursorbot fix: a TERMINAL shipped-only row still backfills the mattered leg ----
+    def test_terminal_shipped_only_row_backfills_mattered(self):
+        # A committed, already-SHIPPED bet bound to only the shipped pred must still gain
+        # its project_mattered leg on a later same-verdict rehearse: the freeze applies
+        # only to a GRADED verdict FLIP, never to backfilling a missing same-class leg.
+        belief = wm.add_belief(reh._VERDICT_BELIEFS["SHIP"]["shipped"])
+        ship_id = pred.record(belief, "claim",
+                              {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        self._seed_project(verdict="SHIP", judgment_verdict="SHIP",
+                           judgment_prediction_id=ship_id, shipped=True,
+                           selected_at="2026-06-18 10:00 UTC")
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        e = self._entry()
+        self.assertEqual(e["judgment_prediction_id"], ship_id)          # shipped pred kept
+        matter_id = e.get("judgment_mattered_prediction_id")
+        self.assertIsNotNone(matter_id)                                  # backfilled
+        self.assertEqual(pred.get_prediction(matter_id)["metric"]["kind"],
+                         "project_mattered")
 
     def test_select_arms_both_predictions(self):
         self._seed_project()

@@ -488,29 +488,34 @@ def _record_judgment_prediction(entry, verdict):
     the build decision: project_shipped (graded by the human SHIPPED/DROPPED reply) and
     project_mattered (graded by the operator's 1-10 energy rating). Mutates `entry`
     (sets judgment_prediction_id, judgment_mattered_prediction_id, judgment_verdict) --
-    the caller persists it. Idempotent per project while the verdict is unchanged; a
-    re-rehearsal that CHANGES the verdict (SHIP<->REVISE, or anything->KILL) voids BOTH
-    old predictions first, so a bet always grades the verdict-class it currently holds
-    and a KILL grades nothing. Records the predictions UNARMED: the caller arms them only
-    AFTER it durably saves the binding (so a project-log save failure leaves them inert,
-    not orphaned-and-armed); a standalone REHEARSE is armed later by SELECT.
+    the caller persists it. Idempotent per project while the verdict is unchanged. A
+    re-rehearsal that CHANGES the verdict (SHIP<->REVISE, or anything->KILL) voids the old
+    predictions first -- UNLESS the bet's outcome was already graded, in which case it
+    FREEZES (changing nothing) so one real outcome can't be re-graded against a fresh
+    belief. A missing leg (a legacy shipped-only row, or a void+save-failure that orphaned
+    one leg) is backfilled; a field pointing at a voided pred is treated as absent and
+    re-recorded. Records the predictions UNARMED: the caller arms them only AFTER it
+    durably saves the binding (so a project-log save failure leaves them inert, not
+    orphaned-and-armed); a standalone REHEARSE is armed later by SELECT.
     Best-effort: a store error must never sink the rehearsal (it already happened).
     Returns the project_shipped prediction id, or None."""
     pid = entry.get("id")
     fields = argo_predictions.JUDGMENT_PRED_FIELDS
-    bound = [entry[f] for f in fields if entry.get(f)]
-    # Freeze grounding for an ALREADY-GROUNDED terminal bet. Once a bet with BOUND
-    # predictions has shipped/dropped, a re-rehearsal must NOT void, rebind, or re-record:
-    # the outcome already graded the verdict class in effect when it landed, so rebinding
-    # would re-grade one real outcome against a fresh belief (double-count). The displayed
-    # verdict (entry['verdict'], set by the caller) still updates; the grading class
-    # (judgment_verdict) stays put, and calibration keys on it. Gated on `bound` on
-    # purpose: a terminal bet that was NEVER grounded (e.g. the grounding rehearse failed
-    # before _stamp_project, then SELECT + SHIPPED) falls through below, so a later
-    # successful rehearse can still attach grounding for that committed outcome.
-    if bound and (entry.get("shipped") or entry.get("shipped_at")
-                  or entry.get("dropped")):
-        return entry.get("judgment_prediction_id")
+    # A binding counts only if its prediction is LIVE in the store (exists, not voided). A
+    # field left pointing at a VOIDED pred -- e.g. a verdict flip whose store-void succeeded
+    # but whose project-log save then failed, leaving the stale id on the entry -- is
+    # treated as ABSENT, so it gets re-recorded fresh rather than left bound to a pred that
+    # can never grade.
+    sp = (argo_predictions.get_prediction(entry["judgment_prediction_id"])
+          if entry.get("judgment_prediction_id") else None)
+    mp = (argo_predictions.get_prediction(entry["judgment_mattered_prediction_id"])
+          if entry.get("judgment_mattered_prediction_id") else None)
+
+    def _live(p):
+        return p is not None and not p.get("voided")
+
+    has_ship, has_matter = _live(sp), _live(mp)
+    bound = [p["id"] for p in (sp, mp) if _live(p)]
     # A verdict change retires the old predictions: they grade the wrong (or, for KILL,
     # a now-refused) verdict-class belief. Void BOTH atomically before recording. If the
     # void fails (store error), cancel_many's single save means NOTHING was voided, so we
@@ -528,18 +533,27 @@ def _record_judgment_prediction(entry, verdict):
     is_flip = old_verdict is not None and old_verdict != verdict
     is_refused = verdict not in _VERDICT_BELIEFS
     if bound and (is_flip or is_refused):
+        # A flip (SHIP<->REVISE) or refusal (KILL) retires the old preds. But a bet whose
+        # outcome was ALREADY GRADED (a live bound pred is scored) can't be cleanly retired
+        # -- cancel_many skips a scored pred, and recording a fresh pair would re-grade one
+        # real outcome against a new belief (double-count). Freeze: keep the graded
+        # grounding, change nothing (the displayed verdict still updates; the grading class
+        # stays put). A MISSING judgment_verdict is NOT a flip (None != "SHIP" must not void
+        # a correct-class pred) -- a same-class re-rehearse falls through to backfill.
+        if any(p.get("scored_at") for p in (sp, mp) if _live(p)):
+            return entry.get("judgment_prediction_id")
         try:
             argo_predictions.cancel_many(
                 bound, f"re-rehearsed {old_verdict} -> {verdict}")
             for f in fields:
                 entry.pop(f, None)
             entry.pop("judgment_verdict", None)
-            bound = []
+            has_ship = has_matter = False
         except Exception:
             # Void failed (cancel_many is atomic, so NOTHING was voided): keep the OLD
-            # bindings AND the old judgment_verdict, and do not rebind/backfill. Returning
-            # here degrades to the old verdict-class entirely -- never a partial rebind or
-            # a judgment_verdict that disagrees with the still-live old-class predictions.
+            # bindings AND the old judgment_verdict, and do not rebind. Degrades to the old
+            # verdict-class entirely -- never a partial void or a judgment_verdict that
+            # disagrees with the still-live old-class predictions.
             log.warning("rehearse: could not void predictions for %s", pid,
                         exc_info=True)
             return entry.get("judgment_prediction_id")
@@ -565,23 +579,21 @@ def _record_judgment_prediction(entry, verdict):
             SHIP_HORIZON_DAYS, source="rehearse")
 
     try:
-        has_ship = bool(entry.get("judgment_prediction_id"))
-        has_matter = bool(entry.get("judgment_mattered_prediction_id"))
         if not has_ship and not has_matter:
-            # Fresh: record BOTH, building the ids in one tuple so a failure on the
-            # second leaves NEITHER entry field set (the RHS evaluates fully before the
-            # unpack). No half-bound entry; a stray unbound pred from a failed attempt is
-            # unarmed (score_due needs armed_at) and its belief is reused by claim.
+            # Fresh (no LIVE binding -- new bet, or all legs voided/absent): record BOTH,
+            # building the ids in one tuple so a failure on the second leaves NEITHER entry
+            # field set (the RHS evaluates fully before the unpack). No half-bound entry; a
+            # stray unbound pred from a failed attempt is unarmed (score_due needs armed_at).
             ship_id, matter_id = _rec_ship(), _rec_matter()
             entry["judgment_prediction_id"] = ship_id
             entry["judgment_mattered_prediction_id"] = matter_id
         else:
-            # Backfill the absent leg, recording ONLY what's missing (never re-record an
-            # existing pred -- no duplicate/orphan). This heals a row bound to one leg
-            # only: step-1 rows carried just the shipped pred (documented back-compat in
-            # argo_predictions), so without this the energy-graded mattered loop would
-            # never exist for them. A failure here leaves the prior partial binding, no
-            # worse than before.
+            # Backfill ONLY the absent/dead leg (never re-record a LIVE pred -- no
+            # duplicate/orphan). Heals a row bound to one live leg: a legacy step-1 row
+            # carried just the shipped pred, and a void+save-failure can leave one leg
+            # voided -- either way the missing leg gets grounded so the project_mattered
+            # loop exists. Safe even on a terminal bet: a missing leg was never graded, so
+            # first-time grounding of it cannot double-count.
             if not has_ship:
                 entry["judgment_prediction_id"] = _rec_ship()
             if not has_matter:

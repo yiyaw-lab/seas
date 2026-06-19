@@ -99,13 +99,15 @@ def record(belief_id, claim, metric, days, source=""):
 
 def arm(pred_id, merged_at_iso=None):
     """Start the prediction clock: due = merged_at + days. Idempotent (re-arming a
-    prediction is a no-op, so a sync pass can call this safely every day). Returns
-    the prediction or None."""
+    prediction is a no-op, so a sync pass can call this safely every day). A SETTLED
+    prediction -- already scored, or voided (cancel_many also sets scored_at) -- is never
+    (re)armed: arming it would put an armed clock on a pred that can never grade, and a
+    stale binding can point an arm() call at a voided pred. Returns the prediction or None."""
     items = _load()
     p = next((x for x in items if x.get("id") == pred_id), None)
     if p is None:
         return None
-    if p.get("armed_at"):
+    if p.get("scored_at") or p.get("armed_at"):
         return p
     base = _parse_ts(merged_at_iso) or _now()
     p["armed_at"] = base.strftime(_TS_FMT)
