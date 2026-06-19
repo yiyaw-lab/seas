@@ -105,6 +105,24 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertEqual(pred._load(), [])
         self.assertEqual(wm.get_beliefs(), [])
 
+    # --- cursorbot fix: a legacy shipped-only row backfills the mattered leg ----------
+    def test_legacy_shipped_only_row_backfills_mattered(self):
+        # A step-1 row carried only judgment_prediction_id (project_shipped). A later
+        # same-verdict rehearse must backfill the project_mattered leg (so the energy-
+        # graded loop exists) WITHOUT re-recording/replacing the existing shipped pred.
+        belief = wm.add_belief(reh._VERDICT_BELIEFS["SHIP"]["shipped"])
+        ship_id = pred.record(belief, "legacy claim",
+                              {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        self._seed_project(verdict="SHIP", judgment_verdict="SHIP",
+                           judgment_prediction_id=ship_id, rehearsed_at="2026-06-18 09:00")
+        reh._stamp_project("P-001", "SHIP", self.bp)        # same verdict -> backfill
+        e = self._entry()
+        self.assertEqual(e["judgment_prediction_id"], ship_id)  # shipped pred untouched
+        matter_id = e.get("judgment_mattered_prediction_id")
+        self.assertIsNotNone(matter_id)                          # mattered leg backfilled
+        self.assertEqual(pred.get_prediction(matter_id)["metric"]["kind"],
+                         "project_mattered")
+
     def test_select_arms_both_predictions(self):
         self._seed_project()
         reh._stamp_project("P-001", "SHIP", self.bp)  # both unarmed (not selected)
@@ -319,6 +337,9 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertEqual(self._entry()["judgment_prediction_id"], ship_pred)  # kept
         self.assertEqual(self._entry()["judgment_mattered_prediction_id"], matter_pred)
         self.assertEqual(len(pred._load()), 2)  # the original pair, no duplicates
+        # judgment_verdict stays SHIP -- must not flip to REVISE while the live preds
+        # still grade the SHIP class (else calibration, keyed on it, would diverge)
+        self.assertEqual(self._entry()["judgment_verdict"], "SHIP")
 
     # --- review fix: cancel_many voids atomically, skips missing/scored, idempotent ---
     def test_cancel_many_atomic_and_idempotent(self):

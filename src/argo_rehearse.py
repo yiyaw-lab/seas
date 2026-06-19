@@ -524,45 +524,60 @@ def _record_judgment_prediction(entry, verdict):
             entry.pop("judgment_verdict", None)
             bound = []
         except Exception:
+            # Void failed (cancel_many is atomic, so NOTHING was voided): keep the OLD
+            # bindings AND the old judgment_verdict, and do not rebind/backfill. Returning
+            # here degrades to the old verdict-class entirely -- never a partial rebind or
+            # a judgment_verdict that disagrees with the still-live old-class predictions.
             log.warning("rehearse: could not void predictions for %s", pid,
                         exc_info=True)
+            return entry.get("judgment_prediction_id")
     if verdict not in _VERDICT_BELIEFS:
         return None  # KILL/unknown: the gate refused the bet, nothing to grade
+    beliefs = _VERDICT_BELIEFS[verdict]
+
+    def _rec_ship():
+        b = world_model.add_belief(beliefs["shipped"], status="unverified")
+        return argo_predictions.record(
+            b, f"{pid}, rehearsed {verdict}, gets built and shipped rather than dropped "
+               f"(graded {SHIP_HORIZON_DAYS} days after selection).",
+            {"kind": "project_shipped", "project_id": pid},
+            SHIP_HORIZON_DAYS, source="rehearse")
+
+    def _rec_matter():
+        b = world_model.add_belief(beliefs["mattered"], status="unverified")
+        return argo_predictions.record(
+            b, f"{pid}, rehearsed {verdict}, matters to {profile.name()} -- rated "
+               f"energy {argo_predictions.MATTERED_ENERGY_MIN}+/10 "
+               f"(graded {SHIP_HORIZON_DAYS} days after selection).",
+            {"kind": "project_mattered", "project_id": pid},
+            SHIP_HORIZON_DAYS, source="rehearse")
+
     try:
-        if not entry.get("judgment_prediction_id"):
-            beliefs = _VERDICT_BELIEFS[verdict]
-            # Stage BOTH ids in locals and commit the entry fields only after both
-            # record() calls succeed -- so a failure on the second can never leave the
-            # entry half-bound (judgment_prediction_id set, the mattered id + verdict
-            # not). A half-state would later void only the shipped pred while a live,
-            # unbound mattered pred double-counts the energy outcome. All three fields
-            # land together or none do; a stray unarmed pred from a failed attempt never
-            # scores (score_due requires armed_at) and the beliefs are reused by claim.
-            ship_belief = world_model.add_belief(beliefs["shipped"],
-                                                 status="unverified")
-            ship_id = argo_predictions.record(
-                ship_belief,
-                f"{pid}, rehearsed {verdict}, gets built and shipped rather than "
-                f"dropped (graded {SHIP_HORIZON_DAYS} days after selection).",
-                {"kind": "project_shipped", "project_id": pid},
-                SHIP_HORIZON_DAYS, source="rehearse")
-            matter_belief = world_model.add_belief(beliefs["mattered"],
-                                                   status="unverified")
-            matter_id = argo_predictions.record(
-                matter_belief,
-                f"{pid}, rehearsed {verdict}, matters to {profile.name()} -- rated "
-                f"energy {argo_predictions.MATTERED_ENERGY_MIN}+/10 "
-                f"(graded {SHIP_HORIZON_DAYS} days after selection).",
-                {"kind": "project_mattered", "project_id": pid},
-                SHIP_HORIZON_DAYS, source="rehearse")
+        has_ship = bool(entry.get("judgment_prediction_id"))
+        has_matter = bool(entry.get("judgment_mattered_prediction_id"))
+        if not has_ship and not has_matter:
+            # Fresh: record BOTH, building the ids in one tuple so a failure on the
+            # second leaves NEITHER entry field set (the RHS evaluates fully before the
+            # unpack). No half-bound entry; a stray unbound pred from a failed attempt is
+            # unarmed (score_due needs armed_at) and its belief is reused by claim.
+            ship_id, matter_id = _rec_ship(), _rec_matter()
             entry["judgment_prediction_id"] = ship_id
             entry["judgment_mattered_prediction_id"] = matter_id
-            entry["judgment_verdict"] = verdict
+        else:
+            # Backfill the absent leg, recording ONLY what's missing (never re-record an
+            # existing pred -- no duplicate/orphan). This heals a row bound to one leg
+            # only: step-1 rows carried just the shipped pred (documented back-compat in
+            # argo_predictions), so without this the energy-graded mattered loop would
+            # never exist for them. A failure here leaves the prior partial binding, no
+            # worse than before.
+            if not has_ship:
+                entry["judgment_prediction_id"] = _rec_ship()
+            if not has_matter:
+                entry["judgment_mattered_prediction_id"] = _rec_matter()
+        entry["judgment_verdict"] = verdict
     except Exception:
-        # Best-effort: grounding the verdict must never sink the rehearsal (the
-        # debate already happened and the blueprint is written). The binding is
-        # atomic -- the ids were staged in locals, so on any failure here NO entry
-        # field was set and there is no half-bound entry to clean up. Broad net, logged.
+        # Best-effort: grounding the verdict must never sink the rehearsal (the debate
+        # already happened and the blueprint is written). Broad net, logged.
         log.warning("rehearse: judgment predictions not recorded for %s",
                     pid, exc_info=True)
         return None
