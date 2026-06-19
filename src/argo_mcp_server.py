@@ -1435,10 +1435,40 @@ _AUTHOR_PROMPT = (
     "- Standard library only; no new dependencies. Plain ASCII, no em dashes.")
 
 
+# Full file bodies + a repro test don't fit the 1024-token chat_with_mcp default --
+# the draft would truncate mid-JSON and parse to nothing. 16000 is the non-streaming
+# ceiling for these models (above it the SDK requires streaming).
+_AUTHOR_MAX_TOKENS = 16000
+_REPAIR_NOTE = (
+    "That draft was rejected: {reason}. Reply again with ONLY a single JSON object of "
+    'the form {{"files": {{"path/to/file.py": "<full new file contents>"}}}} -- no prose, '
+    "no markdown fences -- and include the tests/test_*.py reproduction. Standard library "
+    "only, plain ASCII, no em dashes.")
+
+
+def _extract_fix_files(raw):
+    """Pull the {path: full_contents} map out of a draft reply. Returns (files, None) on
+    success or (None, reason) naming what was wrong, so the caller can ask for a repair."""
+    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if not m:
+        return None, "your reply contained no JSON object (it may have been truncated)"
+    try:
+        obj = json.loads(m.group(0))
+    except (ValueError, json.JSONDecodeError):
+        return None, "the JSON did not parse (likely truncated or malformed)"
+    files = obj.get("files") if isinstance(obj, dict) else None
+    if isinstance(files, dict) and files and all(isinstance(v, str) for v in files.values()):
+        return files, None
+    return None, ('there was no valid "files" object mapping each path to its full new '
+                  "file contents as a string")
+
+
 def _author_fix_files(payload):
     """Premium model call: given the diagnosis + the current contents of the suspected
     files, draft {path: full_new_contents} INCLUDING a tests/test_*.py reproduction.
-    Returns the files dict or None. Guarded; never raises."""
+    Returns the files dict or None. Drafts with a generous max_tokens (so the JSON isn't
+    truncated) and grants ONE repair pass on a recoverable near-miss -- the two reasons a
+    tractable fix used to come back as None and Argo declined. Guarded; never raises."""
     import argo_observe as observe
     suspected = [f for f in (payload.get("suspected_files") or [])
                  if isinstance(f, str) and (ROOT / f).exists()][:MAX_PROPOSE_FILES - 1]
@@ -1458,23 +1488,34 @@ def _author_fix_files(payload):
     prompt = _AUTHOR_PROMPT.format(
         diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
         files=json.dumps(current, indent=2)[:30000] or "(no current files)")
-    try:
-        # Opus rejects the temperature param; pass None so observe omits it (the gotcha).
-        raw = observe.chat_with_mcp(
-            _AUTHOR_SYSTEM, [{"role": "user", "content": prompt}], model, temperature=None)
-    except Exception:
-        log.error("author_fix: model call failed", exc_info=True)
-        return None
-    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    files = obj.get("files") if isinstance(obj, dict) else None
-    if isinstance(files, dict) and files and all(isinstance(v, str) for v in files.values()):
-        return files
+    messages = [{"role": "user", "content": prompt}]
+    for attempt in range(2):
+        try:
+            # Opus rejects the temperature param; pass None so observe omits it (the gotcha).
+            raw = observe.chat_with_mcp(
+                _AUTHOR_SYSTEM, messages, model,
+                max_tokens=_AUTHOR_MAX_TOKENS, temperature=None)
+        except Exception:
+            log.error("author_fix: model call failed", exc_info=True)
+            return None  # infra failure (no credits, breaker open) -- a retry won't help
+        files, reason = _extract_fix_files(raw)
+        if files is not None:
+            return files
+        if attempt == 0:
+            # One repair pass: hand the model its own draft plus the exact reason it was
+            # rejected and ask again, rather than an instant give-up. A near-miss
+            # (truncated/malformed JSON) is recoverable, and this is what lets Argo
+            # actually land a PR for a tractable change instead of declining.
+            log.info("author_fix: draft rejected (%s); one repair pass", reason)
+            if (raw or "").strip():
+                # Echo the rejected draft back ONLY when non-empty -- an empty reply
+                # (refusal / max_tokens before any text) would become an empty assistant
+                # content block, which the API 400s on, losing the retry. When the draft
+                # is empty, just re-send the original prompt for the second attempt.
+                messages = messages + [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": _REPAIR_NOTE.format(reason=reason)},
+                ]
     return None
 
 
