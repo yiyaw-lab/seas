@@ -16,7 +16,23 @@ the override. Stdlib + argo_store for the on-disk format.
 import re
 from datetime import datetime, timezone
 
+import argo_predictions
 import argo_store
+
+
+def _arm_judgment_predictions(target):
+    """Arm every judgment prediction bound to this committed bet (project_shipped + the
+    energy-graded project_mattered). SELECT arms both; the outcome path re-arms both.
+    arm() is idempotent, so this is safe to call repeatedly; a store hiccup on one
+    prediction must not block arming the other. Reads the field set from argo_predictions
+    (the shared source of truth) so it can never drift from what argo_rehearse records."""
+    for field in argo_predictions.JUDGMENT_PRED_FIELDS:
+        pred_id = target.get(field)
+        if pred_id:
+            try:
+                argo_predictions.arm(pred_id)
+            except OSError:
+                pass
 
 
 def parse_rating(text):
@@ -96,4 +112,82 @@ def select_latest_project(projects_log, project_id=None):
     target["selected"] = True
     target["selected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     argo_store.save_json(projects_log, log)
+    # Arm any judgment predictions already bound to this bet (from a prior standalone
+    # REHEARSE): the clock starts now that the user has committed. When SELECT itself
+    # triggers the rehearse, the predictions don't exist yet here -- rehearse arms them
+    # on the spot since the project is already marked selected. arm() is idempotent.
+    _arm_judgment_predictions(target)
     return target.get("id")
+
+
+def target_outcome_project(log, project_id=None):
+    """The bet a SHIPPED/DROPPED grades: an explicit id if given, else the most
+    recently SELECTED project -- the committed bet whose judgment prediction is
+    armed. NOT 'last shown': showing a new candidate after a SELECT must not steal
+    the outcome of a bet already in flight (that would grade the wrong belief). Ties
+    on the minute-resolution selected_at break toward the later log entry (the more
+    recent SELECT). Returns None when nothing has been selected."""
+    if project_id:
+        return next((p for p in log if p.get("id") == project_id), None)
+    selected = [(i, p) for i, p in enumerate(log) if p.get("selected_at")]
+    if selected:
+        return max(selected, key=lambda ip: (ip[1]["selected_at"], ip[0]))[1]
+    return None
+
+
+def set_project_outcome(projects_log, shipped, project_id=None):
+    """Grade a committed bet's outcome -- the human closing the judgment loop. A
+    shipped bet earns its SHIP/REVISE verdict-class belief up; a dropped one earns it
+    down (the dated prediction recorded at rehearse time is scored against this on the
+    next score_due run). Targets the most recently SELECTED bet (or an explicit id),
+    never last-shown.
+
+    Returns (id, state): state is 'pending' (a bound prediction will grade this
+    outcome), 'scored' (the bound prediction is already graded and locked -- a later
+    correction updates the log but does NOT re-grade the belief, since confidence
+    never moves by assertion), 'none' (no live judgment prediction is bound -- the bet
+    was never rehearsed, or its prediction was voided), or 'uncommitted' (the explicit
+    id names a real bet that was never SELECTed -- SELECT is the commit that starts the
+    clock, so there is nothing to grade and the log is left untouched). (None, 'none')
+    when there is no committed bet to target at all."""
+    log = argo_store.load_json(projects_log, None)
+    if not log:
+        return None, "none"
+    target = target_outcome_project(log, project_id)
+    if target is None:
+        return None, "none"
+    # An outcome grades a COMMITTED bet; SELECT is the commit that arms the clock. A bare
+    # outcome already targets the SELECTED bet (target_outcome_project), but an explicit
+    # SHIPPED/DROPPED P-NNN can name a never-selected bet -- refuse it (no ship/drop mark,
+    # no arming, no grading), so a belief can never move for a bet that was never bet on.
+    if not target.get("selected_at"):
+        return target.get("id"), "uncommitted"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if shipped:
+        target["shipped"] = True
+        target["shipped_at"] = stamp
+        target.pop("dropped", None)
+        target.pop("dropped_at", None)
+    else:
+        target["dropped"] = True
+        target["dropped_at"] = stamp
+        target.pop("shipped", None)
+        target.pop("shipped_at", None)
+    argo_store.save_json(projects_log, log)
+    pred_id = target.get("judgment_prediction_id")
+    p = argo_predictions.get_prediction(pred_id) if pred_id else None
+    if p is None or p.get("voided"):
+        # No LIVE prediction: unrehearsed, no record, or the bound id points at a voided
+        # prediction (a verdict flip retired it). A voided pred carries scored_at but
+        # never graded a belief, so it must read as 'none' (not 'scored'); otherwise the
+        # human outcome would be falsely reported locked and skip re-arming.
+        return target.get("id"), "none"
+    if p.get("scored_at"):
+        return target.get("id"), "scored"         # genuinely graded and locked
+    # Bound + unscored: ensure both judgment predictions are armed so the reported
+    # "pending" grade actually happens. arm() is idempotent (a no-op when SELECT already
+    # armed them); this also recovers the rare case where a SELECT-time arm was lost to
+    # a store hiccup. The "pending" state tracks the project_shipped pred (above); the
+    # energy-graded project_mattered pred is armed alongside.
+    _arm_judgment_predictions(target)
+    return target.get("id"), "pending"

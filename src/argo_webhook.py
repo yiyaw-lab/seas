@@ -986,6 +986,10 @@ def _select_latest_project(project_id=None):
     return argo_rating.select_latest_project(PROJECTS_LOG, project_id)
 
 
+def _set_project_outcome(shipped, project_id=None):
+    return argo_rating.set_project_outcome(PROJECTS_LOG, shipped, project_id)
+
+
 def _download_telegram_file(file_id):
     """Download any Telegram file by file_id. Returns (bytes, file_path) or
     (None, None). Two steps: getFile to resolve a CDN file_path, then download
@@ -1351,6 +1355,55 @@ def handle_update(update):
                 f"Couldn't rehearse that ({type(exc).__name__}). Try again in a sec.")
         return
 
+    # SHIPPED / DROPPED gate: the human grades the outcome of a committed bet,
+    # closing the judgment loop. The dated prediction recorded when this bet was
+    # rehearsed is scored against this on the daily score_due run -- a shipped bet
+    # moves its SHIP/REVISE verdict-class belief up, a dropped one moves it down.
+    # Deterministic and upstream of the model, like SELECT/REHEARSE/CONFIRM. Matched
+    # strictly (exact word or "<WORD> P-NNN") so casual prose like "shipped it"
+    # falls through to the model instead of hijacking a natural sentence.
+    if word == "SHIPPED" or re.fullmatch(r"SHIPPED P-\d+", word):
+        requested = word.split(maxsplit=1)[1] if " " in word else None
+        pid, state = _set_project_outcome(True, requested)
+        if pid and state == "pending":
+            msg = f"Love it. Logged {pid} as shipped, and that grades my own call on it."
+        elif pid and state == "scored":
+            msg = (f"Logged {pid} as shipped. I'd already graded my call on this "
+                   "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first, then tell me SHIPPED.")
+        elif pid:
+            msg = (f"Logged {pid} as shipped. I don't have a live call of my own "
+                   "to grade on this one.")
+        elif requested:
+            msg = f"Couldn't find {requested} to mark shipped."
+        else:
+            msg = "Nothing selected to mark shipped yet. Pick one with SELECT first."
+        send_telegram.send_message(msg)
+        return
+    if word == "DROPPED" or re.fullmatch(r"DROPPED P-\d+", word):
+        requested = word.split(maxsplit=1)[1] if " " in word else None
+        pid, state = _set_project_outcome(False, requested)
+        if pid and state == "pending":
+            msg = (f"Okay, logged {pid} as dropped. That grades my call on it too, "
+                   "no hard feelings.")
+        elif pid and state == "scored":
+            msg = (f"Logged {pid} as dropped. I'd already graded my call on this "
+                   "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first if you want me to track it.")
+        elif pid:
+            msg = (f"Logged {pid} as dropped. I don't have a live call of my own "
+                   "to grade on this one.")
+        elif requested:
+            msg = f"Couldn't find {requested} to drop."
+        else:
+            msg = "Nothing selected to drop yet."
+        send_telegram.send_message(msg)
+        return
+
     # Pasted-an-existing-project gate: if she pastes back a project Argo already
     # sent (e.g. to say "I meant THIS one"), treat it as REFERRING to that project
     # and re-anchor on it, instead of letting the LLM turn it into a new idea.
@@ -1472,7 +1525,7 @@ def _health_payload():
         payload["performance"] = {
             k: perf.get(k) for k in (
                 "projects_total", "projects_rated", "mean_energy",
-                "energy_trend", "tripwire_seen", "tripwire_settled")
+                "energy_trend", "tripwire_seen", "tripwire_settled", "calibration")
         }
     except Exception:
         payload["performance"] = None
