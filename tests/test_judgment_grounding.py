@@ -169,6 +169,20 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertTrue(pred.get_prediction(ship_id)["voided"])     # retired
         self.assertNotIn("judgment_prediction_id", self._entry())   # binding cleared
 
+    # --- cursorbot fix: KILL clears stale fields even with no LIVE pred to void --------
+    def test_kill_clears_stale_fields_when_no_live_pred(self):
+        self._seed_project()
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        ship_id = self._entry()["judgment_prediction_id"]
+        matter_id = self._entry()["judgment_mattered_prediction_id"]
+        pred.cancel(ship_id, "x")        # both legs voided -> bound is empty next time,
+        pred.cancel(matter_id, "x")      # but the stale field keys + judgment_verdict remain
+        reh._stamp_project("P-001", "KILL", self.bp)
+        e = self._entry()
+        self.assertNotIn("judgment_prediction_id", e)           # cleared
+        self.assertNotIn("judgment_mattered_prediction_id", e)
+        self.assertNotIn("judgment_verdict", e)                 # not left as stale SHIP
+
     # --- audit fix: a field pointing at a VOIDED pred is re-recorded, not kept ---------
     def test_voided_ship_binding_is_rerecorded_not_kept(self):
         # A field left pointing at a VOIDED pred (e.g. a flip whose store-void succeeded

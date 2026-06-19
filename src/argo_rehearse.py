@@ -467,15 +467,19 @@ def _summary_line(project_id, verdict, judge_text):
     out = f"Rehearsed {project_id}. {verb} ({verdict})."
     if risk:
         out += f" Biggest thing to watch: {risk}"
-    # Conversational accountability: append how THIS verdict class has actually panned
-    # out so far (n-floor gated -- the phrase is "" below the floor, so a too-thin
-    # record never shows). The new bet isn't stamped into the log until after this
-    # call, so it can't pad its own number. Best-effort: a calibration read must never
-    # sink the (already-completed) rehearsal summary.
+    # Conversational accountability: append how the class the bet will ACTUALLY grade
+    # under has panned out so far. Cite judgment_verdict (the grounded class on the
+    # stamped entry), NOT the display verdict -- they can differ when grounding froze or a
+    # void failed, and the phrase must match what will grade. Falls back to the display
+    # verdict if the bet has no grounded class yet (called pre-stamp, or KILL). n-floor
+    # gated (phrase is "" below the floor); the just-stamped bet has no outcome yet so it
+    # can't pad its own number. Best-effort: never sink the (completed) rehearsal summary.
     try:
         projects = argo_store.load_json(PROJECTS_LOG, [])
+        entry = next((p for p in projects if p.get("id") == project_id), None)
+        grading_verdict = (entry or {}).get("judgment_verdict") or verdict
         phrase = argo_calibration.format_phrase(
-            argo_calibration.compute_calibration(projects), verdict)
+            argo_calibration.compute_calibration(projects), grading_verdict)
         if phrase:
             out += f" {phrase}"
     except Exception:
@@ -558,7 +562,16 @@ def _record_judgment_prediction(entry, verdict):
                         exc_info=True)
             return entry.get("judgment_prediction_id")
     if verdict not in _VERDICT_BELIEFS:
-        return None  # KILL/unknown: the gate refused the bet, nothing to grade
+        # KILL/unknown: the gate refused the bet -> no grounding. Clear any binding fields
+        # and judgment_verdict, even if there were no LIVE preds to void above (e.g. the
+        # fields point at already-voided preds that `bound` skipped) -- otherwise the log
+        # would show KILL while calibration still buckets the bet under its old class. A
+        # KILL on an already-GRADED bet returned via the freeze above, so this never erases
+        # a real graded grounding.
+        for f in fields:
+            entry.pop(f, None)
+        entry.pop("judgment_verdict", None)
+        return None
     beliefs = _VERDICT_BELIEFS[verdict]
 
     def _rec_ship():
@@ -714,7 +727,6 @@ def rehearse(project_id=""):
         return "ERROR", None, judge_text  # judge_text holds the error message
 
     doc = _blueprint_doc(pid, verdict, project_text, critiques, judge_text)
-    summary = _summary_line(pid, verdict, judge_text)
 
     # A KILL writes no build plan -- the gate refusing to bless a weak bet. We
     # still persist the debate doc (so the reasoning is on record) but return no
@@ -722,6 +734,9 @@ def rehearse(project_id=""):
     # handing over build steps.
     path = _write_blueprint(pid, doc)
     _stamp_project(pid, verdict, path)
+    # Summary AFTER stamping so its calibration phrase reads the grounded judgment_verdict
+    # (the class that will actually grade this bet), not the display verdict.
+    summary = _summary_line(pid, verdict, judge_text)
     blueprint_path = None if verdict == "KILL" else path
     _log_run(run_id, pid, verdict, path, models)
     return verdict, blueprint_path, summary

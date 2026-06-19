@@ -179,6 +179,17 @@ class SummaryLineSurfaceTest(unittest.TestCase):
         self.assertTrue(out.startswith("Rehearsed P-200."))
         self.assertNotIn("calls have shipped", out)
 
+    def test_phrase_cites_grounded_class_not_display_verdict(self):
+        # When the bet's grounded judgment_verdict differs from the judge's display verdict
+        # (a frozen/failed grounding), the phrase must cite the GROUNDED class -- what will
+        # actually grade -- not the display verdict.
+        rows = [_bet(i, shipped=True, energy=HI) for i in range(N)]  # N graded SHIP bets
+        rows.append({"id": "P-200", "judgment_verdict": "SHIP"})     # summarized bet: SHIP
+        argo_store.save_json(self.projects, rows)
+        out = reh._summary_line("P-200", "REVISE", self.JUDGE)       # display verdict REVISE
+        self.assertIn(f"My SHIP calls have shipped {N} of {N}", out)
+        self.assertNotIn("REVISE calls", out)
+
 
 class GatherPerformanceSurfaceTest(unittest.TestCase):
     def setUp(self):
