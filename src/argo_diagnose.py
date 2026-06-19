@@ -402,44 +402,50 @@ def verify_open_proposals():
     items = _load_proposals()
     changed = False
     for p in items:
-        if p.get("resolved") or p.get("ci_failed") or p.get("deploy_watch_until"):
+        # Skip only the genuinely-done: resolved, or merged + in post-deploy watch.
+        # A ci_failed proposal is still an OPEN PR on GitHub, so its bot reviews are
+        # still surfaced below -- only its (settled) CI verdict is not re-run.
+        if p.get("resolved") or p.get("deploy_watch_until"):
             continue
-        ci = None
-        try:
-            ci = _check_ci(p["pr_number"])
-        except Exception:
-            log.error("verify: CI check failed for PR #%s", p.get("pr_number"), exc_info=True)
-        if not ci:
-            continue
-        changed = True
-        p["last_checked"] = _now_iso()
-        p["state"] = ci.get("state", p.get("state"))
-        p["ci_conclusion"] = ci.get("ci_conclusion")
-        if ci.get("head_sha"):
-            p["head_sha"] = ci["head_sha"]
-        concl = ci.get("ci_conclusion")
         n = p["pr_number"]
-        if concl in ("failure", "timed_out", "cancelled", "action_required"):
-            argo_self.add_evidence(p["belief_id"], f"PR #{n} CI {concl}", supports=False)
-            argo_incidents.mark(p["incident_key"], status="open")
-            p["ci_failed"] = True
-            _send(f"the fix i proposed (PR #{n}) didn't pass the tests, so i'm not "
-                  f"calling it fixed. i've reopened the problem to rethink it.")
-        elif ci.get("merged"):
-            p["merged"] = True
-            p["merged_at"] = ci.get("merged_at") or _now_iso()
-            watch_to = (_parse_ts(p["merged_at"]) or _now()) + timedelta(hours=DEPLOY_WATCH_HOURS)
-            p["deploy_watch_until"] = watch_to.strftime(_TS_FMT)
-            _send(f"the fix (PR #{n}) merged. i won't call it fixed until i've watched "
-                  f"for the problem coming back over the next day.")
-        elif concl == "success" and not p.get("notified"):
-            p["notified"] = True
-            _send(f"CI is green on the fix (PR #{n}). it's ready for your merge whenever "
-                  f"you want; i can't merge it myself.")
+        # CI / merge state machine -- skipped once the fix is parked as ci_failed
+        # (re-running it would re-fire the failure nudge on every poll).
+        if not p.get("ci_failed"):
+            ci = None
+            try:
+                ci = _check_ci(n)
+            except Exception:
+                log.error("verify: CI check failed for PR #%s", n, exc_info=True)
+            if ci:
+                changed = True
+                p["last_checked"] = _now_iso()
+                p["state"] = ci.get("state", p.get("state"))
+                p["ci_conclusion"] = ci.get("ci_conclusion")
+                if ci.get("head_sha"):
+                    p["head_sha"] = ci["head_sha"]
+                concl = ci.get("ci_conclusion")
+                if concl in ("failure", "timed_out", "cancelled", "action_required"):
+                    argo_self.add_evidence(p["belief_id"], f"PR #{n} CI {concl}", supports=False)
+                    argo_incidents.mark(p["incident_key"], status="open")
+                    p["ci_failed"] = True
+                    _send(f"the fix i proposed (PR #{n}) didn't pass the tests, so i'm not "
+                          f"calling it fixed. i've reopened the problem to rethink it.")
+                elif ci.get("merged"):
+                    p["merged"] = True
+                    p["merged_at"] = ci.get("merged_at") or _now_iso()
+                    watch_to = (_parse_ts(p["merged_at"]) or _now()) + timedelta(hours=DEPLOY_WATCH_HOURS)
+                    p["deploy_watch_until"] = watch_to.strftime(_TS_FMT)
+                    _send(f"the fix (PR #{n}) merged. i won't call it fixed until i've watched "
+                          f"for the problem coming back over the next day.")
+                elif concl == "success" and not p.get("notified"):
+                    p["notified"] = True
+                    _send(f"CI is green on the fix (PR #{n}). it's ready for your merge whenever "
+                          f"you want; i can't merge it myself.")
         # External code review (Cursor Bugbot auto-reviews every open PR): surface NEW
         # findings so the owner sees them without asking and Argo can address them in
-        # chat. Deduped by comment id so a re-poll never repeats a finding. Best-effort
-        # -- any failure here must never block the CI loop above.
+        # chat. Runs while the PR is open -- even after a CI failure, since the PR can
+        # still gather new findings. Deduped by comment id; best-effort (a failure here
+        # must never block the CI loop above).
         try:
             seen = p.get("seen_review_ids") or []
             rev = _check_reviews(n, seen)
@@ -447,6 +453,7 @@ def verify_open_proposals():
             if fresh:
                 ids = [f["id"] for f in fresh if f.get("id") is not None]
                 p["seen_review_ids"] = sorted(set(seen) | set(ids))
+                changed = True
                 _send(_review_text(n, fresh))
         except Exception:
             log.error("verify: review surfacing failed for PR #%s", n, exc_info=True)

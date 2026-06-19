@@ -118,6 +118,19 @@ class VerifyConfirmTest(unittest.TestCase):
         self.assertEqual(captured["seen"], [11])               # baseline threaded through
         self.assertFalse(any("cursorbot" in s for s in self.sent))
 
+    def test_ci_failed_pr_still_surfaces_new_review(self):
+        # A parked (ci_failed) but still-open PR must still get NEW bot findings
+        # surfaced, and its settled CI verdict must NOT be re-polled.
+        self._set_proposal(ci_failed=True)
+        rev = {"summary": "found 1", "findings": [
+            {"id": 21, "path": "src/y.py", "line": 1, "body": "resource leak"}]}
+        ci_mock = mock.Mock(side_effect=AssertionError("CI re-polled on a parked PR"))
+        with mock.patch.object(dg, "_check_ci", ci_mock), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        self.assertTrue(any("cursorbot" in s for s in self.sent))
+        self.assertEqual(self._proposal()["seen_review_ids"], [21])
+
     # --- confirm_deployed ---------------------------------------------------
 
     def test_no_recurrence_resolves_belief(self):
