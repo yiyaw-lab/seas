@@ -131,6 +131,20 @@ class VerifyConfirmTest(unittest.TestCase):
         self.assertTrue(any("cursorbot" in s for s in self.sent))
         self.assertEqual(self._proposal()["seen_review_ids"], [21])
 
+    def test_merged_pr_in_watch_still_surfaces_review(self):
+        # A merged PR in its post-deploy watch window must still retry undelivered
+        # findings: deploy_watch_until guards the CI state machine, not reviews.
+        self._set_proposal(merged=True, merged_at="2000-01-01T00:00:00Z",
+                           deploy_watch_until="2999-01-01T00:00:00Z")
+        rev = {"summary": "x", "findings": [
+            {"id": 41, "path": "src/q.py", "line": 1, "body": "a leak"}]}
+        ci_mock = mock.Mock(side_effect=AssertionError("CI re-polled on a watched PR"))
+        with mock.patch.object(dg, "_check_ci", ci_mock), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        self.assertTrue(any("cursorbot" in s for s in self.sent))
+        self.assertEqual(self._proposal()["seen_review_ids"], [41])
+
     def test_send_failure_does_not_mark_seen(self):
         # If Telegram delivery fails, the finding must NOT be marked seen, so a
         # later poll retries it (at-least-once) rather than dropping it forever.
