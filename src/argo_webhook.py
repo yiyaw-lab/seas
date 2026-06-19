@@ -1370,6 +1370,9 @@ def handle_update(update):
         elif pid and state == "scored":
             msg = (f"Logged {pid} as shipped. I'd already graded my call on this "
                    "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first, then tell me SHIPPED.")
         elif pid:
             msg = (f"Logged {pid} as shipped. I don't have a live call of my own "
                    "to grade on this one.")
@@ -1388,6 +1391,9 @@ def handle_update(update):
         elif pid and state == "scored":
             msg = (f"Logged {pid} as dropped. I'd already graded my call on this "
                    "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first if you want me to track it.")
         elif pid:
             msg = (f"Logged {pid} as dropped. I don't have a live call of my own "
                    "to grade on this one.")

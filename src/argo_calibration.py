@@ -68,7 +68,12 @@ def compute_calibration(projects):
     for p in (projects or []):
         if not isinstance(p, dict):
             continue
-        verdict = p.get("verdict")
+        # Key on judgment_verdict (the class the bet's predictions are BOUND to and
+        # grade), NOT the display `verdict`: the two can diverge if a verdict-flip's void
+        # fails or a terminal bet is re-rehearsed, and calibration must agree with what
+        # actually moved the belief. A bet with no judgment_verdict (KILL, or grounding
+        # that never recorded) has no graded judgment, so it is correctly excluded.
+        verdict = p.get("judgment_verdict")
         # Only a committed bet (selected_at) of a graded verdict class counts; a
         # rehearsed-but-never-selected bet was never bet on, so it has no outcome.
         if verdict not in _GRADED_VERDICTS or not p.get("selected_at"):

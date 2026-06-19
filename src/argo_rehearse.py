@@ -498,6 +498,15 @@ def _record_judgment_prediction(entry, verdict):
     pid = entry.get("id")
     fields = argo_predictions.JUDGMENT_PRED_FIELDS
     bound = [entry[f] for f in fields if entry.get(f)]
+    # Freeze grounding once the bet has reached a terminal outcome. A re-rehearsal of an
+    # already shipped/dropped bet must NOT void, rebind, or newly record predictions: the
+    # outcome already happened under the verdict in effect when it did, so rebinding would
+    # re-grade one real outcome against a fresh belief (double-count), and you cannot
+    # predict an outcome that already landed. The displayed verdict (entry['verdict'], set
+    # by the caller) still updates; the grading class (judgment_verdict) stays put, and the
+    # calibration keys on judgment_verdict so it stays coherent with what actually graded.
+    if entry.get("shipped") or entry.get("shipped_at") or entry.get("dropped"):
+        return entry.get("judgment_prediction_id")
     # A verdict change retires the old predictions: they grade the wrong (or, for KILL,
     # a now-refused) verdict-class belief. Void BOTH atomically before recording. If the
     # void fails (store error), cancel_many's single save means NOTHING was voided, so we

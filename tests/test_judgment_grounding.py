@@ -114,10 +114,14 @@ class JudgmentGroundingTest(unittest.TestCase):
             self.assertIsNotNone(pred.get_prediction(e[field])["armed_at"], field)
 
     def test_mattered_belief_scores_up_on_high_energy(self):
-        # shipped + high energy: the "mattered" outcome is gradeable and True
-        self._seed_project(shipped=True, energy=pred.MATTERED_ENERGY_MIN + 2)
+        # high energy, not yet shipped: rehearse records the pair, select arms it, then
+        # the bet ships -> the energy-graded "mattered" outcome is gradeable and True
+        self._seed_project(energy=pred.MATTERED_ENERGY_MIN + 2)
         reh._stamp_project("P-001", "SHIP", self.bp)
         argo_rating.select_latest_project(self.projects)  # arms both
+        log = argo_store.load_json(self.projects, [])     # the bet ships
+        log[0]["shipped"] = True
+        argo_store.save_json(self.projects, log)
         items = pred._load()  # backdate the mattered pred so it is due
         matter_id = self._entry()["judgment_mattered_prediction_id"]
         matter = next(p for p in items if p["id"] == matter_id)
@@ -180,10 +184,53 @@ class JudgmentGroundingTest(unittest.TestCase):
 
     # --- review fix: don't claim a grade when no prediction is bound --------
     def test_outcome_on_unrehearsed_project_reports_not_graded(self):
-        self._seed_project()  # never selected/rehearsed -> no judgment prediction
+        # committed (selected) but never rehearsed -> no judgment prediction -> 'none'
+        self._seed_project(selected_at="2026-06-18 10:00 UTC")
         pid, state = argo_rating.set_project_outcome(self.projects, True, "P-001")
-        self.assertEqual(pid, "P-001")
-        self.assertEqual(state, "none")
+        self.assertEqual((pid, state), ("P-001", "none"))
+
+    # --- cursorbot fix: an explicit outcome on an UNCOMMITTED bet is refused --------
+    def test_outcome_on_uncommitted_project_is_refused(self):
+        self._seed_project()                       # exists, NEVER selected
+        reh._stamp_project("P-001", "SHIP", self.bp)  # rehearsed -> has predictions
+        pid, state = argo_rating.set_project_outcome(self.projects, True, "P-001")
+        self.assertEqual((pid, state), ("P-001", "uncommitted"))
+        e = self._entry()
+        self.assertNotIn("shipped", e)             # no ship/drop mark on a non-committed bet
+        self.assertIsNone(                          # predictions stay unarmed -> never grade
+            pred.get_prediction(e["judgment_prediction_id"])["armed_at"])
+
+    # --- cursorbot fix: a bound-but-VOIDED prediction reads 'none', not 'scored' -----
+    def test_outcome_on_voided_prediction_reports_none(self):
+        self._seed_project(selected_at="2026-06-18 10:00 UTC")
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        ship_id = self._entry()["judgment_prediction_id"]
+        pred.cancel(ship_id, "stale binding")       # voided: scored_at set, never graded
+        pid, state = argo_rating.set_project_outcome(self.projects, True, "P-001")
+        self.assertEqual((pid, state), ("P-001", "none"))  # not falsely 'scored'
+
+    # --- cursorbot fix: a verdict flip AFTER grading never re-grades the outcome ------
+    def test_verdict_flip_after_grade_does_not_double_count(self):
+        self._seed_project(energy=pred.MATTERED_ENERGY_MIN + 2)  # high energy, not shipped
+        reh._stamp_project("P-001", "SHIP", self.bp)            # records both preds
+        argo_rating.select_latest_project(self.projects)        # arms both
+        log = argo_store.load_json(self.projects, [])           # the bet ships
+        log[0]["shipped"] = True
+        argo_store.save_json(self.projects, log)
+        items = pred._load()                                    # make both due, then grade
+        for p in items:
+            p["armed_at"] = "2026-05-01T00:00:00Z"
+            p["due"] = "2026-05-15T00:00:00Z"
+        pred._save(items)
+        pred.score_due()                                        # both -> belief 0.50
+        before = {b["id"]: b["confidence"] for b in wm.get_beliefs()}
+        n_preds = len(pred._load())
+        reh._stamp_project("P-001", "REVISE", self.bp)          # flip AFTER grading
+        self.assertEqual(len(pred._load()), n_preds)            # no fresh pair recorded
+        self.assertEqual(self._entry().get("judgment_verdict"), "SHIP")  # grading frozen
+        self.assertEqual(self._entry()["verdict"], "REVISE")    # display still updates
+        self.assertEqual({b["id"]: b["confidence"] for b in wm.get_beliefs()},
+                         before)                                # no double-count
 
     def test_bare_outcome_with_nothing_selected_returns_none(self):
         self._seed_project(shown_at="2026-01-01 00:00 UTC")  # shown, never selected

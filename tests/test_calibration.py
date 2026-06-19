@@ -31,6 +31,8 @@ def _bet(i, verdict="SHIP", shipped=True, energy=None, dropped=False, selected=T
     """A committed, graded project-log entry, shaped like a real one after rehearse +
     SELECT + a SHIPPED/DROPPED grade + an energy rating."""
     e = {"id": f"P-{i:03d}", "text": "a bet", "verdict": verdict}
+    if verdict in ("SHIP", "REVISE"):
+        e["judgment_verdict"] = verdict  # the grading-class flag calibration keys on
     if selected:
         e["selected_at"] = "2026-06-01 10:00 UTC"
     if shipped:
@@ -110,6 +112,25 @@ class ComputeCalibrationTest(unittest.TestCase):
         out = cal.compute_calibration(bets)
         self.assertEqual(out["SHIP"]["rate"], 1.0)
         self.assertEqual(out["REVISE"]["rate"], 0.0)
+
+    def test_keys_on_judgment_verdict_not_display_verdict(self):
+        # If the display verdict diverges from the grading-bound class (a void failure or
+        # a terminal re-rehearse), calibration must follow judgment_verdict -- the class
+        # whose belief actually moves -- so the number can never contradict the grading.
+        bets = [_bet(i, shipped=True, energy=HI) for i in range(N)]  # judgment_verdict=SHIP
+        for b in bets:
+            b["verdict"] = "REVISE"  # display flipped, but judgment_verdict stays SHIP
+        out = cal.compute_calibration(bets)
+        self.assertEqual(set(out), {"SHIP"})  # counted under the GRADING class
+        self.assertEqual(out["SHIP"]["n"], N)
+
+    def test_bet_without_judgment_verdict_excluded(self):
+        # A rehearsed bet whose grounding never recorded (no judgment_verdict) has no
+        # graded judgment -> excluded, even though it has a display verdict + outcome.
+        bets = [_bet(i, shipped=True, energy=HI) for i in range(N)]
+        bets.append({"id": "P-X", "verdict": "SHIP", "selected_at": "2026-06-01 10:00 UTC",
+                     "shipped": True, "energy": HI})  # display verdict but no judgment_verdict
+        self.assertEqual(cal.compute_calibration(bets)["SHIP"]["n"], N)  # P-X excluded
 
     def test_tolerates_empty_and_garbage(self):
         self.assertEqual(cal.compute_calibration(None), {})

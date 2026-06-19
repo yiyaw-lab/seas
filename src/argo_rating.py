@@ -145,14 +145,23 @@ def set_project_outcome(projects_log, shipped, project_id=None):
     Returns (id, state): state is 'pending' (a bound prediction will grade this
     outcome), 'scored' (the bound prediction is already graded and locked -- a later
     correction updates the log but does NOT re-grade the belief, since confidence
-    never moves by assertion), or 'none' (no judgment prediction is bound, e.g. the
-    bet was never rehearsed). (None, 'none') when there is no committed bet."""
+    never moves by assertion), 'none' (no live judgment prediction is bound -- the bet
+    was never rehearsed, or its prediction was voided), or 'uncommitted' (the explicit
+    id names a real bet that was never SELECTed -- SELECT is the commit that starts the
+    clock, so there is nothing to grade and the log is left untouched). (None, 'none')
+    when there is no committed bet to target at all."""
     log = argo_store.load_json(projects_log, None)
     if not log:
         return None, "none"
     target = target_outcome_project(log, project_id)
     if target is None:
         return None, "none"
+    # An outcome grades a COMMITTED bet; SELECT is the commit that arms the clock. A bare
+    # outcome already targets the SELECTED bet (target_outcome_project), but an explicit
+    # SHIPPED/DROPPED P-NNN can name a never-selected bet -- refuse it (no ship/drop mark,
+    # no arming, no grading), so a belief can never move for a bet that was never bet on.
+    if not target.get("selected_at"):
+        return target.get("id"), "uncommitted"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     if shipped:
         target["shipped"] = True
@@ -167,10 +176,14 @@ def set_project_outcome(projects_log, shipped, project_id=None):
     argo_store.save_json(projects_log, log)
     pred_id = target.get("judgment_prediction_id")
     p = argo_predictions.get_prediction(pred_id) if pred_id else None
-    if p is None:
-        return target.get("id"), "none"          # unrehearsed / killed / no pred record
+    if p is None or p.get("voided"):
+        # No LIVE prediction: unrehearsed, no record, or the bound id points at a voided
+        # prediction (a verdict flip retired it). A voided pred carries scored_at but
+        # never graded a belief, so it must read as 'none' (not 'scored'); otherwise the
+        # human outcome would be falsely reported locked and skip re-arming.
+        return target.get("id"), "none"
     if p.get("scored_at"):
-        return target.get("id"), "scored"         # already graded and locked
+        return target.get("id"), "scored"         # genuinely graded and locked
     # Bound + unscored: ensure both judgment predictions are armed so the reported
     # "pending" grade actually happens. arm() is idempotent (a no-op when SELECT already
     # armed them); this also recovers the rare case where a SELECT-time arm was lost to
