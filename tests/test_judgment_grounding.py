@@ -354,6 +354,26 @@ class JudgmentGroundingTest(unittest.TestCase):
         argo_rating.set_project_outcome(self.projects, True)
         self.assertIsNotNone(pred.get_prediction(matter_id)["armed_at"])
 
+    # --- cursorbot fix: a project-log save failure leaves predictions UNARMED ---------
+    def test_save_failure_during_stamp_leaves_predictions_unarmed(self):
+        # The predictions store and the project log are two separate writes. If the
+        # project-log save fails after predictions are recorded, the binding is lost on
+        # disk -- the predictions MUST be left unarmed (inert), never armed orphans that
+        # a later re-rehearse would double-grade.
+        self._seed_project(selected=True, selected_at="2026-06-18 10:00 UTC")
+        real_save = argo_store.save_json
+
+        def fail_project_log(path, data):
+            if str(path) == str(self.projects):
+                raise OSError("disk")     # only the PROJECT log save fails
+            return real_save(path, data)  # the predictions store save still works
+
+        with mock.patch.object(argo_store, "save_json", side_effect=fail_project_log):
+            reh._stamp_project("P-001", "SHIP", self.bp)  # must not raise
+        preds = pred._load()
+        self.assertTrue(preds)                                   # recorded in the store
+        self.assertTrue(all(p["armed_at"] is None for p in preds))  # but never armed
+
     # --- review fix (blocker): a 2nd-record failure leaves NO half-bound entry --------
     def test_partial_record_failure_leaves_no_half_state(self):
         self._seed_project()

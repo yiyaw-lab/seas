@@ -491,8 +491,9 @@ def _record_judgment_prediction(entry, verdict):
     the caller persists it. Idempotent per project while the verdict is unchanged; a
     re-rehearsal that CHANGES the verdict (SHIP<->REVISE, or anything->KILL) voids BOTH
     old predictions first, so a bet always grades the verdict-class it currently holds
-    and a KILL grades nothing. Arms immediately when the project is already SELECTed
-    (the SELECT path rehearses AFTER marking selected); otherwise SELECT arms them.
+    and a KILL grades nothing. Records the predictions UNARMED: the caller arms them only
+    AFTER it durably saves the binding (so a project-log save failure leaves them inert,
+    not orphaned-and-armed); a standalone REHEARSE is armed later by SELECT.
     Best-effort: a store error must never sink the rehearsal (it already happened).
     Returns the project_shipped prediction id, or None."""
     pid = entry.get("id")
@@ -565,21 +566,11 @@ def _record_judgment_prediction(entry, verdict):
         log.warning("rehearse: judgment predictions not recorded for %s",
                     pid, exc_info=True)
         return None
-    # Arm each bound prediction INDEPENDENTLY and best-effort. Arming is a separate,
-    # idempotent, RECOVERABLE concern from the (now-atomic) binding: a store hiccup on
-    # one arm must not block the other, unwind the already-persisted binding, or sink the
-    # rehearsal -- the next SELECT or SHIPPED/DROPPED touch re-arms via
-    # argo_rating._arm_judgment_predictions. Per-prediction net so a partial failure can
-    # never leave the pair half-armed and stuck; broad because this runs in the chat-turn
-    # thread, which must not crash.
-    if entry.get("selected"):
-        for f in fields:
-            if entry.get(f):
-                try:
-                    argo_predictions.arm(entry[f])
-                except Exception:
-                    log.warning("rehearse: could not arm %s for %s now (re-arms on the "
-                                "next select/outcome)", entry[f], pid, exc_info=True)
+    # NOTE: arming is deliberately NOT done here. The caller (_stamp_project) arms only
+    # AFTER it durably saves the project log with these bindings, so a project-log save
+    # failure leaves the predictions UNARMED (inert -- score_due never grades an unarmed
+    # pred) instead of orphaning an ARMED pred the on-disk entry no longer references,
+    # which a later re-rehearse could then double-grade.
     return entry.get("judgment_prediction_id")
 
 
@@ -591,19 +582,41 @@ def _stamp_project(project_id, verdict, blueprint_path):
     projects = argo_store.load_json(PROJECTS_LOG, None)
     if not isinstance(projects, list):
         return
+    stamped = None
     for entry in projects:
         if entry.get("id") == project_id:
             entry["rehearsed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             entry["verdict"] = verdict
             entry["blueprint_path"] = str(blueprint_path.relative_to(ROOT))
-            # Ground the verdict: record/arm the belief-bound prediction. Mutates
-            # entry with judgment_prediction_id; the save below persists it.
+            # Ground the verdict: record/void the belief-bound predictions. Mutates entry
+            # with the bindings (UNARMED) -- the save below persists them, and only then
+            # do we arm.
             _record_judgment_prediction(entry, verdict)
+            stamped = entry
             break
     try:
         argo_store.save_json(PROJECTS_LOG, projects)
     except OSError:
-        pass
+        # The bindings are NOT on disk. Leave the predictions UNARMED: an unarmed pred is
+        # inert (score_due never grades it), so a lost binding under-grounds the bet (it
+        # re-grounds on a successful re-rehearse) rather than orphaning an armed pred that
+        # would double-grade. Arming below is skipped by returning here.
+        log.warning("rehearse: could not persist judgment bindings for %s; leaving "
+                    "predictions unarmed", project_id, exc_info=True)
+        return
+    # Binding durably saved: now arm the committed bet's predictions. Per prediction and
+    # best-effort (idempotent; the next select/outcome touch re-arms via
+    # argo_rating._arm_judgment_predictions if one fails); broad net because this runs in
+    # the chat-turn thread, which must not crash on a store hiccup.
+    if stamped is not None and stamped.get("selected"):
+        for f in argo_predictions.JUDGMENT_PRED_FIELDS:
+            if stamped.get(f):
+                try:
+                    argo_predictions.arm(stamped[f])
+                except Exception:
+                    log.warning("rehearse: could not arm %s for %s now (re-arms on the "
+                                "next select/outcome)", stamped[f], project_id,
+                                exc_info=True)
 
 
 def _load_project(project_id):
