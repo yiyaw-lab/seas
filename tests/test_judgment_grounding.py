@@ -123,6 +123,36 @@ class JudgmentGroundingTest(unittest.TestCase):
         self.assertEqual(pred.get_prediction(matter_id)["metric"]["kind"],
                          "project_mattered")
 
+    # --- cursorbot fix: a missing judgment_verdict must NOT trigger a spurious void ----
+    def test_missing_judgment_verdict_does_not_trigger_void(self):
+        belief = wm.add_belief(reh._VERDICT_BELIEFS["SHIP"]["shipped"])
+        ship_id = pred.record(belief, "claim",
+                              {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        pred.arm(ship_id)
+        armed_at = pred.get_prediction(ship_id)["armed_at"]
+        # bound row WITHOUT judgment_verdict (anomalous / pre-flag); same-class rehearse
+        self._seed_project(verdict="SHIP", judgment_prediction_id=ship_id,
+                           rehearsed_at="2026-06-18 09:00")
+        reh._stamp_project("P-001", "SHIP", self.bp)
+        p = pred.get_prediction(ship_id)
+        self.assertFalse(p.get("voided"))                 # not voided (no real flip)
+        self.assertEqual(p["armed_at"], armed_at)          # armed clock preserved
+        e = self._entry()
+        self.assertEqual(e["judgment_prediction_id"], ship_id)          # same pred kept
+        self.assertEqual(e["judgment_verdict"], "SHIP")                 # flag backfilled
+        self.assertIsNotNone(e.get("judgment_mattered_prediction_id"))  # mattered backfilled
+
+    def test_kill_on_missing_judgment_verdict_still_voids(self):
+        # KILL refuses the bet, so any bound prediction is retired -- even on a row with
+        # no judgment_verdict (the void fires on the refused verdict, not on a flip).
+        belief = wm.add_belief(reh._VERDICT_BELIEFS["SHIP"]["shipped"])
+        ship_id = pred.record(belief, "claim",
+                              {"kind": "project_shipped", "project_id": "P-001"}, 14)
+        self._seed_project(verdict="SHIP", judgment_prediction_id=ship_id)  # no verdict flag
+        reh._stamp_project("P-001", "KILL", self.bp)
+        self.assertTrue(pred.get_prediction(ship_id)["voided"])     # retired
+        self.assertNotIn("judgment_prediction_id", self._entry())   # binding cleared
+
     def test_select_arms_both_predictions(self):
         self._seed_project()
         reh._stamp_project("P-001", "SHIP", self.bp)  # both unarmed (not selected)

@@ -515,10 +515,19 @@ def _record_judgment_prediction(entry, verdict):
     # recording duplicates (which would double-count one outcome across two beliefs).
     # Reusing the stale bindings degrades to at-worst the wrong verdict-class, never a
     # partial void or a double move.
-    if bound and entry.get("judgment_verdict") != verdict:
+    # Void the old predictions when EITHER (a) a known verdict-class flip retires them
+    # (SHIP<->REVISE), or (b) the new verdict is refused (KILL/unknown), so the bet keeps
+    # no grounding. A MISSING judgment_verdict must NOT itself count as a flip (None !=
+    # "SHIP" would otherwise void a correct-class prediction and discard its armed clock
+    # with no real change) -- a same-class re-rehearse of such a row falls through to
+    # backfill the missing legs and stamp the verdict instead.
+    old_verdict = entry.get("judgment_verdict")
+    is_flip = old_verdict is not None and old_verdict != verdict
+    is_refused = verdict not in _VERDICT_BELIEFS
+    if bound and (is_flip or is_refused):
         try:
             argo_predictions.cancel_many(
-                bound, f"re-rehearsed {entry.get('judgment_verdict')} -> {verdict}")
+                bound, f"re-rehearsed {old_verdict} -> {verdict}")
             for f in fields:
                 entry.pop(f, None)
             entry.pop("judgment_verdict", None)
