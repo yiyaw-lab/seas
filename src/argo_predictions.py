@@ -29,6 +29,10 @@ log = get_logger(__name__)
 # Re-exported so tests patch the module global (mock.patch.object); helpers read the
 # bare name at call time so the override bites.
 PREDICTIONS_PATH = argo_paths.PREDICTIONS_PATH
+# Re-exported for the same patch-the-global reason as PREDICTIONS_PATH: the
+# project-outcome metric reads the project log at score time, and tests override
+# this to a tmp path (mock.patch.object(argo_predictions, "PROJECTS_LOG", ...)).
+PROJECTS_LOG = argo_paths.PROJECTS_LOG
 
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -108,7 +112,40 @@ def get_prediction(pred_id):
     return next((x for x in _load() if x.get("id") == pred_id), None)
 
 
+def cancel(pred_id, reason=""):
+    """Void an armed prediction so score_due never grades it -- used when the premise
+    that recorded it is retracted (e.g. a re-rehearsal flips SHIP -> KILL, so the bet
+    must no longer move the verdict-class belief). Marks it scored with a null
+    outcome; the belief is left untouched. Idempotent. Returns it, or None."""
+    items = _load()
+    p = next((x for x in items if x.get("id") == pred_id), None)
+    if p is None or p.get("scored_at"):
+        return None
+    p["scored_at"] = _now_iso()
+    p["correct"] = None
+    p["voided"] = True
+    p["void_reason"] = reason
+    _save(items)
+    log.info("prediction %s voided: %s", pred_id, reason or "(no reason)")
+    return p
+
+
 # --- metric registry: only machine-checkable kinds ---------------------------
+
+# Recognized metric kinds: a None verdict for one of these is an expected "no
+# outcome yet" pending state (logged quietly), not an unknown metric (which warns).
+_KNOWN_KINDS = ("incident_absent", "project_shipped")
+
+def _project_entry(project_id):
+    """The project-log entry for `project_id`, or None. Reads the bare PROJECTS_LOG
+    name at call time so a test override of the global bites (mirrors _load)."""
+    if not project_id:
+        return None
+    items = argo_store.load_json(PROJECTS_LOG, None)
+    if not isinstance(items, list):
+        return None
+    return next((p for p in items if p.get("id") == project_id), None)
+
 
 def _evaluate(metric, armed_at):
     """True/False verdict for a metric, or None when the kind isn't machine-checkable
@@ -117,6 +154,12 @@ def _evaluate(metric, armed_at):
     v1 kinds (incident-ledger backed):
       {"kind": "incident_absent", "key": "<cluster key>"}        -- that exact cluster
       {"kind": "incident_absent", "incident_kind": "<kind>"}     -- any cluster of kind
+
+    v2 kinds (project-log backed, HUMAN-graded -- the build-decision loop):
+      {"kind": "project_shipped", "project_id": "P-NNN"}
+          a SHIP/REVISE verdict's bet: True once the human marks it shipped, False
+          once they mark it dropped, None while unreported. The None is the honest
+          abstention -- an unreported bet is unknown, never a fabricated miss.
     """
     kind = (metric or {}).get("kind")
     if kind == "incident_absent":
@@ -126,6 +169,15 @@ def _evaluate(metric, armed_at):
         ik = metric.get("incident_kind")
         if ik:
             return not argo_incidents.seen_since(ik, armed_at)
+    if kind == "project_shipped":
+        entry = _project_entry(metric.get("project_id"))
+        if entry is None:
+            return None
+        if entry.get("shipped") or entry.get("shipped_at"):
+            return True
+        if entry.get("dropped"):
+            return False
+        return None
     return None
 
 
@@ -145,8 +197,15 @@ def score_due(notify=None):
             continue
         verdict = _evaluate(p.get("metric"), p["armed_at"])
         if verdict is None:
-            log.warning("predictions: metric on %s not machine-checkable; leaving "
-                        "unscored", p.get("id"))
+            kind = (p.get("metric") or {}).get("kind")
+            if kind in _KNOWN_KINDS:
+                # Known kind, outcome not in yet (e.g. a bet not yet reported
+                # shipped/dropped). Expected -- stay quiet and re-check next run.
+                log.debug("predictions: %s (%s) has no outcome yet; leaving "
+                          "unscored", p.get("id"), kind)
+            else:
+                log.warning("predictions: metric on %s not machine-checkable; "
+                            "leaving unscored", p.get("id"))
             continue
         p["scored_at"] = now
         p["correct"] = bool(verdict)
