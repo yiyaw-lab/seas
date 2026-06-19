@@ -131,6 +131,17 @@ class VerifyConfirmTest(unittest.TestCase):
         self.assertTrue(any("cursorbot" in s for s in self.sent))
         self.assertEqual(self._proposal()["seen_review_ids"], [21])
 
+    def test_send_failure_does_not_mark_seen(self):
+        # If Telegram delivery fails, the finding must NOT be marked seen, so a
+        # later poll retries it (at-least-once) rather than dropping it forever.
+        rev = {"summary": "x", "findings": [
+            {"id": 31, "path": "src/z.py", "line": 2, "body": "a bug"}]}
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev), \
+             mock.patch.object(dg, "_send", return_value=False):
+            dg.verify_open_proposals()
+        self.assertEqual(self._proposal().get("seen_review_ids", []), [])
+
     # --- confirm_deployed ---------------------------------------------------
 
     def test_no_recurrence_resolves_belief(self):

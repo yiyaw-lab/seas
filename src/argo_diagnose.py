@@ -450,11 +450,13 @@ def verify_open_proposals():
             seen = p.get("seen_review_ids") or []
             rev = _check_reviews(n, seen)
             fresh = (rev or {}).get("findings") or []
-            if fresh:
+            if fresh and _send(_review_text(n, fresh)):
+                # Mark findings seen only AFTER delivery succeeds, so a Telegram
+                # hiccup retries them next poll instead of silently dropping them
+                # (at-least-once: a rare re-send beats a lost finding).
                 ids = [f["id"] for f in fresh if f.get("id") is not None]
                 p["seen_review_ids"] = sorted(set(seen) | set(ids))
                 changed = True
-                _send(_review_text(n, fresh))
         except Exception:
             log.error("verify: review surfacing failed for PR #%s", n, exc_info=True)
     if changed:
