@@ -302,7 +302,7 @@ experiments/  SEAS-00x experiment cards
 | `seas-findings.yml` | Manual (`workflow_dispatch`) | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. |
 
 > Schedules are data, not code — add or change a delivery by editing `data/schedule.json`.
-> No workflow file needs to change. Argo can propose schedule edits via its Contents-only PR token.
+> No workflow file needs to change. Argo can propose schedule edits via its propose-only token (Contents + Pull-requests).
 >
 > The volume-bound commands (self-diagnosis, weekly reflection, frontier-evolution,
 > and the capability-gap proposer) run in the webhook's **in-process scheduler**
