@@ -32,6 +32,12 @@ seasar-landing.html
 proof-draft.html
 docs/DESIGN_dispatch_to_coder.md
 
+# Generated strategy briefs live here and stay local (like VISION/ROADMAP); the
+# two pre-existing plan docs remain tracked.
+docs/plans/
+!docs/plans/ARGO_V2_MIGRATION.md
+!docs/plans/PHASE_1_PLAN.md
+
 # Investor / pitch letters and internal HTML build reports
 docs/build-log/2026-06-05-release-letter.md
 docs/build-log/*.html
