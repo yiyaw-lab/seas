@@ -123,6 +123,14 @@ def _check_ci(pr_number):
     return argo_mcp_server._check_proposal_ci(pr_number)
 
 
+def _check_reviews(pr_number, seen_ids):
+    """Read external review-bot findings on a PR via the MCP server helper, skipping
+    comment ids already surfaced. Returns {summary, findings}. Lazy import keeps the
+    no-proposals path light."""
+    import argo_mcp_server
+    return argo_mcp_server._check_proposal_reviews(pr_number, seen_ids)
+
+
 # --- proposal ledger --------------------------------------------------------
 
 def _load_proposals():
@@ -145,6 +153,7 @@ def append_proposal(pr_number, url, belief_id, incident_key, head_sha=None):
         "ci_conclusion": None, "merged": False, "state": "open", "head_sha": head_sha,
         "merged_at": None, "deploy_watch_until": None, "notified": False,
         "ci_failed": False, "resolved": False, "last_checked": None,
+        "seen_review_ids": [],
     })
     _save_proposals(items)
     return items[-1]
@@ -359,6 +368,31 @@ def _fix_text(cluster, diagnosis, suggestion):
             f"can't merge it myself.")
 
 
+def _sanitize(text):
+    """Run external (bot-authored) text through the webhook's canonical plain-text
+    sanitizer so a surfaced finding honors Argo's no-markdown / no-em-dash output
+    rule. Lazy import avoids a module-load cycle with argo_webhook."""
+    import argo_webhook
+    return argo_webhook._clean_reply(text or "")
+
+
+def _first_line(text):
+    """First non-empty line of a finding body."""
+    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+
+
+def _review_text(pr_number, findings):
+    """One plain-text Telegram line summarizing new code-review bot findings. Each
+    finding head is sanitized + trimmed since it carries raw bot markdown."""
+    count = len(findings)
+    heads = "; ".join(_sanitize(_first_line(f.get("body")))[:140] for f in findings[:3])
+    more = f" (and {count - 3} more)" if count > 3 else ""
+    plural = "s" if count != 1 else ""
+    return (f"cursorbot reviewed PR #{pr_number} and flagged {count} thing{plural}: "
+            f"{heads}{more}. reply and i'll take a pass at addressing them, or tell "
+            f"me to leave them.")
+
+
 # --- verify + confirm (closing the loop on proposed fixes) ------------------
 
 def verify_open_proposals():
@@ -402,6 +436,20 @@ def verify_open_proposals():
             p["notified"] = True
             _send(f"CI is green on the fix (PR #{n}). it's ready for your merge whenever "
                   f"you want; i can't merge it myself.")
+        # External code review (Cursor Bugbot auto-reviews every open PR): surface NEW
+        # findings so the owner sees them without asking and Argo can address them in
+        # chat. Deduped by comment id so a re-poll never repeats a finding. Best-effort
+        # -- any failure here must never block the CI loop above.
+        try:
+            seen = p.get("seen_review_ids") or []
+            rev = _check_reviews(n, seen)
+            fresh = (rev or {}).get("findings") or []
+            if fresh:
+                ids = [f["id"] for f in fresh if f.get("id") is not None]
+                p["seen_review_ids"] = sorted(set(seen) | set(ids))
+                _send(_review_text(n, fresh))
+        except Exception:
+            log.error("verify: review surfacing failed for PR #%s", n, exc_info=True)
     if changed:
         _save_proposals(items)
 

@@ -82,6 +82,42 @@ class VerifyConfirmTest(unittest.TestCase):
         self.assertFalse(b["refutations"])                    # no fabricated verdict
         self.assertFalse(self._proposal()["ci_failed"])
 
+    # --- external review surfacing (Cursor Bugbot) -------------------------
+
+    _OPEN_CI = {"merged": False, "state": "open", "merged_at": None,
+                "head_sha": "sha1", "ci_conclusion": "pending"}
+
+    def test_new_bot_review_is_surfaced(self):
+        # Body carries raw markdown + an em dash; the surfaced text must be sanitized
+        # (Argo's plain-text output rule), and the comment id recorded as seen.
+        rev = {"summary": "found 1 potential issue", "findings": [
+            {"id": 11, "path": "src/x.py", "line": 5,
+             "body": "possible null deref — see **here**"}]}
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        msg = next(s for s in self.sent if "cursorbot" in s)
+        self.assertIn("PR #42", msg)
+        self.assertNotIn("—", msg)        # em dash stripped
+        self.assertNotIn("**", msg)       # markdown stripped
+        self.assertEqual(self._proposal()["seen_review_ids"], [11])
+
+    def test_seen_bot_finding_not_resurfaced(self):
+        # The stored seen set is threaded to _check_reviews; with no fresh findings
+        # back, no new Telegram message goes out (re-poll is silent).
+        self._set_proposal(seen_review_ids=[11])
+        captured = {}
+
+        def fake_reviews(n, seen):
+            captured["seen"] = seen
+            return {"summary": "no new issues", "findings": []}
+
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", side_effect=fake_reviews):
+            dg.verify_open_proposals()
+        self.assertEqual(captured["seen"], [11])               # baseline threaded through
+        self.assertFalse(any("cursorbot" in s for s in self.sent))
+
     # --- confirm_deployed ---------------------------------------------------
 
     def test_no_recurrence_resolves_belief(self):

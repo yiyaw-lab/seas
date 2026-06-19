@@ -1419,6 +1419,88 @@ def _check_proposal_ci(pr_number):
     return out
 
 
+# External code-review bots whose PR findings Argo surfaces to the owner. Matched
+# by substring on the GitHub login (raw REST reports "cursor[bot]"; the gh CLI
+# normalizes it to "cursor"), so one entry covers both forms.
+_REVIEW_BOT_LOGINS = ("cursor",)
+
+
+def _is_review_bot(login):
+    lo = (login or "").lower()
+    return any(b in lo for b in _REVIEW_BOT_LOGINS)
+
+
+def _strip_html_comments(text):
+    """Bugbot embeds metadata in <!-- ... --> blocks; drop them for readability."""
+    import re as _re
+    return _re.sub(r"<!--.*?-->", "", text or "", flags=_re.DOTALL).strip()
+
+
+def _check_proposal_reviews(pr_number, seen_ids=None):
+    """Read external code-review bot (e.g. Cursor Bugbot) findings on a PR via the
+    propose token -- the sibling of _check_proposal_ci. Returns
+    {"summary": str|None, "findings": [{id, path, line, body}]}. With seen_ids given,
+    only inline findings whose comment id is NOT already in it are returned, so a
+    re-poll never re-surfaces the same finding; the summary is always the latest bot
+    review body. Best-effort: an unreadable PR returns empty, never raises."""
+    seen = set(seen_ids or [])
+    out = {"summary": None, "findings": []}
+    ok, reviews = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/pulls/{pr_number}/reviews?per_page=100", None)
+    if ok and isinstance(reviews, list):
+        # Reviews are oldest-first; take the newest bot review with a NON-empty body.
+        # A re-review can post an inline-only review whose body is empty, which must
+        # not blank out an earlier real summary.
+        for r in reversed(reviews):
+            if _is_review_bot((r.get("user") or {}).get("login")):
+                body = _strip_html_comments(r.get("body"))
+                if body:
+                    out["summary"] = body
+                    break
+    ok2, comments = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/pulls/{pr_number}/comments?per_page=100", None)
+    if ok2 and isinstance(comments, list):
+        for c in comments:
+            cid = c.get("id")
+            if cid in seen or not _is_review_bot((c.get("user") or {}).get("login")):
+                continue
+            body = _strip_html_comments(c.get("body"))
+            if body:
+                out["findings"].append({
+                    "id": cid, "path": c.get("path"),
+                    "line": c.get("line") or c.get("original_line"), "body": body})
+    return out
+
+
+@mcp.tool()
+@with_deadline(20)  # two short GitHub GETs
+def read_pr_review(pr: str) -> str:
+    """Read external code-review bot findings (e.g. Cursor Bugbot) on one of your
+    open PRs, so you can view and address them. `pr` is the PR number or its URL.
+    Returns the bot's summary plus each inline finding (file:line and the comment).
+    Use when asked about a PR's review comments, or to act on Bugbot's feedback."""
+    import re as _re
+    s = str(pr).strip()
+    # Prefer the /pull/<n> segment of a URL; fall back to a bare "42" or "#42".
+    # A plain \d+ would grab the first digit run, wrong for an org/repo with digits.
+    m = _re.search(r"/pull/(\d+)", s) or _re.search(r"^#?(\d+)$", s)
+    if not m:
+        return "Give me the PR number or its URL."
+    n = int(m.group(1))
+    data = _check_proposal_reviews(n)
+    summary, findings = data["summary"], data["findings"]
+    if not summary and not findings:
+        return (f"No code-review bot comments on PR #{n} yet. Bugbot runs a few "
+                f"minutes after a PR opens, and only reviews open PRs.")
+    lines = [f"Code review on PR #{n}:"]
+    if summary:
+        lines.append(summary)
+    for f in findings:
+        loc = f"{f['path']}:{f['line']}" if f.get("path") else "general"
+        lines.append(f"- [{loc}] {f['body']}")
+    return "\n".join(lines)
+
+
 _AUTHOR_SYSTEM = ("You are Argo, writing a minimal, correct fix for one of your own "
                   "recurring bugs. You draft a PR a human reviews; you never merge.")
 _AUTHOR_PROMPT = (
