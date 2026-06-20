@@ -1355,6 +1355,22 @@ def handle_update(update):
                 f"Couldn't rehearse that ({type(exc).__name__}). Try again in a sec.")
         return
 
+    # RECEIPTS gate (F5): surface Argo's graded track record -- scored predictions
+    # (held vs missed) plus the SHIP/REVISE calibration over committed bets. A PULL
+    # command (the user asks), deterministic and upstream of the model like SELECT/
+    # REHEARSE, so it reads the same volume stores the grader writes in THIS process
+    # and never depends on the LLM choosing to cite them. Matched on the exact word or
+    # the natural phrase "TRACK RECORD" so casual prose doesn't hijack a sentence.
+    if word == "RECEIPTS" or word == "TRACK RECORD":
+        try:
+            import argo_receipts
+            send_telegram.send_message(argo_receipts.render_receipts())
+        except Exception as exc:
+            send_telegram.send_message(
+                f"Couldn't pull my track record just now ({type(exc).__name__}). "
+                "Try again in a sec.")
+        return
+
     # SHIPPED / DROPPED gate: the human grades the outcome of a committed bet,
     # closing the judgment loop. The dated prediction recorded when this bet was
     # rehearsed is scored against this on the daily score_due run -- a shipped bet
