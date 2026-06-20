@@ -134,8 +134,14 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
     Idempotent across runs: a high-watermark (the count of turns already mined,
     persisted to the volume-backed WATERMARK_PATH) gates the scan to turns appended
     since last time, so re-running over the same log records ZERO new incidents and
-    counts don't inflate / resolved clusters don't reopen. Bounded to the most recent
-    `scan_turns` of those new turns so the miner stays cheap.
+    counts don't inflate / resolved clusters don't reopen.
+
+    Catches up oldest-first: each run scans the OLDEST `scan_turns` turns not yet
+    mined (`[watermark : watermark+scan_turns]`) and advances the watermark by ONLY
+    what it scanned -- never straight to the log end. So a backlog larger than
+    scan_turns (a burst, or downtime) is drained over successive runs with NOTHING
+    permanently skipped and nothing re-mined, while per-run work stays capped at
+    scan_turns (which bounds a one-time huge first-run / post-downtime catch-up).
 
     Precision-biased: only anchored correction/frustration phrases match, so a
     clean transcript records nothing. Returns the number of record_incident calls
@@ -157,13 +163,16 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
             # shrunk under us, so the stored offset no longer points at the same
             # turns. Re-mine from 0 (record_incident's cluster rollup bounds any
             # re-count) rather than treat the rebuilt log's fresh turns as mined.
-            watermark = 0
+            start = 0
         else:
-            watermark = stored
-        # New turns are those after the watermark; still cap the scan to the most
-        # recent `scan_turns` of them so a long backlog stays cheap.
-        start = max(watermark, total - scan_turns)
-        turns = all_turns[start:]
+            start = stored
+        # Scan the OLDEST unmined slice, capped at `scan_turns`. We advance the
+        # watermark by ONLY what we scan (`end`, below), never straight to `total`:
+        # if a burst/downtime left more than scan_turns unmined, the older backlog in
+        # [end:total] is caught up on the next run(s) -- oldest-first, nothing
+        # permanently skipped, per-run work bounded.
+        end = min(start + scan_turns, total)
+        turns = all_turns[start:end]
         for turn in turns:
             if not isinstance(turn, dict) or not _is_user_turn(turn):
                 continue
@@ -186,9 +195,10 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
                 if argo_incidents.record_incident(
                         kind="chat_weakness", signature=signature, sample=excerpt):
                     recorded += 1
-        # Advance the watermark to the full log length, not just the scanned window:
-        # turns the scan cap skipped are still "past" and must not be re-mined later.
-        _write_watermark(total)
+        # Advance the watermark by ONLY what we scanned (the oldest-unmined slice end),
+        # never straight to `total`: any backlog still in [end:total] is not yet mined
+        # and must be picked up oldest-first by a later run, not skipped.
+        _write_watermark(end)
         if recorded:
             log.info("chatmine: filed %d chat_weakness incident(s)", recorded)
         return recorded

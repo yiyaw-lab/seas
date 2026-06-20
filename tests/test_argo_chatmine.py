@@ -129,12 +129,55 @@ class ChatMineTest(unittest.TestCase):
         self.chat_path.write_text("{not valid json")
         self.assertEqual(argo_chatmine.mine_chat_log(), 0)
 
-    def test_only_recent_turns_scanned(self):
-        # An old frustration turn pushed out of the scan window is not mined.
+    def test_scan_bounded_to_scan_turns_per_run(self):
+        # One run scans at most `scan_turns` turns (here: the oldest 10), so a
+        # frustration turn BEYOND that window is deferred, not mined this run.
         old = [("Yiya", "no, that's wrong")]
         filler = [("Yiya", "ok"), ("Argo", "sure")] * 40
         self._write_chat(old + filler)
-        self.assertEqual(argo_chatmine.mine_chat_log(scan_turns=10), 0)
+        # The oldest 10 turns hold the single frustration line (index 0): one run
+        # mines exactly that and stops -- it does NOT reach deep into the backlog.
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(scan_turns=10), 1)
+        # The watermark advanced by only the scanned amount, never the full length.
+        self.assertEqual(argo_store.load_json(self.wm_path, {})["mined_turns"], 10)
+
+    def test_backlog_larger_than_scan_turns_is_fully_caught_up_oldest_first(self):
+        # The round-3 fix: when more than `scan_turns` turns arrive since the
+        # watermark, the OLDEST-unmined slice is scanned first and the watermark
+        # advances by only what was scanned -- so a weakness turn buried in the
+        # middle of a big backlog is eventually mined, never permanently skipped.
+        scan = 5
+        # Build a backlog (> scan_turns) with a weakness turn at the START, MIDDLE
+        # and END so a "newest slice only" miner would miss the first two forever.
+        turns = []
+        weakness_positions = (0, 12, 23)
+        for i in range(24):
+            if i in weakness_positions:
+                turns.append(("Yiya", "no, that's wrong"))
+            else:
+                turns.append(("Yiya" if i % 2 == 0 else "Argo", "ok"))
+        self._write_chat(turns)
+        total = len(turns)  # 24
+        # Drive successive daily runs until the watermark reaches the log end.
+        runs = 0
+        while argo_store.load_json(self.wm_path, {}).get("mined_turns", 0) < total:
+            before = argo_store.load_json(self.wm_path, {}).get("mined_turns", 0)
+            argo_chatmine.mine_chat_log(scan_turns=scan)
+            after = argo_store.load_json(self.wm_path, {})["mined_turns"]
+            # Per-run work stays bounded: the watermark advances by at most scan_turns.
+            self.assertLessEqual(after - before, scan)
+            self.assertGreater(after, before)  # always makes forward progress
+            runs += 1
+            self.assertLess(runs, 100)  # guard against a non-advancing loop
+        # Every weakness turn across the WHOLE backlog eventually filed its incident:
+        # 'no, that's wrong' is one signal-kind -> one rolled-up cluster, count == 3.
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["count"], len(weakness_positions))
+        # And nothing is ever re-mined: a final run over the fully-caught-up log
+        # records zero and does not bump the cluster.
+        self.assertEqual(argo_chatmine.mine_chat_log(scan_turns=scan), 0)
+        self.assertEqual(self._weakness_clusters()[0]["count"], len(weakness_positions))
 
     # --- (a) IDEMPOTENCY (negative control): re-mining the same log files nothing --
     # FAILS before the watermark fix (the 2nd pass re-records every still-matching
