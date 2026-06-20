@@ -703,7 +703,7 @@ def main():
                   + " (in .env or the environment).")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
         print("See docs/ARGO_LLM_SETUP.md.")
-        print("\n✅ Observation job ready (no observations generated).\n")
+        print("\n⚠️  No observations generated (no model is configured to run).\n")
         return
 
     # ---- Key present: call the LLM, try runnable models in order. ----
@@ -716,7 +716,7 @@ def main():
             used_model = model
             break
         except Exception as exc:  # API error, bad model, SDK missing, etc.
-            errors.append(str(exc))
+            errors.append(f"{model}: {exc}")
 
     if observations_text is None:
         latest_path.write_text(build_latest(job))
@@ -725,7 +725,7 @@ def main():
         for e in errors:
             print(f"  - {e}")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
-        print("\n✅ Observation job ready (no observations generated).\n")
+        print("\n⚠️  No observations generated (all model calls failed).\n")
         return
 
     results = build_results(observations_text, used_model)
