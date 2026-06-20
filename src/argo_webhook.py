@@ -55,6 +55,7 @@ import argo_http
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_project_state
 import argo_pushes
 import argo_rating
 import argo_reply_context
@@ -172,7 +173,7 @@ def _active_project_line():
     log = argo_store.load_json(PROJECTS_LOG, [])
     if not isinstance(log, list) or not log:
         return ""
-    p = argo_rating.target_project(log)
+    p = argo_project_state.target_project(log)
     # Only a GENUINELY-shown project supports a "currently looking at" claim.
     # target_project falls back to the last log entry when nothing has shown_at
     # (that fallback is the bare-rating-attachment target, not a visibility
@@ -909,19 +910,17 @@ def _llm_reply(chat_id, user_text):
     return reply if reply is not None else "(Argo can't think right now, no API key configured.)"
 
 
-# Rating / project-state helpers live in argo_rating now (one cohesive seam out
-# of this 900-line server). These thin wrappers keep the exact names handle_update
-# and the tests use, and forward PROJECTS_LOG (this module's global) so a test
-# patching wh.PROJECTS_LOG still drives the read/write at call time.
+# Rating ACTIONS live in argo_rating; project-state LOOKUPS (target_project,
+# match_existing_project) live in argo_project_state -- two cohesive seams out of
+# this 900-line server. These thin wrappers keep the exact names handle_update and
+# the tests use, and forward PROJECTS_LOG (this module's global) so a test patching
+# wh.PROJECTS_LOG still drives the read at call time.
 _parse_rating = argo_rating.parse_rating
-
-
-def _target_project(log, project_id=None):
-    return argo_rating.target_project(log, project_id)
+_target_project = argo_project_state.target_project
 
 
 def _match_existing_project(text):
-    return argo_rating.match_existing_project(text, PROJECTS_LOG)
+    return argo_project_state.match_existing_project(text, PROJECTS_LOG)
 
 
 # Re-show intent -> let the model's get_latest_project handle it; do NOT generate
