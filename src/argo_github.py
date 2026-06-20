@@ -81,25 +81,32 @@ def gh_api(path, raw=False):
     return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
 
 
-def gh_read_file(repo, path, max_chars, offset=0, limit=0):
+def gh_read_file(repo, path, max_chars, offset=0, limit=0, ref=None):
     """Read a file from a GitHub repo (allowlist-gated, size-capped). Returns the
     file text or a refusal/error string. Backs the github_read_file MCP tool.
 
     With offset (1-based start line) and/or limit (line count), return just that
     window instead of the whole file -- so a large file can be inspected a span at a
-    time. The result is still capped at max_chars."""
+    time. The result is still capped at max_chars. `ref` pins a branch/sha (so a read
+    can match the branch a later edit is applied against); None reads the default branch."""
     if "/" not in repo:
         return "Refused: repo must be 'owner/name'."
     if not repo_allowed(repo):
         return (f"Refused: '{repo}' is not on Argo's approved repo list "
                 f"({', '.join(sorted(repo_allowlist()))}).")
-    ok, body = gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}", raw=True)
+    api_path = f"/repos/{repo}/contents/{path.lstrip('/')}"
+    if ref:
+        api_path += f"?ref={ref}"
+    ok, body = gh_api(api_path, raw=True)
     if not ok:
         return body
     if offset or limit:
         lines = body.splitlines()
         start = max(0, (offset or 1) - 1)
-        body = "\n".join(lines[start:start + limit] if limit else lines[start:])
+        window = "\n".join(lines[start:start + limit] if limit else lines[start:])
+        # Distinguish an out-of-range window from a genuinely empty file, so a caller
+        # can't mistake a bad offset for "(empty file)".
+        return window[:max_chars] or f"(no lines in that range; file has {len(lines)} lines)"
     return body[:max_chars] or "(empty file)"
 
 

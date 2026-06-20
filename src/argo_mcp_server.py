@@ -370,7 +370,10 @@ def github_read_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> s
     file, pass offset (1-based start line) and limit (line count), e.g. offset=700,
     limit=40. Read a file IN FULL before propose_change (you must resubmit the whole
     file); a windowed read is for looking, or for crafting a propose_edit."""
-    return argo_github.gh_read_file(repo, path, MAX_REPO_READ_CHARS, offset, limit)
+    # Read your OWN repo at the same branch propose_edit applies edits against, so a
+    # snippet you copy as `old` matches what the edit is resolved against.
+    ref = PROPOSE_BASE if repo == PROPOSE_REPO else None
+    return argo_github.gh_read_file(repo, path, MAX_REPO_READ_CHARS, offset, limit, ref)
 
 
 @mcp.tool()
@@ -1282,15 +1285,28 @@ def _path_refusal(path):
     return None
 
 
-def _validate_files(files):
+def _validate_paths_and_count(files):
+    """Count + path safety -- the checks that apply however the contents were produced
+    (a whole-file submit OR a resolved surgical edit)."""
     if len(files) > MAX_PROPOSE_FILES:
         return f"Too many files ({len(files)}); max {MAX_PROPOSE_FILES} per proposal."
-    for p, c in files.items():
-        if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
-            return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
+    for p in files:
         refusal = _path_refusal(p)
         if refusal:
             return refusal
+    return None
+
+
+def _validate_files(files):
+    """Full validation for a whole-file proposal (propose_change): the model submits each
+    file IN FULL, so cap each at MAX_PROPOSE_BYTES to keep the proposal reviewable. (The
+    surgical-edit path caps the EDIT instead, so a small edit to a big file is fine.)"""
+    err = _validate_paths_and_count(files)
+    if err:
+        return err
+    for p, c in files.items():
+        if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
+            return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
     return None
 
 
@@ -1439,17 +1455,23 @@ def _resolve_edits(edits):
         if refusal:
             return None, refusal
         if "old" not in e:
-            # No 'old' = CREATE a new file. Allow it ONLY when we positively confirm the
-            # path is absent (a clean 404). Any 2xx means it exists -- a file dict, a
-            # >1MB file with no inline content, or a directory listing -- so refuse; and
-            # an unreadable GET (timeout/5xx) is UNKNOWN, so also refuse. Never clobber a
-            # file Argo didn't read just because the existence check was inconclusive.
+            # No 'old' = CREATE a new file submitted in full, so cap it like a
+            # propose_change file (the surgical size exemption is only for edits).
+            if len(new.encode()) > MAX_PROPOSE_BYTES:
+                return None, f"new file '{path}' exceeds {MAX_PROPOSE_BYTES} bytes."
+            # Allow the create ONLY when we positively confirm the path is absent (a clean
+            # 404). Any 2xx means it exists -- a file dict, a >1MB file with no inline
+            # content, or a directory listing -- so refuse; and an unreadable GET
+            # (timeout/5xx) is UNKNOWN, so also refuse. Never clobber a file Argo didn't
+            # read just because the existence check was inconclusive. Match the exact
+            # "HTTP Error 404" so an unrelated error string (e.g. one containing "4042")
+            # can't be mistaken for a confirmed absence.
             ok, cur = _gh_write(
                 "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
             if ok:
                 return None, (f"'{path}' already exists; to change it, use an edit with "
                               f"'old'. Omit 'old' only to create a NEW file.")
-            if "404" not in str(cur):
+            if "HTTP Error 404:" not in str(cur):  # urllib formats as "HTTP Error 404: ..."
                 return None, (f"couldn't verify whether '{path}' already exists ({cur}); "
                               f"not creating it blindly -- try again.")
             files[path] = new
@@ -1460,6 +1482,11 @@ def _resolve_edits(edits):
                           f"'old' and put the full contents in 'new'.")
         if old == new:
             return None, f"edit for '{path}' has identical 'old' and 'new' (no change)."
+        # Cap the EDIT, not the resulting file: a small edit may land in a module far
+        # larger than MAX_PROPOSE_BYTES (that's the whole reason this tool exists).
+        if len(old.encode()) + len(new.encode()) > MAX_PROPOSE_BYTES:
+            return None, (f"the edit for '{path}' is too large (>{MAX_PROPOSE_BYTES} bytes "
+                          f"of old+new text); split it into smaller edits.")
         ok, cur = _gh_write(
             "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
         if not ok or not isinstance(cur, dict) or "content" not in cur:
@@ -1480,9 +1507,10 @@ def _resolve_edits(edits):
 
 
 def _propose_edit_impl(title, description, edits_json):
-    """Resolve {path, old?, new} edits against current files, then funnel into the SAME
-    validate -> gate -> open-PR path as propose_change (so the repro-test + wiring gates
-    still apply). Returns the user-facing text."""
+    """Resolve {path, old?, new} edits against current files, then run the SAME count/path
+    + repro-test/wiring gates as propose_change and open the PR. The per-file SIZE cap is
+    NOT applied to the resolved files -- _resolve_edits already capped each edit, so a
+    small edit may land in a module bigger than MAX_PROPOSE_BYTES. Returns user text."""
     try:
         edits = json.loads(edits_json)
     except (ValueError, TypeError):
@@ -1490,8 +1518,13 @@ def _propose_edit_impl(title, description, edits_json):
     files, err = _resolve_edits(edits)
     if err:
         return err
-    text, _info = _propose_change_impl(title, description, json.dumps(files))
-    return text
+    err = _validate_paths_and_count(files) or _proposal_gate(files)
+    if err:
+        return err
+    ok, info = _open_pr(title, description, files)
+    if not ok:
+        return info
+    return f"Opened PR for review: {info['url']}"
 
 
 @mcp.tool()

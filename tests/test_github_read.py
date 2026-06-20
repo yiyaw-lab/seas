@@ -39,6 +39,23 @@ class GhReadFileTest(unittest.TestCase):
     def test_cap_truncates(self):
         self.assertEqual(self._read(body="x" * 100, max_chars=10), "x" * 10)
 
+    def test_out_of_range_window_distinct_from_empty(self):
+        out = self._read(offset=99, limit=5)
+        self.assertIn("no lines in that range", out)
+        self.assertNotEqual(out, "(empty file)")
+
+    def test_ref_is_passed_to_api(self):
+        seen = {}
+
+        def fake_api(path, raw=False):
+            seen["path"] = path
+            return True, "x\n"
+
+        with mock.patch.object(argo_github, "gh_api", side_effect=fake_api), \
+             mock.patch.object(argo_github, "repo_allowed", return_value=True):
+            argo_github.gh_read_file("o/r", "f.py", 40_000, ref="main")
+        self.assertIn("?ref=main", seen["path"])
+
     def test_error_passthrough(self):
         with mock.patch.object(argo_github, "gh_api",
                                return_value=(False, "GitHub API error: boom")), \

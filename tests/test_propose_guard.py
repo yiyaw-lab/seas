@@ -122,7 +122,7 @@ class ProposeEditTest(unittest.TestCase):
                 if p in current_by_path:
                     enc = base64.b64encode(current_by_path[p].encode()).decode()
                     return True, {"content": enc, "sha": "s"}
-                return False, "404"
+                return False, "HTTPError: HTTP Error 404: Not Found"
             raise AssertionError("must not reach a GitHub write")
         return gh
 
@@ -167,6 +167,35 @@ class ProposeEditTest(unittest.TestCase):
                 [{"path": "src/argo_paths.py", "new": "X = 99\n"}])
         self.assertIsNone(files)
         self.assertIn("already exists", err.lower())
+
+    def test_resolve_allows_small_edit_to_large_file(self):
+        # The whole point: a small surgical edit lands in a module bigger than
+        # MAX_PROPOSE_BYTES. The resolved full file may exceed the cap; the edit doesn't.
+        big = "needle\n" + "x = 0\n" * 9000  # > 40KB
+        cur = {"src/big.py": big}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/big.py", "old": "needle", "new": "NEEDLE"}])
+        self.assertIsNone(err)
+        self.assertGreater(len(files["src/big.py"].encode()), srv.MAX_PROPOSE_BYTES)
+
+    def test_resolve_refuses_oversized_edit_payload(self):
+        huge = "y" * (srv.MAX_PROPOSE_BYTES + 1)
+        with mock.patch.object(srv, "_gh_write",
+                               side_effect=AssertionError("no read for an oversized edit")):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "needle", "new": huge}])
+        self.assertIsNone(files)
+        self.assertIn("too large", err.lower())
+
+    def test_resolve_create_not_fooled_by_404_substring(self):
+        # An error merely CONTAINING '4042' is not a confirmed 404 -> fail safe (refuse).
+        with mock.patch.object(srv, "_gh_write",
+                               return_value=(False, "ValueError: weird code 4042")):
+            files, err = srv._resolve_edits(
+                [{"path": "tests/test_n.py", "new": "def test_x():\n    assert True\n"}])
+        self.assertIsNone(files)
+        self.assertIn("couldn't verify", err.lower())
 
     def test_resolve_create_fails_safe_when_existence_check_unreadable(self):
         # An inconclusive existence GET (timeout/5xx, not a 404) must NOT be treated as
