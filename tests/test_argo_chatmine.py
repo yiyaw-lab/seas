@@ -169,6 +169,55 @@ class ChatMineTest(unittest.TestCase):
         # already past the watermark, is not re-counted).
         self.assertEqual(argo_chatmine.mine_chat_log(), 1)
 
+    # --- (a) EMPTY/UNREADABLE LOG preserves the watermark (does not reset to 0) ----
+    # FAILS before the fix: an empty read advanced the stored watermark to 0, so the
+    # next good read re-mined every already-mined turn (re-bumping clusters,
+    # reopening resolved incidents).
+
+    def test_empty_log_preserves_watermark_and_no_remine(self):
+        self._write_chat([
+            ("Yiya", "no, that's wrong. it's Canberra."),
+            ("Argo", "sorry, you're right."),
+            ("Yiya", "you misunderstood the whole request."),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        wm = argo_store.load_json(self.wm_path, {})["mined_turns"]
+        self.assertEqual(wm, 3)
+        before = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        # A later run finds the log empty/unreadable -- the watermark must survive.
+        self.chat_path.write_text("{not valid json")
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        self.assertEqual(argo_store.load_json(self.wm_path, {})["mined_turns"], 3)
+        # The next real run over the unchanged log re-reads it and files NOTHING new.
+        self._write_chat([
+            ("Yiya", "no, that's wrong. it's Canberra."),
+            ("Argo", "sorry, you're right."),
+            ("Yiya", "you misunderstood the whole request."),
+        ])
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        after = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        self.assertEqual(after, before)
+
+    # --- (b) SHRUNK/REBUILT LOG re-mines from 0 (its fresh turns are not skipped) --
+    # FAILS before the fix: a watermark past the new (shorter) log length clamped to
+    # the length, scanned nothing, then advanced -- treating the rebuilt log's new
+    # turns as already-mined.
+
+    def test_shrunk_log_remines_fresh_turns(self):
+        # A high stored watermark from a previously longer log.
+        argo_store.save_json(self.wm_path, {"mined_turns": 50})
+        # The log is rebuilt SHORTER with fresh weakness turns at new positions.
+        self._write_chat([
+            ("Yiya", "no, that's wrong. it's Canberra."),
+            ("Argo", "sorry."),
+            ("Yiya", "you misunderstood the whole request."),
+        ])
+        recorded = argo_chatmine.mine_chat_log()
+        self.assertGreaterEqual(recorded, 1)
+        self.assertGreaterEqual(len(self._weakness_clusters()), 1)
+        # The watermark is re-anchored to the rebuilt log's length.
+        self.assertEqual(argo_store.load_json(self.wm_path, {})["mined_turns"], 3)
+
     # --- (b) REGEX precision: benign 'stop'/'not to' lines must NOT fire ----------
     # while true stop-corrections still match (the stop_doing_that signal).
 

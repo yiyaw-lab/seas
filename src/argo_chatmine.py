@@ -144,9 +144,22 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
     try:
         all_turns = _all_turns()
         total = len(all_turns)
-        # Clamp to [0, total]: a watermark past the log end means the store was
-        # truncated/reset under us -- treat as fully mined, don't re-mine from zero.
-        watermark = min(_read_watermark(), total)
+        if total == 0:
+            # Log missing/empty/unreadable this run. The stored watermark is a
+            # positional offset into the (normally append-only) log; overwriting it
+            # with 0 would re-mine every already-mined turn on the next good read,
+            # re-bumping clusters and reopening resolved incidents. Preserve it.
+            log.warning("chatmine: chat log empty/unreadable; preserving watermark")
+            return recorded
+        stored = _read_watermark()
+        if stored > total:
+            # The watermark sits past the log end: the log was rebuilt/replaced/
+            # shrunk under us, so the stored offset no longer points at the same
+            # turns. Re-mine from 0 (record_incident's cluster rollup bounds any
+            # re-count) rather than treat the rebuilt log's fresh turns as mined.
+            watermark = 0
+        else:
+            watermark = stored
         # New turns are those after the watermark; still cap the scan to the most
         # recent `scan_turns` of them so a long backlog stays cheap.
         start = max(watermark, total - scan_turns)
