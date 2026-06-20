@@ -32,6 +32,7 @@ from pathlib import Path
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_store
 import profile
 import send_telegram
@@ -480,6 +481,19 @@ def main():
 
     # Invite a rating reply (argo_rate.py reads it back), plus select/another.
     sent = project_text + project_invite(project_id)
+    # Instrument the push so act_on_rate can tell whether it landed (a user reply
+    # links it in the webhook). This runs on Actions (ephemeral checkout), so we
+    # POST the push onto the Railway VOLUME via the authenticated /push endpoint
+    # rather than writing the local Actions filesystem the reader never sees;
+    # post_to_webhook is best-effort + non-fatal, so a failed POST never blocks
+    # the Telegram send (skips silently when WEBHOOK_URL/ARGO_MCP_TOKEN are unset).
+    # Recorded BEFORE the send so the push row + its timestamp precede any reply --
+    # a fast user reply must never arrive (or timestamp) ahead of its own push, or
+    # link_reply finds no open push to link and act_on_rate undercounts.
+    try:
+        argo_pushes.post_to_webhook("project", sent)
+    except Exception:
+        print("(could not instrument project push)")
     send_telegram.send_message(sent)
     # Record the push into chat memory so a chat follow-up about this project
     # (rate it, "remind me what you sent", REHEARSE it) has it in context --

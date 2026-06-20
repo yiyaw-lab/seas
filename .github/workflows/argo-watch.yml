@@ -38,6 +38,12 @@ jobs:
           ARGO_MODEL: ${{ vars.ARGO_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Acted-on-push instrumentation (F1): a manual watch run sends from
+          # Actions but the push store lives on the Railway volume the reader uses,
+          # so the push is POSTed to the running webhook's authenticated /push
+          # endpoint. Both unset = skip silently (the send still goes out).
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          ARGO_MCP_TOKEN: ${{ secrets.ARGO_MCP_TOKEN }}
           # Optional Grok live X/web news source (grok_search), opt-in via the switch.
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ARGO_GROK_SOURCE: ${{ vars.ARGO_GROK_SOURCE }}

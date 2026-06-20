@@ -55,6 +55,7 @@ import argo_http
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_rating
 import argo_reply_context
 import argo_store
@@ -486,6 +487,10 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
         return None
 
     hist = _recent_turns(chat_id)
+
+    # NOTE: acted-on-push linkage now happens once at the top of handle_update
+    # (the single chokepoint covering deterministic + image + file + LLM replies),
+    # so it is intentionally NOT done here -- linking again would double-count.
 
     last_error = None
     tooled_failed = False  # an MCP-capable model errored earlier this turn
@@ -1204,6 +1209,25 @@ def handle_update(update):
     # latter way never reaches vision.
     doc = msg.get("document") or {}
     is_image = bool(msg.get("photo")) or str(doc.get("mime_type", "")).startswith("image/")
+
+    # Single chokepoint for acted-on-push linkage: a genuine user turn of ANY form
+    # (image, file, or text -- including the deterministic 1-10 / SELECT / REHEARSE
+    # replies that return before _generate_reply) links to the most recent open
+    # push here, BEFORE the deterministic-vs-LLM fork, so act_on_rate counts every
+    # reply, not just the LLM-handled ones. Best-effort -- never block the reply.
+    # Link on the Telegram message's SEND time ('date', unix seconds), not this
+    # webhook's PROCESSING time: a turn the user sent BEFORE a push was recorded
+    # must not link it just because processing landed after. Fall back to now only
+    # if 'date' is absent.
+    if chat_id is not None and (is_image or doc or text):
+        reply_ts = msg.get("date")
+        if not isinstance(reply_ts, (int, float)):
+            reply_ts = time.time()
+        try:
+            argo_pushes.link_reply(chat_id, reply_ts)
+        except Exception:
+            log.warning("could not link reply to push", exc_info=True)
+
     if chat_id is not None and is_image:
         _handle_photo(chat_id, msg)
         return
@@ -1553,6 +1577,39 @@ def create_app():
     @app.get("/")
     def health():
         return jsonify(_health_payload()), 200
+
+    @app.post("/push")
+    def push():
+        """Record a proactive push onto THIS process's volume, bearer-gated.
+
+        Placement triad: trigger = the proactive send (argo_project/argo_watch) on
+        GitHub Actions, which has no access to the Railway volume; filesystem = the
+        Railway volume's argo_pushes.PUSHES_PATH, written HERE via argo_pushes.record;
+        consumer = the webhook reader (link_reply on the inbound user turn, then
+        act_on_rate) on this same volume. The Actions recorder POSTs here precisely
+        because its own ephemeral checkout is a different filesystem the reader
+        never sees -- this endpoint bridges the two.
+
+        Auth: the same bearer token as /mcp (ARGO_MCP_TOKEN). Only this write route
+        is gated; the health route '/' stays open. Returns the recorded push id.
+        """
+        if not ARGO_MCP_TOKEN:
+            return "push disabled", 503
+        header = request.headers.get("Authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if token != ARGO_MCP_TOKEN:
+            return "forbidden", 403
+        payload = request.get_json(force=True, silent=True) or {}
+        kind = payload.get("kind")
+        content = payload.get("content")
+        if not kind:
+            return "missing kind", 400
+        try:
+            pid = argo_pushes.record(kind, content or "")
+        except (OSError, ValueError) as exc:
+            log.warning("push record failed: %s", exc, exc_info=True)
+            return "record failed", 500
+        return jsonify({"id": pid}), 200
 
     @app.post("/webhook")
     def webhook():
