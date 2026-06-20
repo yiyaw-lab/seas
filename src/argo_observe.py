@@ -44,6 +44,7 @@ from pathlib import Path
 import argo_guard
 import argo_paths
 from argo_log import get_logger
+from argo_observe_cache_patch import system_with_cache
 
 log = get_logger(__name__)
 
@@ -301,7 +302,10 @@ def _call_anthropic(job, model, temperature=1.0):
         kwargs = {
             "model": model,
             "max_tokens": 1024,
-            "system": SYSTEM_PROMPT,
+            # Mark the stable system prompt with a cache breakpoint (EV-002): on
+            # repeated turns the cached prefix is billed at ~10 percent. SYSTEM_PROMPT
+            # here is fully stable (no timestamps), so the whole thing caches.
+            "system": system_with_cache(SYSTEM_PROMPT),
             "messages": [{"role": "user", "content": job}],
         }
         # Omit temperature for models that reject a custom value (e.g. opus-4-8).
@@ -423,7 +427,12 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     kwargs = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
+        # Mark the big stable system prompt (capabilities + self beliefs + profile)
+        # with a cache breakpoint (EV-002). On repeated webhook turns the cached
+        # prefix is billed at ~10 percent instead of re-billed in full. The caller
+        # must keep volatile context (timestamps, reordered sections) OUT of this
+        # stable string -- a churning prefix silently misses the cache.
+        "system": system_with_cache(system),
         "messages": messages,
     }
     # Some newer models reject `temperature` outright (the API 400s). Omit it for
@@ -694,7 +703,7 @@ def main():
                   + " (in .env or the environment).")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
         print("See docs/ARGO_LLM_SETUP.md.")
-        print("\n✅ Observation job ready (no observations generated).\n")
+        print("\n⚠️  No observations generated (no model is configured to run).\n")
         return
 
     # ---- Key present: call the LLM, try runnable models in order. ----
@@ -710,25 +719,22 @@ def main():
             errors.append(f"{model}: {exc}")
 
     if observations_text is None:
-        # Could not generate — fall back to placeholder rather than crash.
         latest_path.write_text(build_latest(job))
         print()
-        print("A key was available, but no model call succeeded:")
-        for err in errors:
-            print(f"  - {err}")
+        print("All model calls failed:")
+        for e in errors:
+            print(f"  - {e}")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
-        print("\n⚠️  No observations generated (see errors above).\n")
+        print("\n⚠️  No observations generated (all model calls failed).\n")
         return
 
     results = build_results(observations_text, used_model)
     latest_path.write_text(results)
     dated_path.write_text(results)
-
-    print(f"Generated observations with: {used_model}")
-    print(f"Wrote: {latest_path.relative_to(ROOT)}")
-    print(f"Wrote: {dated_path.relative_to(ROOT)}")
-    print("\n--- Observations ---\n")
-    print(observations_text.strip())
+    print()
+    print(f"Generated observations via {used_model}.")
+    print(f"Wrote {latest_path.relative_to(ROOT)} and "
+          f"{dated_path.relative_to(ROOT)}.")
     print("\n✅ Observations generated.\n")
 
 
