@@ -32,6 +32,7 @@ import re
 
 import argo_incidents
 import argo_memory
+import argo_paths
 import argo_store
 from argo_log import get_logger
 
@@ -40,6 +41,11 @@ log = get_logger(__name__)
 # How many of the most recent turns (across all chats) to scan. Bounded so the
 # miner stays cheap and only reflects current behavior, not ancient history.
 SCAN_TURNS = 60
+
+# High-watermark store: the count of chat-log turns already mined. Re-exported as a
+# module-level constant (the test patch point) so the helper reads the override at
+# call time -- see argo_paths.CHATMINE_WATERMARK_PATH for the placement rationale.
+WATERMARK_PATH = argo_paths.CHATMINE_WATERMARK_PATH
 
 # Precision-biased weakness signals. Each (label, pattern) fires only on an
 # anchored phrase a satisfied user would not say. The label becomes the stable
@@ -63,8 +69,15 @@ _SIGNALS = (
     ("wrong_again", re.compile(r"\bwrong again\b", re.I)),
     ("still_wrong", re.compile(r"\bstill\s+(?:wrong|incorrect|not right)\b", re.I)),
     ("not_listening", re.compile(r"\byou'?re\s+not\s+listening\b", re.I)),
+    # Precision-biased: anchor to a corrective object so benign lines don't fire.
+    # "told you not to ..." only counts when bound to a do/say/keep/repeat behavior
+    # ("not to do that", "not to keep doing"), never "told you not to worry". "to
+    # stop" only counts when it's the bare stop-correction or "stop doing/saying
+    # that", never the locative "stop by the store".
     ("stop_doing_that", re.compile(
-        r"\b(?:i\s+)?(?:already\s+)?(?:told|asked)\s+you\s+(?:not\s+to|to stop)\b", re.I)),
+        r"\b(?:i\s+)?(?:already\s+)?(?:told|asked)\s+you\s+"
+        r"(?:not\s+to\s+(?:do|say|keep|repeat|bring(?:\s+up)?)\b"
+        r"|to\s+stop(?=\s+(?:do(?:ing)?|say(?:ing)?|that|it|this)\b|[.!?,]|$))", re.I)),
 )
 
 # Trim the excerpt kept as the incident sample (record_incident also caps it).
@@ -91,16 +104,53 @@ def _is_user_turn(turn):
     return role not in ("", "argo")
 
 
+def _read_watermark():
+    """Count of chat-log turns already mined (an offset into the append-only log).
+    0 if missing/unreadable/malformed. Never raises."""
+    try:
+        data = argo_store.load_json(WATERMARK_PATH, {})
+        n = data.get("mined_turns") if isinstance(data, dict) else 0
+        return int(n) if isinstance(n, (int, float)) and n >= 0 else 0
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("chatmine: could not read watermark: %s", exc)
+        return 0
+
+
+def _write_watermark(n):
+    """Persist the high-watermark (turns mined so far) to the volume-backed store.
+    Best-effort: a write failure just means the next run re-scans, never a crash."""
+    try:
+        WATERMARK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        argo_store.save_json(WATERMARK_PATH, {"mined_turns": int(n)})
+    except (OSError, ValueError) as exc:
+        log.warning("chatmine: could not write watermark: %s", exc)
+
+
 def mine_chat_log(scan_turns=SCAN_TURNS):
-    """Scan the most recent USER turns for weakness signals and file each distinct
-    one as a 'chat_weakness' incident (dedup/fingerprint handled by record_incident).
+    """Scan USER turns appended SINCE the last run for weakness signals and file each
+    distinct one as a 'chat_weakness' incident (dedup/fingerprint handled by
+    record_incident).
+
+    Idempotent across runs: a high-watermark (the count of turns already mined,
+    persisted to the volume-backed WATERMARK_PATH) gates the scan to turns appended
+    since last time, so re-running over the same log records ZERO new incidents and
+    counts don't inflate / resolved clusters don't reopen. Bounded to the most recent
+    `scan_turns` of those new turns so the miner stays cheap.
 
     Precision-biased: only anchored correction/frustration phrases match, so a
     clean transcript records nothing. Returns the number of record_incident calls
     made (>=0). Never raises -- it runs inside the scheduled diagnose path."""
     recorded = 0
     try:
-        turns = _all_turns()[-scan_turns:]
+        all_turns = _all_turns()
+        total = len(all_turns)
+        # Clamp to [0, total]: a watermark past the log end means the store was
+        # truncated/reset under us -- treat as fully mined, don't re-mine from zero.
+        watermark = min(_read_watermark(), total)
+        # New turns are those after the watermark; still cap the scan to the most
+        # recent `scan_turns` of them so a long backlog stays cheap.
+        start = max(watermark, total - scan_turns)
+        turns = all_turns[start:]
         for turn in turns:
             if not isinstance(turn, dict) or not _is_user_turn(turn):
                 continue
@@ -123,6 +173,9 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
                 if argo_incidents.record_incident(
                         kind="chat_weakness", signature=signature, sample=excerpt):
                     recorded += 1
+        # Advance the watermark to the full log length, not just the scanned window:
+        # turns the scan cap skipped are still "past" and must not be re-mined later.
+        _write_watermark(total)
         if recorded:
             log.info("chatmine: filed %d chat_weakness incident(s)", recorded)
         return recorded

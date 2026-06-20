@@ -72,6 +72,16 @@ SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
 # (the test patch points), so their helpers read the override at call time.
 INCIDENTS_PATH = Path(os.environ.get("ARGO_INCIDENTS_PATH", str(DATA / "argo_incidents.json")))
 PROPOSALS_PATH = Path(os.environ.get("ARGO_PROPOSALS_PATH", str(DATA / "argo_proposals.json")))
+# High-watermark for the chat-log weakness miner (argo_chatmine): the count of
+# chat-log turns already mined, so each daily run only scans turns appended SINCE
+# the last run and re-running over the same log records zero new incidents.
+# Volume-overridable for the same reason as the chat log itself -- the miner runs in
+# the webhook's in-process local_loop on the Railway volume, so its watermark must
+# live on the SAME volume the chat log does or every redeploy would re-mine from
+# zero and re-inflate counts. Gitignored. argo_chatmine re-exports this as a
+# module-level constant (the test patch point).
+CHATMINE_WATERMARK_PATH = Path(os.environ.get("ARGO_CHATMINE_WATERMARK_PATH",
+                                              str(DATA / "argo_chatmine_watermark.json")))
 # Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
 # seen-store, the lever ledger, the single-slot EVOLVE staging file, and the dated
 # prediction store. All written at webhook/scheduler time on the live bot, so point

@@ -29,8 +29,12 @@ class ChatMineTest(unittest.TestCase):
         base = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.chat_path = base / "chat.json"
         self.inc_path = base / "incidents.json"
+        self.wm_path = base / "watermark.json"
         self.enterContext(mock.patch.object(argo_memory, "CHAT_LOG_PATH", self.chat_path))
         self.enterContext(mock.patch.object(inc, "INCIDENTS_PATH", self.inc_path))
+        # The mining watermark must also be tmp-scoped, or the miner would read/write
+        # the real data/ store and leak idempotency state between tests.
+        self.enterContext(mock.patch.object(argo_chatmine, "WATERMARK_PATH", self.wm_path))
 
     def _write_chat(self, turns):
         """turns: list of (role, text). Writes the shared chat-log format."""
@@ -131,6 +135,61 @@ class ChatMineTest(unittest.TestCase):
         filler = [("Yiya", "ok"), ("Argo", "sure")] * 40
         self._write_chat(old + filler)
         self.assertEqual(argo_chatmine.mine_chat_log(scan_turns=10), 0)
+
+    # --- (a) IDEMPOTENCY (negative control): re-mining the same log files nothing --
+    # FAILS before the watermark fix (the 2nd pass re-records every still-matching
+    # turn, inflating counts and reopening resolved clusters).
+
+    def test_remine_same_log_records_zero_new(self):
+        self._write_chat([
+            ("Yiya", "no, that's wrong. it's Canberra."),
+            ("Argo", "sorry, you're right."),
+            ("Yiya", "you misunderstood the whole request."),
+        ])
+        first = argo_chatmine.mine_chat_log()
+        self.assertGreaterEqual(first, 1)
+        before = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        # Second pass over the UNCHANGED log must add no new incidents and must not
+        # bump any existing cluster's count.
+        second = argo_chatmine.mine_chat_log()
+        self.assertEqual(second, 0)
+        after = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        self.assertEqual(after, before)
+
+    def test_only_turns_after_watermark_are_mined(self):
+        # First run mines the existing turns and advances the watermark; a turn
+        # appended afterward is the ONLY thing the next run files.
+        self._write_chat([("Yiya", "no, that's wrong")])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        log = argo_store.load_json(self.chat_path, [])
+        log.append({"ts": "2026-06-20T01:00:00Z", "chat_id": "1",
+                    "role": "Yiya", "text": "you misunderstood me again"})
+        argo_store.save_json(self.chat_path, log)
+        # Exactly the one new correction-kind is filed (the old 'thats_wrong' turn,
+        # already past the watermark, is not re-counted).
+        self.assertEqual(argo_chatmine.mine_chat_log(), 1)
+
+    # --- (b) REGEX precision: benign 'stop'/'not to' lines must NOT fire ----------
+    # while true stop-corrections still match (the stop_doing_that signal).
+
+    def test_benign_stop_and_not_to_lines_do_not_fire(self):
+        self._write_chat([
+            ("Yiya", "I told you not to worry, the launch went fine."),
+            ("Argo", "glad to hear it."),
+            ("Yiya", "I asked you to stop by the store on the way home."),
+            ("Argo", "got it."),
+        ])
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        self.assertEqual(self._weakness_clusters(), [])
+
+    def test_true_stop_correction_still_fires(self):
+        self._write_chat([
+            ("Yiya", "i already told you to stop doing that."),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["kind"], "chat_weakness")
 
 
 if __name__ == "__main__":
