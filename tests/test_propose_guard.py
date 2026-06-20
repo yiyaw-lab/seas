@@ -36,6 +36,43 @@ class ProposalGateTest(unittest.TestCase):
         self.assertIsNone(info)
         self.assertIn("reproduction test", text.lower())
 
+    def test_review_helper_filters_bots_strips_html_and_dedups(self):
+        reviews = [{"user": {"login": "cursor[bot]"}, "body": "found 2 issues <!--x-->"}]
+        comments = [
+            {"id": 1, "user": {"login": "cursor[bot]"}, "path": "src/a.py",
+             "line": 3, "body": "bug one <!--meta-->"},
+            {"id": 2, "user": {"login": "cursor[bot]"}, "path": "src/b.py",
+             "line": 9, "body": "bug two"},
+            {"id": 3, "user": {"login": "somehuman"}, "path": "src/c.py",
+             "line": 1, "body": "human note"},
+        ]
+
+        def fake_gh(method, path, body):
+            return True, (reviews if "/reviews" in path else
+                          comments if "/comments" in path else {})
+
+        with mock.patch.object(srv, "_gh_write", side_effect=fake_gh):
+            out = srv._check_proposal_reviews(7)
+            self.assertEqual([f["id"] for f in out["findings"]], [1, 2])  # human dropped
+            self.assertEqual(out["summary"], "found 2 issues")            # html stripped
+            seen = srv._check_proposal_reviews(7, seen_ids=[1])
+            self.assertEqual([f["id"] for f in seen["findings"]], [2])    # seen dropped
+
+    def test_review_summary_skips_empty_newer_review(self):
+        # A newer inline-only review with an empty body must not blank out the real
+        # summary from an earlier review.
+        reviews = [
+            {"user": {"login": "cursor[bot]"}, "body": "found 1 issue"},
+            {"user": {"login": "cursor[bot]"}, "body": "  <!--only meta-->  "},
+        ]
+
+        def fake_gh(method, path, body):
+            return True, (reviews if "/reviews" in path else [])
+
+        with mock.patch.object(srv, "_gh_write", side_effect=fake_gh):
+            out = srv._check_proposal_reviews(9)
+        self.assertEqual(out["summary"], "found 1 issue")
+
     def test_refuses_dangling_new_symbol(self):
         # helper() is defined in a NEW module but referenced by nothing, not even the test.
         empty_test = ("import argo_brandnew_xyz\n"
