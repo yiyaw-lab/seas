@@ -490,9 +490,13 @@ def main():
     except Exception:
         print("(could not record project to chat memory)")
     # Instrument the push so act_on_rate can tell whether it landed (a user reply
-    # links it in the webhook). Best-effort, never block delivery.
+    # links it in the webhook). This runs on Actions (ephemeral checkout), so we
+    # POST the push onto the Railway VOLUME via the authenticated /push endpoint
+    # rather than writing the local Actions filesystem the reader never sees;
+    # post_to_webhook is best-effort + non-fatal, so a failed POST never blocks
+    # the Telegram send (skips silently when WEBHOOK_URL/ARGO_MCP_TOKEN are unset).
     try:
-        argo_pushes.record("project", sent)
+        argo_pushes.post_to_webhook("project", sent)
     except Exception:
         print("(could not instrument project push)")
     print()

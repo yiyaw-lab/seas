@@ -283,9 +283,14 @@ def main():
                     log.warning("could not record watch alert to chat memory",
                                 exc_info=True)
                 # Instrument the push so act_on_rate can tell whether it landed (a
-                # user reply links it in the webhook). Best-effort: never block.
+                # user reply links it in the webhook). This runs on Actions
+                # (ephemeral checkout), so we POST the push onto the Railway VOLUME
+                # via the authenticated /push endpoint rather than the local
+                # Actions filesystem the reader never sees; post_to_webhook is
+                # best-effort + non-fatal, so a failed POST never blocks the send
+                # (skips silently when WEBHOOK_URL/ARGO_MCP_TOKEN are unset).
                 try:
-                    argo_pushes.record("watch", msg)
+                    argo_pushes.post_to_webhook("watch", msg)
                 except Exception:
                     log.warning("could not instrument watch push", exc_info=True)
 

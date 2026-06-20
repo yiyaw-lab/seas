@@ -18,8 +18,13 @@ shared argo_store I/O and argo_log only.
 """
 
 import hashlib
+import json
+import os
 import time
+import urllib.error
+import urllib.request
 
+import argo_http
 import argo_paths
 import argo_store
 from argo_log import get_logger
@@ -67,6 +72,52 @@ def record(kind, content, ts=None):
     argo_store.save_json(PUSHES_PATH, rows)
     log.info("recorded push id=%d kind=%s", new_id, kind)
     return new_id
+
+
+def post_to_webhook(kind, content):
+    """Record a push onto the RAILWAY VOLUME by POSTing it to the running webhook.
+
+    Placement triad (the bug this fixes -- recorders ran on the ephemeral Actions
+    checkout while the reader runs on the Railway volume, so the two filesystems
+    never met and act_on_rate stayed pinned at 0.0):
+      trigger     = the proactive send (argo_project.main / argo_watch.main) on
+                    GitHub Actions;
+      filesystem  = the Railway volume's PUSHES_PATH, written by the /push handler
+                    over this authenticated POST -- NOT the local Actions FS;
+      consumer    = the webhook reader (link_reply on the inbound user turn, then
+                    act_on_rate) on that same volume.
+
+    Best-effort and non-fatal by contract: callers wrap nothing extra -- any
+    failure (no WEBHOOK_URL/token in local dev, a timeout, a non-2xx, a network
+    error) is logged and swallowed here so a failed POST can never block or fail
+    the Telegram send. Returns True if the push was accepted, else False.
+    """
+    base = os.environ.get("WEBHOOK_URL")
+    token = os.environ.get("ARGO_MCP_TOKEN")
+    if not base or not token:
+        # Local dev / unconfigured Actions: skip silently, no error.
+        return False
+    url = base.rstrip("/") + "/push"
+    body = json.dumps({"kind": kind, "content": content}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+    )
+    ctx = argo_http.tls_context()
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            ok = 200 <= r.status < 300
+        if ok:
+            log.info("posted push kind=%s to webhook volume", kind)
+        else:
+            log.warning("push POST to webhook returned status %s", r.status)
+        return ok
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        # Non-fatal: the proactive Telegram message has already been sent; an
+        # un-instrumented push is a missed measurement, never a failed send.
+        log.warning("push POST to webhook failed (non-fatal): %s", exc)
+        return False
 
 
 def link_reply(chat_id, ts=None):

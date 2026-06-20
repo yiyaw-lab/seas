@@ -1563,6 +1563,39 @@ def create_app():
     def health():
         return jsonify(_health_payload()), 200
 
+    @app.post("/push")
+    def push():
+        """Record a proactive push onto THIS process's volume, bearer-gated.
+
+        Placement triad: trigger = the proactive send (argo_project/argo_watch) on
+        GitHub Actions, which has no access to the Railway volume; filesystem = the
+        Railway volume's argo_pushes.PUSHES_PATH, written HERE via argo_pushes.record;
+        consumer = the webhook reader (link_reply on the inbound user turn, then
+        act_on_rate) on this same volume. The Actions recorder POSTs here precisely
+        because its own ephemeral checkout is a different filesystem the reader
+        never sees -- this endpoint bridges the two.
+
+        Auth: the same bearer token as /mcp (ARGO_MCP_TOKEN). Only this write route
+        is gated; the health route '/' stays open. Returns the recorded push id.
+        """
+        if not ARGO_MCP_TOKEN:
+            return "push disabled", 503
+        header = request.headers.get("Authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if token != ARGO_MCP_TOKEN:
+            return "forbidden", 403
+        payload = request.get_json(force=True, silent=True) or {}
+        kind = payload.get("kind")
+        content = payload.get("content")
+        if not kind:
+            return "missing kind", 400
+        try:
+            pid = argo_pushes.record(kind, content or "")
+        except (OSError, ValueError) as exc:
+            log.warning("push record failed: %s", exc, exc_info=True)
+            return "record failed", 500
+        return jsonify({"id": pid}), 200
+
     @app.post("/webhook")
     def webhook():
         if WEBHOOK_SECRET:
