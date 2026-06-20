@@ -63,9 +63,10 @@ class RecorderPostsToVolumeTest(unittest.TestCase):
 
     def test_post_hits_authenticated_endpoint_and_skips_local_fs(self):
         with mock.patch("urllib.request.urlopen", return_value=_FakeResp(200)) as up:
-            ok = argo_pushes.post_to_webhook("project", "a fresh project push")
+            result = argo_pushes.post_to_webhook("project", "a fresh project push")
 
-        self.assertTrue(ok)
+        self.assertTrue(result.recorded)
+        self.assertFalse(result.suppressed)
         # Exactly one POST, to /push, bearer-authenticated, with the json body.
         self.assertEqual(up.call_count, 1)
         req = up.call_args.args[0]
@@ -82,16 +83,18 @@ class RecorderPostsToVolumeTest(unittest.TestCase):
         # Telegram send is never blocked -- and still no local write.
         with mock.patch("urllib.request.urlopen",
                         side_effect=urllib.error.URLError("timed out")):
-            ok = argo_pushes.post_to_webhook("watch", "an alert")
-        self.assertFalse(ok)
+            result = argo_pushes.post_to_webhook("watch", "an alert")
+        self.assertFalse(result.recorded)
+        self.assertFalse(result.suppressed)  # a failed POST is fail-open, not suppressed
         self.assertFalse(self.local_path.exists())
 
     def test_unset_env_skips_silently(self):
         # Local dev with no WEBHOOK_URL/token: skip, no error, no write, no POST.
         with mock.patch.dict("os.environ", {}, clear=True):
             with mock.patch("urllib.request.urlopen") as up:
-                ok = argo_pushes.post_to_webhook("project", "x")
-        self.assertFalse(ok)
+                result = argo_pushes.post_to_webhook("project", "x")
+        self.assertFalse(result.recorded)
+        self.assertFalse(result.suppressed)
         up.assert_not_called()
         self.assertFalse(self.local_path.exists())
 
@@ -156,8 +159,10 @@ class WatchRecordsBeforeSendTest(unittest.TestCase):
              mock.patch.object(argo_watch, "collect_grok", return_value=[]), \
              mock.patch.object(argo_watch, "judge", return_value=[alert]), \
              mock.patch.object(argo_watch, "save_seen"), \
-             mock.patch.object(argo_watch.argo_pushes, "post_to_webhook",
-                               side_effect=lambda *a, **k: order.append(("post",) + a)), \
+             mock.patch.object(
+                 argo_watch.argo_pushes, "post_to_webhook",
+                 side_effect=lambda *a, **k: (order.append(("post",) + a)
+                                              or argo_pushes.PushResult(True, False))), \
              mock.patch.object(argo_watch.send_telegram, "send_message",
                                side_effect=lambda m: order.append(("send", m))), \
              mock.patch.object(argo_watch.argo_memory, "record",

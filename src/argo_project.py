@@ -490,10 +490,20 @@ def main():
     # Recorded BEFORE the send so the push row + its timestamp precede any reply --
     # a fast user reply must never arrive (or timestamp) ahead of its own push, or
     # link_reply finds no open push to link and act_on_rate undercounts.
+    # The /push round-trip ALSO runs the F6 steerable-proactiveness gate on the
+    # volume (where the act-on-rate + the user's threshold live -- this Actions
+    # checkout has neither), and bridges the verdict back: when result.suppressed
+    # the push is below the bar, so SKIP the Telegram send. On any POST failure the
+    # result is fail-open (not suppressed) so a flaky webhook never silences a send.
+    suppressed = False
     try:
-        argo_pushes.post_to_webhook("project", sent)
+        result = argo_pushes.post_to_webhook("project", sent)
+        suppressed = result.suppressed
     except Exception:
         print("(could not instrument project push)")
+    if suppressed:
+        print("(F6 gate: project push below threshold -- suppressed, not sent)\n")
+        return
     send_telegram.send_message(sent)
     # Record the push into chat memory so a chat follow-up about this project
     # (rate it, "remind me what you sent", REHEARSE it) has it in context --

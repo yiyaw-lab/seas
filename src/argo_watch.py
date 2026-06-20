@@ -283,10 +283,22 @@ def main():
                 # any reply -- a fast user reply must never arrive (or timestamp)
                 # ahead of its own push, or link_reply finds no open push to link
                 # and act_on_rate undercounts (same fix as argo_project.main).
+                # The /push round-trip ALSO runs the F6 steerable-proactiveness gate
+                # on the volume (where the act-on-rate + the user's threshold live --
+                # this Actions checkout has neither) and bridges the verdict back:
+                # when result.suppressed the alert is below the bar, so SKIP both the
+                # send and the chat-memory record (nothing was sent, nothing to
+                # remember). A POST failure is fail-open (not suppressed), so a flaky
+                # webhook never silences an alert.
+                suppressed = False
                 try:
-                    argo_pushes.post_to_webhook("watch", msg)
+                    result = argo_pushes.post_to_webhook("watch", msg)
+                    suppressed = result.suppressed
                 except Exception:
                     log.warning("could not instrument watch push", exc_info=True)
+                if suppressed:
+                    log.info("F6 gate: watch alert below threshold, suppressed")
+                    continue
                 send_telegram.send_message(msg)
                 # Record the push into chat memory so a follow-up about this alert
                 # ("is this a counter to X?") sees it -- proactive sends used to

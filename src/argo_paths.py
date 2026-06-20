@@ -108,6 +108,15 @@ PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
 # time on the live bot, so point ARGO_PUSHES_PATH at the Railway volume or each
 # redeploy wipes the act-on-rate history. Gitignored.
 PUSHES_PATH = Path(os.environ.get("ARGO_PUSHES_PATH", str(DATA / "argo_pushes.json")))
+# Steerable-proactiveness setting (argo_pushes.should_send, F6): the single
+# user-tunable base threshold a push's stakes*confidence must clear to send. The
+# webhook writes it when the user runs the PROACTIVE command and the push gate
+# reads it on every send, both in-process on the live bot, so point
+# ARGO_PROACTIVE_PATH at the Railway volume (mirrors ARGO_PUSHES_PATH) or each
+# redeploy resets the user's chosen level. Gitignored. argo_pushes re-exports this
+# as a module-level constant (the test patch point), so its helpers read the
+# override at call time.
+PROACTIVE_PATH = Path(os.environ.get("ARGO_PROACTIVE_PATH", str(DATA / "argo_proactive.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.
