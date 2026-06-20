@@ -127,7 +127,12 @@ failure-path issues on a PR this suite had passed (see memory:
 pr11-bugbot-lessons-state-machines). For a safety-critical read-modify-write or
 record/state-machine path, also audit the (state × operation) matrix on your OWN
 design BEFORE opening the PR — Findings 039/041 paid that audit back one review
-round at a time when skipped. When committing from a tree that peers are
+round at a time when skipped. When a finding names a source-of-truth
+MISMATCH (e.g. a local checkout vs a remote base branch), grep EVERY
+component that reads either source — gate, author, validator, display — and
+fix each before declaring the class fixed: one home patched is not the bug
+fixed, and self-review and the bot each tend to catch only the home nearest
+their angle (Finding 052). When committing from a tree that peers are
 also editing, follow the /commit-mine procedure: positive hunk selection,
 staged-snapshot test via `checkout-index`, foreign-symbol review.
 
