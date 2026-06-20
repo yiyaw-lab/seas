@@ -77,6 +77,12 @@ data/argo_pending_evolve.json
 data/argo_predictions.json
 data/schedule_state_local.json
 
+# Acted-on-push instrumentation (argo_pushes): the push-event store the webhook
+# writes (via the bearer-auth'd POST /push) and reads for act_on_rate. Runtime
+# state; point ARGO_PUSHES_PATH at the Railway volume so the writer and reader
+# share one filesystem (the F1 placement triad).
+data/argo_pushes.json
+
 # Local Claude Code agent config (not project code)
 .claude/
 data/profile.json
