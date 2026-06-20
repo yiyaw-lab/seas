@@ -43,7 +43,7 @@ INCIDENTS_PATH = argo_paths.INCIDENTS_PATH
 INCIDENT_KINDS = frozenset({
     "phantom_send", "phantom_claim", "budget_exceeded", "model_failure",
     "tool_error", "circuit_open", "scheduler_task_error", "delivery_failure",
-    "other",
+    "chat_weakness", "other",
 })
 
 MAX_SAMPLES = 3        # keep the few most recent example messages per cluster
