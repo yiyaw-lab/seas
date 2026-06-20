@@ -54,5 +54,72 @@ class PushStoreTest(unittest.TestCase):
         self.assertEqual(argo_pushes.act_on_rate(), 0.0)
 
 
+class _Resp:
+    """Minimal context-manager stand-in for a urlopen 2xx response."""
+    def __init__(self, status=200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class PostToWebhookRetryTest(unittest.TestCase):
+    """post_to_webhook does ONE fast bounded retry on a TRANSIENT failure only
+    (Bugbot PR #36 finding 2, round 2): a flaky/restarting webhook gets a second
+    chance to record the push so a later reply doesn't mislink a different open
+    push, but a permanent 4xx is not retried and delivery is never delayed beyond
+    one extra short attempt. Pure -- urlopen is stubbed, no network.
+    """
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(
+            "os.environ",
+            {"WEBHOOK_URL": "https://x.example", "ARGO_MCP_TOKEN": "t"}))
+
+    def test_transient_then_success_retries_and_records(self):
+        import urllib.error
+        calls = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.URLError("timed out")  # transient
+            return _Resp(200)
+
+        with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
+            ok = argo_pushes.post_to_webhook("project", "hi")
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2)  # retried exactly once
+
+    def test_persistent_5xx_retries_once_then_gives_up(self):
+        import urllib.error
+        calls = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls.append(1)
+            raise urllib.error.HTTPError("https://x", 503, "unavailable", {}, None)
+
+        with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
+            ok = argo_pushes.post_to_webhook("project", "hi")
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 2)  # 5xx is transient -> one retry, then stop
+
+    def test_permanent_4xx_not_retried(self):
+        import urllib.error
+        calls = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls.append(1)
+            raise urllib.error.HTTPError("https://x", 401, "unauthorized", {}, None)
+
+        with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
+            ok = argo_pushes.post_to_webhook("project", "hi")
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)  # 4xx is permanent -> no retry
+
+
 if __name__ == "__main__":
     unittest.main()

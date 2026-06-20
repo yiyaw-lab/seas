@@ -1215,9 +1215,16 @@ def handle_update(update):
     # replies that return before _generate_reply) links to the most recent open
     # push here, BEFORE the deterministic-vs-LLM fork, so act_on_rate counts every
     # reply, not just the LLM-handled ones. Best-effort -- never block the reply.
+    # Link on the Telegram message's SEND time ('date', unix seconds), not this
+    # webhook's PROCESSING time: a turn the user sent BEFORE a push was recorded
+    # must not link it just because processing landed after. Fall back to now only
+    # if 'date' is absent.
     if chat_id is not None and (is_image or doc or text):
+        reply_ts = msg.get("date")
+        if not isinstance(reply_ts, (int, float)):
+            reply_ts = time.time()
         try:
-            argo_pushes.link_reply(chat_id, time.time())
+            argo_pushes.link_reply(chat_id, reply_ts)
         except Exception:
             log.warning("could not link reply to push", exc_info=True)
 

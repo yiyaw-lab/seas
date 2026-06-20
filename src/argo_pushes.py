@@ -103,6 +103,18 @@ def post_to_webhook(kind, content):
     failure (no WEBHOOK_URL/token in local dev, a timeout, a non-2xx, a network
     error) is logged and swallowed here so a failed POST can never block or fail
     the Telegram send. Returns True if the push was accepted, else False.
+
+    One fast bounded retry on a TRANSIENT failure (timeout / network error / 5xx)
+    only -- this POST now precedes the Telegram send (record-before-send), so the
+    per-attempt timeout is kept short and the retry capped at one so a flaky webhook
+    can't noticeably delay delivery. A 4xx (e.g. bad auth) is permanent, not
+    retried. Residual best-effort limitation (Bugbot PR #36 finding 2, round 2):
+    if the POST still fails after the retry the push stays UNRECORDED while its
+    Telegram message was delivered, so a later user reply can link a DIFFERENT
+    still-open recorded push within the window and overstate act_on_rate. The retry
+    only shrinks the transient-failure window; closing it fully would need a
+    full per-message reply-attribution engine, which is out of scope for this
+    single honest-rate metric.
     """
     base = os.environ.get("WEBHOOK_URL")
     token = os.environ.get("ARGO_MCP_TOKEN")
@@ -117,19 +129,31 @@ def post_to_webhook(kind, content):
                  "Content-Type": "application/json"},
     )
     ctx = argo_http.tls_context()
-    try:
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
-            ok = 200 <= r.status < 300
-        if ok:
-            log.info("posted push kind=%s to webhook volume", kind)
-        else:
-            log.warning("push POST to webhook returned status %s", r.status)
-        return ok
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        # Non-fatal: the proactive Telegram message has already been sent; an
-        # un-instrumented push is a missed measurement, never a failed send.
-        log.warning("push POST to webhook failed (non-fatal): %s", exc)
-        return False
+    # At most two attempts (one retry). Keep the per-attempt timeout short because
+    # this precedes the Telegram send. urlopen RAISES HTTPError (a URLError) for any
+    # non-2xx, so success is the no-exception path; failures are classified in the
+    # except: retry only TRANSIENT ones (timeout / network error / 5xx), never a
+    # permanent 4xx (e.g. bad auth).
+    attempts = 2
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
+                ok = 200 <= r.status < 300
+            if ok:
+                log.info("posted push kind=%s to webhook volume", kind)
+            else:
+                log.warning("push POST to webhook returned status %s", r.status)
+            return ok
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            # Non-fatal: the proactive Telegram message will still be sent; an
+            # un-instrumented push is a missed measurement, never a failed send.
+            log.warning("push POST to webhook failed (non-fatal, attempt %d): %s",
+                        attempt + 1, exc)
+            code = getattr(exc, "code", None)  # HTTPError carries the HTTP status
+            permanent = isinstance(code, int) and 400 <= code < 500
+            if permanent or attempt == attempts - 1:
+                return False
+    return False
 
 
 def link_reply(chat_id, ts=None):

@@ -23,8 +23,11 @@ import argo_pushes
 import argo_webhook as wh
 
 
-def _update(text, chat_id=777):
-    return {"update_id": 1, "message": {"chat": {"id": chat_id}, "text": text}}
+def _update(text, chat_id=777, date=None):
+    msg = {"chat": {"id": chat_id}, "text": text}
+    if date is not None:
+        msg["date"] = date
+    return {"update_id": 1, "message": msg}
 
 
 class DeterministicRatingLinksPushTest(unittest.TestCase):
@@ -76,6 +79,38 @@ class DeterministicRatingLinksPushTest(unittest.TestCase):
         rows = self._rows()
         linked = [r for r in rows if r["linked"]]
         self.assertEqual([r["id"] for r in linked], [newer])
+
+    def test_reply_sent_before_push_does_not_link_uses_message_send_time(self):
+        # PR #36 finding 2 (round 2): linkage must use the Telegram message's SEND
+        # time ('date'), not this webhook's PROCESSING time. A turn the user SENT
+        # before the push was recorded must NOT link it -- even though processing
+        # (now) lands after the push. Negative control: with processing-time
+        # linkage (time.time()) this WOULD link and act_on_rate would inflate.
+        import time
+        now = time.time()
+        # The push was recorded now; the user's message was sent 60s earlier.
+        pid = argo_pushes.record("project", "the weekly project", ts=now)
+        sent_before = now - 60
+
+        wh.handle_update(_update("7", date=sent_before))
+
+        self.assertEqual(self.sent, ["Got 7/10, logged it."])
+        row = next(r for r in self._rows() if r["id"] == pid)
+        self.assertFalse(row["linked"])
+        self.assertIsNone(row["linked_ts"])
+        self.assertEqual(argo_pushes.act_on_rate(), 0.0)
+
+    def test_reply_sent_after_push_links_on_message_send_time(self):
+        # Companion to the negative case: a message SENT after the push (and within
+        # the window) links on its send time, confirming the fix didn't just break
+        # all linkage.
+        import time
+        now = time.time()
+        pid = argo_pushes.record("project", "the weekly project", ts=now - 60)
+        wh.handle_update(_update("7", date=now))
+        row = next(r for r in self._rows() if r["id"] == pid)
+        self.assertTrue(row["linked"])
+        self.assertEqual(row["linked_ts"], now)
 
 
 if __name__ == "__main__":
