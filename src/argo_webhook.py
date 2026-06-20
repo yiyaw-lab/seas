@@ -488,13 +488,9 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
 
     hist = _recent_turns(chat_id)
 
-    # A genuine user turn reached us: link it to the most recent unanswered push
-    # (the weekly project / a tripwire alert) so act_on_rate measures whether
-    # Argo's unprompted sends land. Best-effort -- never block the reply.
-    try:
-        argo_pushes.link_reply(chat_id, time.time())
-    except Exception:
-        log.warning("could not link reply to push", exc_info=True)
+    # NOTE: acted-on-push linkage now happens once at the top of handle_update
+    # (the single chokepoint covering deterministic + image + file + LLM replies),
+    # so it is intentionally NOT done here -- linking again would double-count.
 
     last_error = None
     tooled_failed = False  # an MCP-capable model errored earlier this turn
@@ -1213,6 +1209,18 @@ def handle_update(update):
     # latter way never reaches vision.
     doc = msg.get("document") or {}
     is_image = bool(msg.get("photo")) or str(doc.get("mime_type", "")).startswith("image/")
+
+    # Single chokepoint for acted-on-push linkage: a genuine user turn of ANY form
+    # (image, file, or text -- including the deterministic 1-10 / SELECT / REHEARSE
+    # replies that return before _generate_reply) links to the most recent open
+    # push here, BEFORE the deterministic-vs-LLM fork, so act_on_rate counts every
+    # reply, not just the LLM-handled ones. Best-effort -- never block the reply.
+    if chat_id is not None and (is_image or doc or text):
+        try:
+            argo_pushes.link_reply(chat_id, time.time())
+        except Exception:
+            log.warning("could not link reply to push", exc_info=True)
+
     if chat_id is not None and is_image:
         _handle_photo(chat_id, msg)
         return

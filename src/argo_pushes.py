@@ -20,6 +20,7 @@ shared argo_store I/O and argo_log only.
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +42,14 @@ PUSHES_PATH = argo_paths.PUSHES_PATH
 # away) still links. Past this we assume the reply is about something else.
 LINK_WINDOW_SECONDS = 6 * 3600
 
+# Serializes the read-modify-write of record() and link_reply(). All writers live
+# in the one Railway webhook process (Decision_040): the webhook handles Telegram
+# updates on background threads and the /push handler writes concurrently in the
+# same process, so overlapping load_json -> mutate -> save_json could drop rows,
+# collide on max(id)+1, or lose a linked update. An in-process lock is sufficient
+# (no cross-process writer); argo_store still does the atomic save underneath.
+_write_lock = threading.Lock()
+
 
 def _load():
     """Return the push log as a list (empty on missing/corrupt/wrong-shape)."""
@@ -58,18 +67,21 @@ def record(kind, content, ts=None):
     if ts is None:
         ts = time.time()
     PUSHES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    rows = _load()
-    new_id = max((r.get("id", 0) for r in rows), default=0) + 1
-    content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
-    rows.append({
-        "id": new_id,
-        "ts": ts,
-        "kind": kind,
-        "content_hash": content_hash,
-        "linked": False,
-        "linked_ts": None,
-    })
-    argo_store.save_json(PUSHES_PATH, rows)
+    # Lock the load->mutate->save so a concurrent record/link_reply in the same
+    # webhook process can't drop a row or collide on max(id)+1.
+    with _write_lock:
+        rows = _load()
+        new_id = max((r.get("id", 0) for r in rows), default=0) + 1
+        content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+        rows.append({
+            "id": new_id,
+            "ts": ts,
+            "kind": kind,
+            "content_hash": content_hash,
+            "linked": False,
+            "linked_ts": None,
+        })
+        argo_store.save_json(PUSHES_PATH, rows)
     log.info("recorded push id=%d kind=%s", new_id, kind)
     return new_id
 
@@ -130,24 +142,28 @@ def link_reply(chat_id, ts=None):
     """
     if ts is None:
         ts = time.time()
-    rows = _load()
-    candidate = None
-    for r in rows:
-        if r.get("linked"):
-            continue
-        r_ts = r.get("ts")
-        if not isinstance(r_ts, (int, float)):
-            continue
-        # Within the window: the push came before (or at) the reply, no older
-        # than LINK_WINDOW_SECONDS.
-        if 0 <= ts - r_ts <= LINK_WINDOW_SECONDS:
-            if candidate is None or r_ts > candidate.get("ts"):
-                candidate = r
-    if candidate is None:
-        return None
-    candidate["linked"] = True
-    candidate["linked_ts"] = ts
-    argo_store.save_json(PUSHES_PATH, rows)
+    # Lock the load->select->mutate->save so a concurrent record/link_reply in the
+    # same webhook process can't lose this linked update or link a row another
+    # thread is also mutating.
+    with _write_lock:
+        rows = _load()
+        candidate = None
+        for r in rows:
+            if r.get("linked"):
+                continue
+            r_ts = r.get("ts")
+            if not isinstance(r_ts, (int, float)):
+                continue
+            # Within the window: the push came before (or at) the reply, no older
+            # than LINK_WINDOW_SECONDS.
+            if 0 <= ts - r_ts <= LINK_WINDOW_SECONDS:
+                if candidate is None or r_ts > candidate.get("ts"):
+                    candidate = r
+        if candidate is None:
+            return None
+        candidate["linked"] = True
+        candidate["linked_ts"] = ts
+        argo_store.save_json(PUSHES_PATH, rows)
     log.info("linked reply (chat_id=%s) to push id=%d", chat_id, candidate.get("id"))
     return candidate.get("id")
 
