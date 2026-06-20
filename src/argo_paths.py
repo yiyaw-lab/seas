@@ -108,6 +108,13 @@ PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
 # time on the live bot, so point ARGO_PUSHES_PATH at the Railway volume or each
 # redeploy wipes the act-on-rate history. Gitignored.
 PUSHES_PATH = Path(os.environ.get("ARGO_PUSHES_PATH", str(DATA / "argo_pushes.json")))
+# Usage/cost telemetry (argo_cost): one row per LLM call recording model +
+# provider + normalized token counts, so cost claims (the prompt-caching / Batch
+# wins) become measured, not asserted. Every model call in argo_observe writes a
+# row at chat/scheduler time on the live bot, so point ARGO_COST_LEDGER_PATH at
+# the Railway volume or each redeploy wipes the spend history. Gitignored.
+COST_LEDGER_PATH = Path(os.environ.get("ARGO_COST_LEDGER_PATH",
+                                       str(DATA / "argo_cost_ledger.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.

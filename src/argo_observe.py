@@ -41,6 +41,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import argo_cost
 import argo_guard
 import argo_paths
 from argo_log import get_logger
@@ -260,6 +261,7 @@ def _call_openai(job, model, temperature=1.0):
         return client.chat.completions.create(**kwargs)
 
     response = _guarded("openai", do_call, f"openai/{model}")
+    argo_cost.record_usage(response, model, "openai", f"openai/{model}")
     return response.choices[0].message.content
 
 
@@ -288,6 +290,7 @@ def _call_xai(job, model, temperature=1.0):
         return client.chat.completions.create(**kwargs)
 
     response = _guarded("xai", do_call, f"xai/{model}")
+    argo_cost.record_usage(response, model, "xai", f"xai/{model}")
     return response.choices[0].message.content
 
 
@@ -314,6 +317,7 @@ def _call_anthropic(job, model, temperature=1.0):
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"anthropic/{model}")
     return "".join(
         block.text for block in response.content if block.type == "text"
     )
@@ -349,6 +353,7 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"vision/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"vision/{model}")
     return "".join(b.text for b in response.content if b.type == "text")
 
 
@@ -464,6 +469,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
 
     # Same guardrails as the other model calls: daily budget + breaker + retry.
     response = _guarded("anthropic", do_call, f"chat/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
 
     # Telemetry: log every tool the connector fired (name on use, ok/error on
     # result) and collect the fired names. A bare error-only log hid the most
@@ -540,6 +546,7 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
         return client.responses.create(**kwargs)
 
     response = _guarded("openai", do_call, f"responses/{model}")
+    argo_cost.record_usage(response, model, "openai", f"responses/{model}")
 
     # Receipt: each tool the connector fired is an `mcp_call` output item. Only a
     # SUCCEEDED call counts toward the receipt -- a failed propose_change must not
