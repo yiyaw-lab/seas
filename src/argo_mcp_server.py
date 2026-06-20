@@ -1439,14 +1439,19 @@ def _resolve_edits(edits):
         if refusal:
             return None, refusal
         if "old" not in e:
-            # No 'old' = CREATE a new file. It must not already exist -- changing an
-            # existing file has to go through old/new, so a full write can never clobber
-            # a module Argo didn't read (the whole point of the surgical path).
+            # No 'old' = CREATE a new file. Allow it ONLY when we positively confirm the
+            # path is absent (a clean 404). Any 2xx means it exists -- a file dict, a
+            # >1MB file with no inline content, or a directory listing -- so refuse; and
+            # an unreadable GET (timeout/5xx) is UNKNOWN, so also refuse. Never clobber a
+            # file Argo didn't read just because the existence check was inconclusive.
             ok, cur = _gh_write(
                 "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
-            if ok and isinstance(cur, dict) and "content" in cur:
+            if ok:
                 return None, (f"'{path}' already exists; to change it, use an edit with "
                               f"'old'. Omit 'old' only to create a NEW file.")
+            if "404" not in str(cur):
+                return None, (f"couldn't verify whether '{path}' already exists ({cur}); "
+                              f"not creating it blindly -- try again.")
             files[path] = new
             continue
         old = e["old"]

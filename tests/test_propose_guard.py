@@ -168,6 +168,26 @@ class ProposeEditTest(unittest.TestCase):
         self.assertIsNone(files)
         self.assertIn("already exists", err.lower())
 
+    def test_resolve_create_fails_safe_when_existence_check_unreadable(self):
+        # An inconclusive existence GET (timeout/5xx, not a 404) must NOT be treated as
+        # "absent" -- refuse rather than risk clobbering an existing file.
+        with mock.patch.object(srv, "_gh_write",
+                               return_value=(False, "TimeoutError: timed out")):
+            files, err = srv._resolve_edits(
+                [{"path": "src/argo_paths.py", "new": "X = 9\n"}])
+        self.assertIsNone(files)
+        self.assertIn("couldn't verify", err.lower())
+
+    def test_resolve_refuses_create_over_existing_large_file(self):
+        # A >1MB existing file: the contents API returns 2xx but omits inline content.
+        # That is still "exists" -- a create must be refused, not allowed to overwrite.
+        with mock.patch.object(srv, "_gh_write",
+                               return_value=(True, {"name": "big.py", "size": 2_000_000})):
+            files, err = srv._resolve_edits(
+                [{"path": "src/big.py", "new": "X = 9\n"}])
+        self.assertIsNone(files)
+        self.assertIn("already exists", err.lower())
+
     def test_resolve_refuses_protected_path_before_any_read(self):
         # A protected path is refused BEFORE any GitHub read (so _gh_write never runs).
         with mock.patch.object(srv, "_gh_write",
