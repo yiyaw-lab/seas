@@ -28,6 +28,10 @@ import json
 import os
 from pathlib import Path
 
+from argo_log import get_logger
+
+log = get_logger(__name__)
+
 ROOT = Path(__file__).resolve().parent.parent
 PROFILE_PATH = Path(os.environ.get("ARGO_PROFILE_PATH",
                                    str(ROOT / "data" / "profile.json")))
@@ -91,16 +95,22 @@ def load():
         return _cache
     merged = dict(DEFAULT)
     try:
-        if PROFILE_PATH.exists():
-            data = json.loads(PROFILE_PATH.read_text())
-            if isinstance(data, dict):
-                # Only override with real string values; ignore the _comment field
-                # and any non-string so a malformed entry can't blank a prompt.
-                for k, v in data.items():
-                    if isinstance(v, str) and v:
-                        merged[k] = v
-    except (ValueError, OSError):
-        pass  # fall back to DEFAULT; identity must never take the bot down
+        # Read straight through -- a missing file raises FileNotFoundError (an
+        # OSError), caught below, so the missing-file and bad-JSON paths share one
+        # LOUD fallback instead of a silent exists()-check that skips the warning.
+        data = json.loads(PROFILE_PATH.read_text())
+        if isinstance(data, dict):
+            # Only override with real string values; ignore the _comment field
+            # and any non-string so a malformed entry can't blank a prompt.
+            for k, v in data.items():
+                if isinstance(v, str) and v:
+                    merged[k] = v
+    except (ValueError, OSError) as e:
+        # Fall back to DEFAULT; identity must never take the bot down. But say so
+        # LOUDLY -- a silent fallback writes "the builder" into the chat, which
+        # looks like a bug, not a missing config.
+        log.warning("profile load failed for %s (%s); using DEFAULT identity",
+                    PROFILE_PATH, e)
     _cache = merged
     return _cache
 
