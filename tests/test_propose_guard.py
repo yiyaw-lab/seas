@@ -168,6 +168,15 @@ class ProposeEditTest(unittest.TestCase):
         self.assertIsNone(files)
         self.assertIn("already exists", err.lower())
 
+    def test_propose_repo_ref_is_case_insensitive(self):
+        # GitHub repo names are case-insensitive; a differently-cased repo arg must still
+        # pin PROPOSE_BASE so reads match what propose_edit edits against.
+        with mock.patch.object(srv, "PROPOSE_REPO", "yiyaw-lab/seas"), \
+             mock.patch.object(srv, "PROPOSE_BASE", "main"):
+            self.assertEqual(srv._propose_repo_ref("YiyaW-Lab/Seas"), "main")
+            self.assertEqual(srv._propose_repo_ref("yiyaw-lab/seas"), "main")
+            self.assertIsNone(srv._propose_repo_ref("other/repo"))
+
     def test_resolve_allows_small_edit_to_large_file(self):
         # The whole point: a small surgical edit lands in a module bigger than
         # MAX_PROPOSE_BYTES. The resolved full file may exceed the cap; the edit doesn't.

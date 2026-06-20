@@ -358,6 +358,13 @@ def list_feeds() -> str:
 # argo_github now. These @mcp.tool() wrappers must stay here -- they register on
 # the FastMCP instance at import -- so they're thin delegations. Their docstrings
 # are the model-facing tool spec; keep them.
+def _propose_repo_ref(repo):
+    """Pin reads of the propose repo to PROPOSE_BASE so a read matches the branch
+    propose_edit edits against; None (default branch) for any other repo. Compared
+    case-insensitively, since GitHub owner/repo names are case-insensitive."""
+    return PROPOSE_BASE if repo.lower() == PROPOSE_REPO.lower() else None
+
+
 @mcp.tool()
 @with_deadline(20)
 def github_read_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> str:
@@ -372,8 +379,8 @@ def github_read_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> s
     file); a windowed read is for looking, or for crafting a propose_edit."""
     # Read your OWN repo at the same branch propose_edit applies edits against, so a
     # snippet you copy as `old` matches what the edit is resolved against.
-    ref = PROPOSE_BASE if repo == PROPOSE_REPO else None
-    return argo_github.gh_read_file(repo, path, MAX_REPO_READ_CHARS, offset, limit, ref)
+    return argo_github.gh_read_file(
+        repo, path, MAX_REPO_READ_CHARS, offset, limit, _propose_repo_ref(repo))
 
 
 @mcp.tool()
