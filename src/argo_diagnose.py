@@ -27,6 +27,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
+import argo_chatmine
 import argo_incidents
 import argo_paths
 import argo_self
@@ -523,6 +524,12 @@ def run_cli():
     """Scheduler entrypoint ('diagnose' command): prune, close the loop on prior fixes,
     then run one diagnose funnel. Each stage is independently guarded."""
     argo_incidents.prune(max_age_days=PRUNE_DAYS)
+    try:
+        # Mine the chat log for user-voiced weakness signals BEFORE diagnose() so any
+        # fresh chat_weakness incidents flow through the same funnel as logged failures.
+        argo_chatmine.mine_chat_log()
+    except Exception:
+        log.error("diagnose: chat-log mining failed", exc_info=True)
     try:
         verify_open_proposals()
     except Exception:

@@ -66,6 +66,10 @@ data/argo_self.json
 # Railway volume so they survive redeploys.
 data/argo_incidents.json
 data/argo_proposals.json
+# Chat-log weakness miner high-watermark (argo_chatmine): the count of chat-log
+# turns already mined, so each daily run only scans turns appended since the last.
+# Per-deploy runtime state; ARGO_CHATMINE_WATERMARK_PATH points it at the volume.
+data/argo_chatmine_watermark.json
 
 # Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
 # seen-store, lever ledger, EVOLVE staging slot, prediction store, and the local
