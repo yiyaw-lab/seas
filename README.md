@@ -387,7 +387,16 @@ Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
 | `ARGO_HEAL_LEVEL` | `L1` for confirm-in-chat self-heal (default `L0` = report-only) |
 | `ARGO_SELF_PATH` | `/data/argo_self.json` (Railway volume; self-belief store) |
 | `ARGO_TASTE_PATH` | `/data/taste_signals.json` (Railway volume; taste signals) |
+| `ARGO_PUSHES_PATH` | `/data/argo_pushes.json` (Railway volume; acted-on-push instrumentation store; wiped each redeploy and `act_on_rate` pinned at `0.0` if left on the default) |
+| `ARGO_CHATMINE_WATERMARK_PATH` | `/data/argo_chatmine_watermark.json` (Railway volume; chat-log weakness-miner high-watermark; without it on the volume, re-mining re-inflates incident counts after a redeploy) |
 | `ARGO_*_PATH` (self-improvement) | point the incident/proposal ledgers, evolution + prediction stores, and the pending-heal/evolve slots at the `/data` volume so they survive redeploys (`ARGO_INCIDENTS_PATH`, `ARGO_PROPOSALS_PATH`, `ARGO_EVOLUTION_PATH`, `ARGO_PREDICTIONS_PATH`, `ARGO_FRONTIER_SEEN_PATH`, `ARGO_PENDING_EVOLVE_PATH`, `ARGO_PENDING_HEAL_PATH`, `ARGO_WORLD_MODEL_PATH`, `ARGO_LOCAL_SCHED_STATE` — all default to `data/`; see `argo_paths.py`) |
+
+For the acted-on-push instrumentation (F1), `WEBHOOK_URL` and `ARGO_MCP_TOKEN`
+must also be set as **GitHub Actions secrets**. The scheduled senders
+(`argo_project.py` / `argo_watch.py`) run on GitHub Actions and POST each push to
+the Railway webhook via `${{ secrets.* }}`. If they are missing as Actions
+secrets, Actions injects an empty string and `post_to_webhook` skips silently,
+leaving the push store empty.
 
 Python 3.11+. Dependencies in `requirements.txt`.
 

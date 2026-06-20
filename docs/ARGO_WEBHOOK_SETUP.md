@@ -127,6 +127,13 @@ Now memory survives redeploys and restarts. To analyse it, pull the file from
 the volume (Railway shell/CLI) — it's a plain JSON array of
 `{ts, chat_id, role, text}` turns.
 
+For the acted-on-push instrumentation (F1), also set `WEBHOOK_URL` and
+`ARGO_MCP_TOKEN` as **GitHub Actions secrets**, not only in `.env`/Railway. The
+scheduled senders (`argo_project.py` / `argo_watch.py`) run on GitHub Actions and
+POST each push to this webhook via `${{ secrets.* }}`. If they are missing as
+Actions secrets, Actions injects an empty string and `post_to_webhook` skips
+silently, leaving the push store empty.
+
 Without a volume the bot still works and remembers within a single deploy, but
 history is lost on each redeploy.
 
