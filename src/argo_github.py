@@ -81,9 +81,13 @@ def gh_api(path, raw=False):
     return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
 
 
-def gh_read_file(repo, path, max_chars):
+def gh_read_file(repo, path, max_chars, offset=0, limit=0):
     """Read a file from a GitHub repo (allowlist-gated, size-capped). Returns the
-    file text or a refusal/error string. Backs the github_read_file MCP tool."""
+    file text or a refusal/error string. Backs the github_read_file MCP tool.
+
+    With offset (1-based start line) and/or limit (line count), return just that
+    window instead of the whole file -- so a large file can be inspected a span at a
+    time. The result is still capped at max_chars."""
     if "/" not in repo:
         return "Refused: repo must be 'owner/name'."
     if not repo_allowed(repo):
@@ -92,6 +96,10 @@ def gh_read_file(repo, path, max_chars):
     ok, body = gh_api(f"/repos/{repo}/contents/{path.lstrip('/')}", raw=True)
     if not ok:
         return body
+    if offset or limit:
+        lines = body.splitlines()
+        start = max(0, (offset or 1) - 1)
+        body = "\n".join(lines[start:start + limit] if limit else lines[start:])
     return body[:max_chars] or "(empty file)"
 
 

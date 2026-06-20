@@ -108,5 +108,120 @@ class ProposalGateTest(unittest.TestCase):
             self.assertIn("protected safety path", text)
 
 
+class ProposeEditTest(unittest.TestCase):
+    """propose_edit resolves {path, old, new} edits against current files server-side,
+    then reuses the SAME validate -> gate -> open path as propose_change."""
+
+    def _fake_get(self, current_by_path):
+        import base64
+
+        def gh(method, path, body):
+            if method == "GET" and "/contents/" in path:
+                # path looks like /repos/o/r/contents/src/x.py?ref=main
+                p = path.split("/contents/", 1)[1].split("?", 1)[0]
+                if p in current_by_path:
+                    enc = base64.b64encode(current_by_path[p].encode()).decode()
+                    return True, {"content": enc, "sha": "s"}
+                return False, "404"
+            raise AssertionError("must not reach a GitHub write")
+        return gh
+
+    def test_resolve_applies_unique_replacement(self):
+        cur = {"src/x.py": "def main():\n    return 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "return 1", "new": "return 2"}])
+        self.assertIsNone(err)
+        self.assertEqual(files["src/x.py"], "def main():\n    return 2\n")
+
+    def test_resolve_rejects_missing_old_text(self):
+        cur = {"src/x.py": "a = 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "a = 9", "new": "a = 2"}])
+        self.assertIsNone(files)
+        self.assertIn("not found", err.lower())
+
+    def test_resolve_rejects_ambiguous_old_text(self):
+        cur = {"src/x.py": "x\nx\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "x", "new": "y"}])
+        self.assertIsNone(files)
+        self.assertIn("appears 2 times", err.lower())
+
+    def test_resolve_write_without_old_creates_absent_file(self):
+        # No 'old' creates a NEW file: the existence GET 404s -> allowed.
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get({})):
+            files, err = srv._resolve_edits(
+                [{"path": "tests/test_new.py", "new": "def test_x():\n    assert True\n"}])
+        self.assertIsNone(err)
+        self.assertIn("tests/test_new.py", files)
+
+    def test_resolve_refuses_full_overwrite_of_existing_file(self):
+        # No 'old' against an EXISTING file is refused -- a full write must not clobber
+        # a module Argo didn't read; changing it requires old/new.
+        cur = {"src/argo_paths.py": "X = 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/argo_paths.py", "new": "X = 99\n"}])
+        self.assertIsNone(files)
+        self.assertIn("already exists", err.lower())
+
+    def test_resolve_refuses_protected_path_before_any_read(self):
+        # A protected path is refused BEFORE any GitHub read (so _gh_write never runs).
+        with mock.patch.object(srv, "_gh_write",
+                               side_effect=AssertionError("must not read before validating")):
+            files, err = srv._resolve_edits(
+                [{"path": "src/argo_guard.py", "old": "a", "new": "b"}])
+        self.assertIsNone(files)
+        self.assertIn("protected safety path", err)
+
+    def test_resolve_refuses_noop_edit(self):
+        with mock.patch.object(srv, "_gh_write",
+                               side_effect=AssertionError("no read for a no-op")):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "a = 1", "new": "a = 1"}])
+        self.assertIsNone(files)
+        self.assertIn("no change", err.lower())
+
+    def test_resolve_refuses_too_many_edits(self):
+        edits = [{"path": f"src/f{i}.py", "old": "a", "new": "b"} for i in range(6)]
+        with mock.patch.object(srv, "_gh_write",
+                               side_effect=AssertionError("no read past the count cap")):
+            files, err = srv._resolve_edits(edits)
+        self.assertIsNone(files)
+        self.assertIn("too many edits", err.lower())
+
+    def test_propose_edit_still_enforces_repro_test_gate(self):
+        # Editing a src module with NO accompanying test must hit the same gate as
+        # propose_change -- the edit path can't bypass the repro-test requirement.
+        cur = {"src/argo_paths.py": "X = 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            out = srv._propose_edit_impl("t", "d", json.dumps(
+                [{"path": "src/argo_paths.py", "old": "X = 1", "new": "X = 2"}]))
+        self.assertIn("reproduction test", out.lower())
+
+    def test_propose_edit_opens_pr_with_resolved_files(self):
+        cur = {"src/argo_paths.py": "X = 1\n"}
+        repro = ("import argo_paths\n"
+                 "def test_x():\n    assert argo_paths.X == 2\n")
+        opened = {}
+
+        def fake_open(title, description, files):
+            opened["files"] = files
+            return True, {"pr_number": 9, "url": "http://pr/9",
+                          "head_sha": "abc", "branch": "argo/y"}
+
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)), \
+             mock.patch.object(srv, "_open_pr", side_effect=fake_open):
+            out = srv._propose_edit_impl("t", "d", json.dumps([
+                {"path": "src/argo_paths.py", "old": "X = 1", "new": "X = 2"},
+                {"path": "tests/test_paths_edit.py", "new": repro}]))
+        self.assertIn("http://pr/9", out)
+        self.assertEqual(opened["files"]["src/argo_paths.py"], "X = 2\n")  # edit applied
+        self.assertIn("tests/test_paths_edit.py", opened["files"])         # test created
+
+
 if __name__ == "__main__":
     unittest.main()
