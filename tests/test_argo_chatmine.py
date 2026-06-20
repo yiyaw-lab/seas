@@ -283,6 +283,111 @@ class ChatMineTest(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["kind"], "chat_weakness")
 
+    # --- (FINDING 1) same weakness LABEL, DIFFERENT wording -> ONE cluster ---------
+    # The round-4 fix: key a chat_weakness incident on the signal LABEL, not the full
+    # matched substring. argo_incidents._fingerprint normalizes digits/URLs/hex but NOT
+    # varied wording, so before the fix three same-category corrections phrased three
+    # different ways formed three count-1 clusters and diagnose()'s min_count=3 gate
+    # never tripped -- defeating the miner's purpose. After the fix they roll up to one
+    # cluster whose count reaches min_count.
+
+    def test_same_label_varied_wording_rolls_to_one_cluster_reaching_min_count(self):
+        # Three turns, all the 'misunderstood' label, each worded differently so the
+        # matched substring (you misunderstood / you completely misread / you missed
+        # the point) differs every time.
+        self._write_chat([
+            ("Yiya", "you misunderstood me, that's not the ask."),
+            ("Argo", "sorry, let me redo it."),
+            ("Yiya", "you completely misread my request again."),
+            ("Argo", "ok, retrying."),
+            ("Yiya", "you missed the point entirely."),
+        ])
+        recorded = argo_chatmine.mine_chat_log()
+        self.assertEqual(recorded, 3)  # three matches recorded
+        clusters = self._weakness_clusters()
+        # All three roll into a SINGLE chat_weakness cluster...
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["kind"], "chat_weakness")
+        # ...whose count reaches min_count=3, so diagnose()'s gate would now trip.
+        self.assertEqual(clusters[0]["count"], 3)
+        gate = [c for c in inc.open_clusters(min_count=3, window_hours=24 * 365)
+                if c.get("kind") == "chat_weakness"]
+        self.assertEqual(len(gate), 1)  # the min_count=3 gate now SEES the cluster
+        # The matched phrase survives as a non-keyed sample, so the cluster stays
+        # informative despite the label-only key.
+        samples = clusters[0].get("samples", [])
+        self.assertTrue(any("misread" in s or "missed the point" in s or
+                            "misunderstood" in s for s in samples))
+
+    def test_negative_control_substring_key_would_split_into_three(self):
+        # NEGATIVE CONTROL for finding 1: prove the OLD behavior (signature = label +
+        # matched substring) split the very same three turns into three count-1
+        # clusters that never reach min_count. We reconstruct the old signature shape
+        # against the SAME fingerprint function the real code uses; distinct
+        # fingerprints == distinct clusters == gate never trips.
+        old_style = [
+            "user correction: misunderstood (you misunderstood)",
+            "user correction: misunderstood (you completely misread)",
+            "user correction: misunderstood (you missed the point)",
+        ]
+        old_fps = {inc._fingerprint(s) for s in old_style}
+        self.assertEqual(len(old_fps), 3)  # three clusters under the old key -> count 1 each
+        # The new label-only signature collapses all three to one fingerprint.
+        new_fps = {inc._fingerprint("chat weakness: misunderstood") for _ in old_style}
+        self.assertEqual(len(new_fps), 1)
+
+    # --- (FINDING 2) a failed watermark advance records NOTHING (no re-bump/reopen) --
+    # The round-4 fix: advance the watermark BEFORE recording, and skip recording if
+    # that advance fails to persist. Before the fix, a swallowed _write_watermark
+    # failure left counts bumped but the watermark behind, so the next run re-scanned
+    # the same slice and re-bumped clusters (and could REOPEN a resolved one). Now a
+    # write-failure short-circuits before any record_incident call.
+
+    def test_watermark_write_failure_records_nothing(self):
+        self._write_chat([
+            ("Yiya", "no, that's wrong. it's Canberra."),
+            ("Argo", "sorry."),
+            ("Yiya", "you misunderstood the whole request."),
+        ])
+        # Simulate the watermark store being unwritable for this run.
+        with mock.patch.object(argo_chatmine, "_write_watermark", return_value=False):
+            recorded = argo_chatmine.mine_chat_log()
+        # Nothing recorded, no clusters, watermark unchanged -> the next run re-scans
+        # the SAME slice from scratch with no double-count to undo.
+        self.assertEqual(recorded, 0)
+        self.assertEqual(self._weakness_clusters(), [])
+        self.assertEqual(argo_store.load_json(self.wm_path, {}), {})
+        # The next (healthy) run mines the slice exactly once.
+        self.assertEqual(argo_chatmine.mine_chat_log(), 2)
+        self.assertEqual(argo_store.load_json(self.wm_path, {})["mined_turns"], 3)
+        # A re-mine after the healthy run adds nothing (idempotent).
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+
+    def test_watermark_write_failure_does_not_reopen_resolved_cluster(self):
+        # The most damaging symptom finding 2 names: a re-mine of an already-counted
+        # turn reopening a RESOLVED chat_weakness cluster. Prove a failed-watermark run
+        # cannot touch a resolved cluster at all (it records nothing).
+        self._write_chat([("Yiya", "you misunderstood me completely.")])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        key = clusters[0]["key"]
+        inc.mark(key, status="resolved", belief_id="SB-chatmine")
+        self.assertEqual(inc.get_cluster(key)["status"], "resolved")
+        before_count = inc.get_cluster(key)["count"]
+        # Append the SAME-LABEL correction again but force the watermark write to fail.
+        log = argo_store.load_json(self.chat_path, [])
+        log.append({"ts": "2026-06-20T02:00:00Z", "chat_id": "1",
+                    "role": "Yiya", "text": "you misread it again, same problem."})
+        argo_store.save_json(self.chat_path, log)
+        with mock.patch.object(argo_chatmine, "_write_watermark", return_value=False):
+            self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        # The resolved cluster is untouched: still resolved, count unchanged.
+        c = inc.get_cluster(key)
+        self.assertEqual(c["status"], "resolved")
+        self.assertEqual(c["count"], before_count)
+        self.assertNotIn("recurred_after_fix", c)
+
 
 if __name__ == "__main__":
     unittest.main()

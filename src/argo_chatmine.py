@@ -48,10 +48,11 @@ SCAN_TURNS = 60
 WATERMARK_PATH = argo_paths.CHATMINE_WATERMARK_PATH
 
 # Precision-biased weakness signals. Each (label, pattern) fires only on an
-# anchored phrase a satisfied user would not say. The label becomes the stable
-# part of the incident signature, so repeats of the same KIND of correction roll
-# into one cluster via record_incident's fingerprint. Keep these conservative --
-# a false positive here nudges the owner about a non-problem.
+# anchored phrase a satisfied user would not say. The label IS the incident
+# signature (see mine_chat_log) -- not the matched phrase -- so every correction of
+# the same KIND rolls into ONE cluster regardless of how it's worded, letting the
+# count reach diagnose()'s min_count gate. Keep these conservative -- a false
+# positive here nudges the owner about a non-problem.
 _SIGNALS = (
     ("misunderstood", re.compile(
         r"\byou\s+(?:completely\s+)?(?:misunderstood|misread|missed the point)\b", re.I)),
@@ -118,12 +119,16 @@ def _read_watermark():
 
 def _write_watermark(n):
     """Persist the high-watermark (turns mined so far) to the volume-backed store.
-    Best-effort: a write failure just means the next run re-scans, never a crash."""
+    Returns True on success, False on a write failure (logged, never raised) so the
+    caller can gate recording on the advance landing -- see mine_chat_log's
+    record-only-if-advanced ordering, which closes the bump-without-advance window."""
     try:
         WATERMARK_PATH.parent.mkdir(parents=True, exist_ok=True)
         argo_store.save_json(WATERMARK_PATH, {"mined_turns": int(n)})
+        return True
     except (OSError, ValueError) as exc:
         log.warning("chatmine: could not write watermark: %s", exc)
+        return False
 
 
 def mine_chat_log(scan_turns=SCAN_TURNS):
@@ -134,7 +139,14 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
     Idempotent across runs: a high-watermark (the count of turns already mined,
     persisted to the volume-backed WATERMARK_PATH) gates the scan to turns appended
     since last time, so re-running over the same log records ZERO new incidents and
-    counts don't inflate / resolved clusters don't reopen.
+    counts don't inflate / resolved clusters don't reopen. The watermark is advanced
+    BEFORE any incident is recorded, and recording is skipped if that advance fails
+    to persist (the watermark and the incident ledger are separate JSON stores with
+    no shared transaction). That ordering closes the "counts bumped but watermark not
+    advanced" window a swallowed write-failure used to leave open. The remaining
+    residual is the benign opposite: a process kill landing between the watermark
+    write and the record loop UNDER-counts a few signals for one slice rather than
+    re-counting them or re-opening a resolved cluster.
 
     Catches up oldest-first: each run scans the OLDEST `scan_turns` turns not yet
     mined (`[watermark : watermark+scan_turns]`) and advances the watermark by ONLY
@@ -173,6 +185,20 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
         # permanently skipped, per-run work bounded.
         end = min(start + scan_turns, total)
         turns = all_turns[start:end]
+        # Advance the watermark FIRST, then record -- and only record if the advance
+        # landed (idempotency-before-effect). The watermark and the incident ledger are
+        # two separate JSON stores with no shared transaction, so the dangerous window is
+        # "counts bumped but watermark not advanced": the next run re-scans the same slice
+        # and re-bumps clusters (and could REOPEN a resolved one). By persisting the
+        # advanced watermark before any record_incident call and bailing if that write
+        # fails, a record-without-advance can no longer happen. The residual flips to the
+        # benign direction: an advance-without-record (a process kill between the two
+        # stores) UNDER-counts a few signals rather than re-bumping/reopening -- a miss in
+        # a precision-biased advisory miner, never a false un-resolve of a held fix.
+        if end > start and not _write_watermark(end):
+            log.warning("chatmine: watermark advance failed; skipping this slice "
+                        "to avoid re-counting on the next run")
+            return recorded
         for turn in turns:
             if not isinstance(turn, dict) or not _is_user_turn(turn):
                 continue
@@ -187,18 +213,23 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
                 if not m:
                     continue
                 seen_labels.add(label)
-                # Signature: the signal label + the matched phrase. The label keeps
-                # repeats of one correction KIND in a single cluster; record_incident's
-                # fingerprint strips the volatile remainder.
-                signature = f"user correction: {label} ({m.group(0).strip().lower()})"
+                # Signature = the signal LABEL only (the weakness CATEGORY the regex
+                # matched), NOT the matched substring. _fingerprint normalizes digits/
+                # URLs/hex but NOT varied wording, so keying on the substring split
+                # "stop doing X" vs "you keep doing Y" -- same weakness, different words --
+                # into separate clusters, and diagnose()'s min_count gate never tripped
+                # for a recurring weakness re-phrased each time. Keying on the label rolls
+                # every same-category correction into ONE cluster whose count actually
+                # accrues. The matched phrase + excerpt still ride along as a NON-keyed
+                # sample (record_incident stores samples without fingerprinting them), so
+                # the cluster stays informative without splitting.
+                signature = f"chat weakness: {label}"
+                phrase = m.group(0).strip().lower()
                 excerpt = text.strip()[:_SAMPLE_CHARS]
+                sample = f"[{phrase}] {excerpt}"[:_SAMPLE_CHARS]
                 if argo_incidents.record_incident(
-                        kind="chat_weakness", signature=signature, sample=excerpt):
+                        kind="chat_weakness", signature=signature, sample=sample):
                     recorded += 1
-        # Advance the watermark by ONLY what we scanned (the oldest-unmined slice end),
-        # never straight to `total`: any backlog still in [end:total] is not yet mined
-        # and must be picked up oldest-first by a later run, not skipped.
-        _write_watermark(end)
         if recorded:
             log.info("chatmine: filed %d chat_weakness incident(s)", recorded)
         return recorded
