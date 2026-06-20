@@ -1397,6 +1397,19 @@ def _open_pr(title, description, files):
                   "head_sha": pr.get("head", {}).get("sha"), "branch": branch}
 
 
+def _gate_and_open(title, description, files, validate=_validate_paths_and_count):
+    """Shared tail of every propose path: run the size/path validator + the repro-wiring gate,
+    then open the PR. Returns (True, info) on success, or (False, error_string) on a gate
+    refusal OR an _open_pr failure -- so the self-fix path can never drift from the
+    propose_change / propose_edit tools' gate. The whole-file path passes
+    validate=_validate_files (per-file byte cap); the edit paths take the default
+    _validate_paths_and_count (the cap is on the edit, not the resolved file)."""
+    err = validate(files) or _proposal_gate(files)
+    if err:
+        return False, err
+    return _open_pr(title, description, files)
+
+
 def _propose_change_impl(title, description, files_json):
     """Validate -> gate (repro + wire-check) -> open PR. Returns (text, info_or_None) so
     both the MCP tool (text) and the self-fix path (info, for the ledger) can use it."""
@@ -1405,10 +1418,7 @@ def _propose_change_impl(title, description, files_json):
         assert isinstance(files, dict) and files
     except Exception:
         return "files_json must be a non-empty JSON object of {path: contents}.", None
-    err = _validate_files(files) or _proposal_gate(files)
-    if err:
-        return err, None
-    ok, info = _open_pr(title, description, files)
+    ok, info = _gate_and_open(title, description, files, _validate_files)
     if not ok:
         return info, None
     return f"Opened PR for review: {info['url']}", info
@@ -1526,10 +1536,7 @@ def _propose_edit_impl(title, description, edits_json):
     files, err = _resolve_edits(edits)
     if err:
         return err
-    err = _validate_paths_and_count(files) or _proposal_gate(files)
-    if err:
-        return err
-    ok, info = _open_pr(title, description, files)
+    ok, info = _gate_and_open(title, description, files)
     if not ok:
         return info
     return f"Opened PR for review: {info['url']}"
@@ -1668,17 +1675,24 @@ def read_pr_review(pr: str) -> str:
 
 _AUTHOR_SYSTEM = ("You are Argo, writing a minimal, correct fix for one of your own "
                   "recurring bugs. You draft a PR a human reviews; you never merge.")
-_AUTHOR_PROMPT = (
+_AUTHOR_EDITS_PROMPT = (
     "Diagnosis and suggested fix:\n{diagnosis}\n{suggestion}\n\n"
     "Current contents of the suspected files (may be truncated):\n{files}\n\n"
-    'Return ONLY a JSON object: {{"files": {{"<path>": "<full new file contents>"}}}}.\n'
+    'Return ONLY a JSON object: {{"edits": [ ... ]}} where each element is ONE of:\n'
+    '  {{"path": "<existing file>", "old": "<exact current text>", "new": "<replacement>"}}\n'
+    '  {{"path": "tests/test_x.py", "new": "<full new file contents>"}}   (omit "old" to '
+    "CREATE a new file)\n"
     "Requirements:\n"
-    "- Make the SMALLEST change that fixes the bug; return the FULL new contents of each "
-    "file you change.\n"
-    "- INCLUDE a test under tests/ named test_*.py that FAILS on the current code and "
-    "PASSES with your fix, and that imports/exercises the changed module.\n"
+    "- For a file that ALREADY EXISTS you MUST use an {{old, new}} edit. Copy 'old' EXACTLY "
+    "from the contents above; it must appear EXACTLY ONCE (add surrounding lines to make it "
+    "unique). This keeps the change surgical -- you cannot rewrite code you did not name.\n"
+    "- INCLUDE a reproduction test under tests/ named test_*.py that FAILS on the current "
+    "code and PASSES with your fix; create it with the no-'old' form and import/exercise "
+    "the changed module.\n"
     "- Any new function or class you add must actually be called (wired in), not just "
     "defined.\n"
+    "- Make the SMALLEST change that fixes the bug. If it cannot be expressed as a few "
+    "surgical edits, reply with an empty edits list rather than a sprawling rewrite.\n"
     "- Standard library only; no new dependencies. Plain ASCII, no em dashes.")
 
 
@@ -1686,16 +1700,19 @@ _AUTHOR_PROMPT = (
 # the draft would truncate mid-JSON and parse to nothing. 16000 is the non-streaming
 # ceiling for these models (above it the SDK requires streaming).
 _AUTHOR_MAX_TOKENS = 16000
-_REPAIR_NOTE = (
-    "That draft was rejected: {reason}. Reply again with ONLY a single JSON object of "
-    'the form {{"files": {{"path/to/file.py": "<full new file contents>"}}}} -- no prose, '
-    "no markdown fences -- and include the tests/test_*.py reproduction. Standard library "
-    "only, plain ASCII, no em dashes.")
+_REPAIR_NOTE_EDITS = (
+    "That draft was rejected: {reason}. Reply again with ONLY a single JSON object of the "
+    'form {{"edits": [{{"path": "src/x.py", "old": "<exact current text>", "new": "..."}}, '
+    '{{"path": "tests/test_x.py", "new": "<full file>"}}]}} -- no prose, no markdown fences '
+    "-- and include the tests/test_*.py reproduction. Standard library only, plain ASCII, "
+    "no em dashes.")
 
 
-def _extract_fix_files(raw):
-    """Pull the {path: full_contents} map out of a draft reply. Returns (files, None) on
-    success or (None, reason) naming what was wrong, so the caller can ask for a repair."""
+def _extract_fix_edits(raw):
+    """Pull the surgical-edits list out of a draft reply: {"edits": [{path, old?, new}, ...]}.
+    Returns (edits, None) on success or (None, reason) naming what was wrong, so the caller
+    can ask for a repair. Shape gate only -- _resolve_edits does the deep validation (old
+    matches once, create-vs-edit, size)."""
     m = re.search(r"\{.*\}", raw or "", re.DOTALL)
     if not m:
         return None, "your reply contained no JSON object (it may have been truncated)"
@@ -1703,28 +1720,58 @@ def _extract_fix_files(raw):
         obj = json.loads(m.group(0))
     except (ValueError, json.JSONDecodeError):
         return None, "the JSON did not parse (likely truncated or malformed)"
-    files = obj.get("files") if isinstance(obj, dict) else None
-    if isinstance(files, dict) and files and all(isinstance(v, str) for v in files.values()):
-        return files, None
-    return None, ('there was no valid "files" object mapping each path to its full new '
-                  "file contents as a string")
+    edits = obj.get("edits") if isinstance(obj, dict) else None
+    if (isinstance(edits, list)
+            and all(isinstance(e, dict) and e.get("path")
+                    and isinstance(e.get("new"), str) for e in edits)):
+        # An EMPTY list is the model's intended decline ("no surgical fix exists" -- the
+        # prompt invites it), a valid terminal response, NOT a near-miss to repair. The
+        # caller (_author_fix_edits) returns it as-is and _run_propose_fix declines on it.
+        return edits, None
+    return None, ('there was no valid "edits" array of {path, old?, new} objects, each with '
+                  "a path and a string new")
 
 
-def _author_fix_files(payload):
-    """Premium model call: given the diagnosis + the current contents of the suspected
-    files, draft {path: full_new_contents} INCLUDING a tests/test_*.py reproduction.
-    Returns the files dict or None. Drafts with a generous max_tokens (so the JSON isn't
-    truncated) and grants ONE repair pass on a recoverable near-miss -- the two reasons a
-    tractable fix used to come back as None and Argo declined. Guarded; never raises."""
+def _read_base_file(path):
+    """Read a file's contents from the PROPOSE_BASE branch -- the SAME base _resolve_edits
+    matches a drafted 'old' against -- so the author shows the model the exact bytes its edit
+    will apply to. Falls back to the local checkout if the GitHub read fails (offline /
+    PROPOSE_REPO unset); best-effort, since this is only prompt context. Returns text or None."""
+    import base64
+    ok, cur = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+    if ok and isinstance(cur, dict) and "content" in cur:
+        try:
+            return base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            pass
+    try:
+        return (ROOT / path).read_text()
+    except OSError:
+        return None
+
+
+def _author_fix_edits(payload):
+    """Premium model call: given the diagnosis + the current contents of the suspected files,
+    draft a list of {path, old?, new} SURGICAL edits INCLUDING a tests/test_*.py reproduction.
+    Existing files are changed by an exact-once {old->new} replacement; new files (the repro
+    test) are created in full. Authoring surgically -- instead of resubmitting whole files --
+    makes same-file collateral structurally impossible: the model can only change bytes inside
+    the snippets it names, so it cannot rewrite an unrelated function as a side effect (PR #30
+    / Finding_043). Returns the edits list (possibly empty = an intended decline) or None.
+    Drafts with a generous max_tokens (so the JSON isn't truncated) and grants ONE repair pass
+    on a recoverable near-miss. Guarded; never raises."""
     import argo_observe as observe
     suspected = [f for f in (payload.get("suspected_files") or [])
-                 if isinstance(f, str) and (ROOT / f).exists()][:MAX_PROPOSE_FILES - 1]
+                 if isinstance(f, str)][:MAX_PROPOSE_FILES - 1]
     current = {}
     for f in suspected:
-        try:
-            current[f] = (ROOT / f).read_text()[:MAX_PROPOSE_BYTES]
-        except OSError:
-            pass
+        # Source from PROPOSE_BASE, not the local checkout: _resolve_edits matches 'old'
+        # against PROPOSE_BASE, so on a stale deploy an 'old' copied from a divergent local
+        # file would never resolve. Show the model the bytes the edit will actually hit.
+        content = _read_base_file(f)
+        if content is not None:
+            current[f] = content[:MAX_PROPOSE_BYTES]
     model = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
     prov = observe.provider_for(model)
     if not prov or not os.environ.get(prov["key_env"]):
@@ -1732,7 +1779,7 @@ def _author_fix_files(payload):
         prov = observe.provider_for(model)
         if not prov or not os.environ.get(prov["key_env"]):
             return None
-    prompt = _AUTHOR_PROMPT.format(
+    prompt = _AUTHOR_EDITS_PROMPT.format(
         diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
         files=json.dumps(current, indent=2)[:30000] or "(no current files)")
     messages = [{"role": "user", "content": prompt}]
@@ -1745,9 +1792,9 @@ def _author_fix_files(payload):
         except Exception:
             log.error("author_fix: model call failed", exc_info=True)
             return None  # infra failure (no credits, breaker open) -- a retry won't help
-        files, reason = _extract_fix_files(raw)
-        if files is not None:
-            return files
+        edits, reason = _extract_fix_edits(raw)
+        if edits is not None:
+            return edits
         if attempt == 0:
             # One repair pass: hand the model its own draft plus the exact reason it was
             # rejected and ask again, rather than an instant give-up. A near-miss
@@ -1761,29 +1808,36 @@ def _author_fix_files(payload):
                 # is empty, just re-send the original prompt for the second attempt.
                 messages = messages + [
                     {"role": "assistant", "content": raw},
-                    {"role": "user", "content": _REPAIR_NOTE.format(reason=reason)},
+                    {"role": "user", "content": _REPAIR_NOTE_EDITS.format(reason=reason)},
                 ]
     return None
 
 
 def _run_propose_fix(payload, return_info=False):
-    """FIX path: draft the fix files, run them through the propose gate + open the PR,
-    and record the PR in the proposal ledger so verify/confirm can follow it to
-    resolution. Honest acks only -- proposed and pending review, never 'fixed.'
-    With return_info=True, returns (text, info_or_None) so the caller learns the PR
-    number directly instead of re-joining through the proposals ledger."""
+    """FIX/EVOLVE path: draft the fix as SURGICAL edits, resolve them against the current
+    base, run them through the propose gate + open the PR, and record the PR in the proposal
+    ledger so verify/confirm can follow it to resolution. Authoring via {old->new} edits (not
+    whole-file replacement) means a change to an existing module can't rewrite code it didn't
+    name -- no same-file collateral (PR #30 / Finding_043). Honest acks only -- proposed and
+    pending review, never 'fixed.' With return_info=True, returns (text, info_or_None) so the
+    caller learns the PR number directly instead of re-joining through the proposals ledger."""
     def _done(text, info=None):
         return (text, info) if return_info else text
-    files = _author_fix_files(payload)
-    if not files:
+    edits = _author_fix_edits(payload)
+    if not edits:
         return _done("I couldn't draft a fix I trust for that one (no small, testable "
                      "change). I'll leave it for you rather than open a shaky PR.")
-    text, info = _propose_change_impl(
-        payload.get("title", "Argo self-fix"), payload.get("description", ""),
-        json.dumps(files))
-    if not info:
-        return _done(f"I drafted a fix but it didn't pass my own checks, so I didn't "
-                     f"open it: {text}")
+    files, err = _resolve_edits(edits)
+    if err:
+        return _done("I drafted edits but they didn't resolve cleanly against the current "
+                     f"code, so I didn't open a PR: {err}")
+    # Same gate -> open seam as _propose_edit_impl (the byte cap is on the edit, not the
+    # resolved file), so the self-fix path can never drift from the propose_edit tool's gate.
+    ok, info = _gate_and_open(payload.get("title", "Argo self-fix"),
+                              payload.get("description", ""), files)
+    if not ok:
+        return _done(f"I drafted a fix but couldn't open a clean PR for it (it failed a "
+                     f"safety check or the PR write): {info}")
     try:
         import argo_diagnose
         argo_diagnose.append_proposal(
