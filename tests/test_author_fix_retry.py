@@ -1,13 +1,16 @@
-"""_author_fix_files: the EVOLVE/FIX drafting harness must actually land a PR for a
-tractable change instead of declining on the first stumble.
+"""_author_fix_edits: the EVOLVE/FIX drafting harness must actually land a PR for a
+tractable change instead of declining on the first stumble -- and it now drafts SURGICAL
+{path, old?, new} edits (not whole files), so a change to an existing module cannot rewrite
+unrelated code as collateral (PR #30 / Finding_043).
 
-Two failures made it return None (-> "I couldn't draft a fix I trust"): the draft
-truncated mid-JSON because chat_with_mcp's 1024-token default is far too small for full
-file bodies + a repro test, and a single-shot harness gave up on a recoverable near-miss.
-These lock in the generous max_tokens, the one repair pass, and the no-retry-on-infra rule.
+Two failures used to make it return None (-> "I couldn't draft a fix I trust"): the draft
+truncated mid-JSON because chat_with_mcp's 1024-token default is far too small for the edit
+bodies + a repro test, and a single-shot harness gave up on a recoverable near-miss. These
+lock in the generous max_tokens, the one repair pass, the no-retry-on-infra rule, and the
+edits-shaped output.
 
-Pure: the model call is stubbed; no network/LLM. ANTHROPIC_API_KEY is faked so the
-premium (Opus) model resolves.
+Pure: the model call is stubbed; no network/LLM. ANTHROPIC_API_KEY is faked so the premium
+(Opus) model resolves.
 Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 """
 
@@ -20,7 +23,7 @@ import argo_mcp_server as srv
 import argo_observe as observe
 
 
-class AuthorFixRetryTest(unittest.TestCase):
+class AuthorFixEditsTest(unittest.TestCase):
     def setUp(self):
         self.enterContext(mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}))
         self.enterContext(mock.patch.object(
@@ -28,9 +31,9 @@ class AuthorFixRetryTest(unittest.TestCase):
             lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY"}))
         self.payload = {"description": "d", "suggestion": "s", "suspected_files": []}
 
-    _GOOD = json.dumps({"files": {
-        "src/x.py": "print('x')\n",
-        "tests/test_x.py": "def test_x():\n    assert True\n"}})
+    _GOOD = json.dumps({"edits": [
+        {"path": "src/x.py", "old": "return 1", "new": "return 2"},
+        {"path": "tests/test_x.py", "new": "def test_x():\n    assert True\n"}]})
 
     def test_repair_pass_recovers_a_near_miss(self):
         replies = iter(["here is the fix, but no json at all", self._GOOD])
@@ -40,9 +43,10 @@ class AuthorFixRetryTest(unittest.TestCase):
             captured.append((list(messages), kw.get("max_tokens")))
             return next(replies)
         with mock.patch.object(observe, "chat_with_mcp", fake_chat):
-            files = srv._author_fix_files(self.payload)
+            edits = srv._author_fix_edits(self.payload)
 
-        self.assertEqual(files["src/x.py"], "print('x')\n")
+        self.assertEqual(edits[0]["old"], "return 1")            # surgical edit, not full file
+        self.assertEqual(edits[1]["path"], "tests/test_x.py")    # repro test created in full
         self.assertEqual(len(captured), 2)                       # one repair pass
         self.assertEqual(captured[0][1], srv._AUTHOR_MAX_TOKENS)  # generous, not 1024
         # the repair turn carried the rejected draft + a correction instruction
@@ -61,9 +65,9 @@ class AuthorFixRetryTest(unittest.TestCase):
             captured.append(list(messages))
             return next(replies)
         with mock.patch.object(observe, "chat_with_mcp", fake_chat):
-            files = srv._author_fix_files(self.payload)
+            edits = srv._author_fix_edits(self.payload)
 
-        self.assertEqual(files["src/x.py"], "print('x')\n")
+        self.assertEqual(edits[0]["new"], "return 2")
         self.assertEqual(len(captured), 2)
         # the retry re-sent the original single user turn -- no empty assistant block
         self.assertEqual(len(captured[1]), 1)
@@ -72,13 +76,13 @@ class AuthorFixRetryTest(unittest.TestCase):
     def test_infra_failure_does_not_retry(self):
         chat = mock.Mock(side_effect=RuntimeError("breaker open / no credits"))
         with mock.patch.object(observe, "chat_with_mcp", chat):
-            self.assertIsNone(srv._author_fix_files(self.payload))
+            self.assertIsNone(srv._author_fix_edits(self.payload))
         self.assertEqual(chat.call_count, 1)                    # a retry can't fix infra
 
     def test_two_content_misses_gives_up(self):
         chat = mock.Mock(return_value="no json anywhere in here")
         with mock.patch.object(observe, "chat_with_mcp", chat):
-            self.assertIsNone(srv._author_fix_files(self.payload))
+            self.assertIsNone(srv._author_fix_edits(self.payload))
         self.assertEqual(chat.call_count, 2)                    # tried the repair, then stopped
 
 
