@@ -1721,12 +1721,34 @@ def _extract_fix_edits(raw):
     except (ValueError, json.JSONDecodeError):
         return None, "the JSON did not parse (likely truncated or malformed)"
     edits = obj.get("edits") if isinstance(obj, dict) else None
-    if (isinstance(edits, list) and edits
+    if (isinstance(edits, list)
             and all(isinstance(e, dict) and e.get("path")
                     and isinstance(e.get("new"), str) for e in edits)):
+        # An EMPTY list is the model's intended decline ("no surgical fix exists" -- the
+        # prompt invites it), a valid terminal response, NOT a near-miss to repair. The
+        # caller (_author_fix_edits) returns it as-is and _run_propose_fix declines on it.
         return edits, None
     return None, ('there was no valid "edits" array of {path, old?, new} objects, each with '
                   "a path and a string new")
+
+
+def _read_base_file(path):
+    """Read a file's contents from the PROPOSE_BASE branch -- the SAME base _resolve_edits
+    matches a drafted 'old' against -- so the author shows the model the exact bytes its edit
+    will apply to. Falls back to the local checkout if the GitHub read fails (offline /
+    PROPOSE_REPO unset); best-effort, since this is only prompt context. Returns text or None."""
+    import base64
+    ok, cur = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+    if ok and isinstance(cur, dict) and "content" in cur:
+        try:
+            return base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            pass
+    try:
+        return (ROOT / path).read_text()
+    except OSError:
+        return None
 
 
 def _author_fix_edits(payload):
@@ -1736,18 +1758,20 @@ def _author_fix_edits(payload):
     test) are created in full. Authoring surgically -- instead of resubmitting whole files --
     makes same-file collateral structurally impossible: the model can only change bytes inside
     the snippets it names, so it cannot rewrite an unrelated function as a side effect (PR #30
-    / Finding_043). Returns the edits list or None. Drafts with a generous max_tokens (so the
-    JSON isn't truncated) and grants ONE repair pass on a recoverable near-miss. Guarded;
-    never raises."""
+    / Finding_043). Returns the edits list (possibly empty = an intended decline) or None.
+    Drafts with a generous max_tokens (so the JSON isn't truncated) and grants ONE repair pass
+    on a recoverable near-miss. Guarded; never raises."""
     import argo_observe as observe
     suspected = [f for f in (payload.get("suspected_files") or [])
-                 if isinstance(f, str) and (ROOT / f).exists()][:MAX_PROPOSE_FILES - 1]
+                 if isinstance(f, str)][:MAX_PROPOSE_FILES - 1]
     current = {}
     for f in suspected:
-        try:
-            current[f] = (ROOT / f).read_text()[:MAX_PROPOSE_BYTES]
-        except OSError:
-            pass
+        # Source from PROPOSE_BASE, not the local checkout: _resolve_edits matches 'old'
+        # against PROPOSE_BASE, so on a stale deploy an 'old' copied from a divergent local
+        # file would never resolve. Show the model the bytes the edit will actually hit.
+        content = _read_base_file(f)
+        if content is not None:
+            current[f] = content[:MAX_PROPOSE_BYTES]
     model = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
     prov = observe.provider_for(model)
     if not prov or not os.environ.get(prov["key_env"]):

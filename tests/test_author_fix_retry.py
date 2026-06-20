@@ -79,6 +79,40 @@ class AuthorFixEditsTest(unittest.TestCase):
             self.assertIsNone(srv._author_fix_edits(self.payload))
         self.assertEqual(chat.call_count, 1)                    # a retry can't fix infra
 
+    def test_empty_edits_list_declines_without_a_repair_pass(self):
+        # The prompt invites an empty edits list when no surgical fix exists; that's an
+        # intended decline, NOT a near-miss -- it must not burn the repair pass.
+        chat = mock.Mock(return_value=json.dumps({"edits": []}))
+        with mock.patch.object(observe, "chat_with_mcp", chat):
+            edits = srv._author_fix_edits(self.payload)
+        self.assertEqual(edits, [])
+        self.assertEqual(chat.call_count, 1)                    # no wasted repair on a decline
+
+    def test_author_reads_suspected_files_from_propose_base(self):
+        # The author must show the model the PROPOSE_BASE bytes (what _resolve_edits matches
+        # 'old' against), not the local checkout -- else a drafted 'old' won't resolve on a
+        # stale deploy.
+        import base64
+        captured = {}
+
+        def fake_gh(method, path, body):
+            captured["read_path"] = path
+            return True, {"content": base64.b64encode(b"BASE BYTES\n").decode(), "sha": "s"}
+
+        def fake_chat(system, messages, model, **kw):
+            captured["prompt"] = messages[0]["content"]
+            return json.dumps({"edits": [{"path": "src/x.py", "old": "BASE", "new": "B"},
+                                         {"path": "tests/test_x.py", "new": "x"}]})
+
+        payload = {"description": "d", "suggestion": "s", "suspected_files": ["src/x.py"]}
+        with mock.patch.object(srv, "_gh_write", side_effect=fake_gh), \
+             mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            edits = srv._author_fix_edits(payload)
+        self.assertIsNotNone(edits)
+        self.assertIn("ref=", captured["read_path"])            # read pinned to a branch ref
+        self.assertIn("/contents/src/x.py", captured["read_path"])
+        self.assertIn("BASE BYTES", captured["prompt"])         # base bytes shown to the model
+
     def test_two_content_misses_gives_up(self):
         chat = mock.Mock(return_value="no json anywhere in here")
         with mock.patch.object(observe, "chat_with_mcp", chat):
