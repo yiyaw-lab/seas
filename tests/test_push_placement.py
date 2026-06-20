@@ -134,6 +134,47 @@ class SenderSurvivesPostFailureTest(unittest.TestCase):
         self.assertIn("the project body", sent_calls[0])
 
 
+class WatchRecordsBeforeSendTest(unittest.TestCase):
+    """(a, ordering half): argo_watch.main records the push BEFORE the send.
+
+    The 2nd home of Bugbot PR #36 finding 2: like argo_project.main, the watcher
+    must call argo_pushes.post_to_webhook("watch", ...) before
+    send_telegram.send_message(...), so the push row + its timestamp always precede
+    any reply -- otherwise a fast user reply can timestamp ahead of its own push,
+    link_reply finds no open push to link, and act_on_rate undercounts. The
+    chat-memory record stays AFTER the send.
+    """
+
+    def test_post_to_webhook_precedes_send_when_an_alert_fires(self):
+        import argo_watch
+
+        order = []
+        alert = "a frontier-relevant thing happened"
+        with mock.patch.object(argo_watch, "load_seen", return_value={}), \
+             mock.patch.object(argo_watch, "collect_new",
+                               return_value=[{"title": "t", "link": "http://x"}]), \
+             mock.patch.object(argo_watch, "collect_grok", return_value=[]), \
+             mock.patch.object(argo_watch, "judge", return_value=[alert]), \
+             mock.patch.object(argo_watch, "save_seen"), \
+             mock.patch.object(argo_watch.argo_pushes, "post_to_webhook",
+                               side_effect=lambda *a, **k: order.append(("post",) + a)), \
+             mock.patch.object(argo_watch.send_telegram, "send_message",
+                               side_effect=lambda m: order.append(("send", m))), \
+             mock.patch.object(argo_watch.argo_memory, "record",
+                               side_effect=lambda *a, **k: order.append(("memory",))), \
+             mock.patch.object(argo_watch.sys, "argv", ["argo_watch.py"]):
+            argo_watch.main()
+
+        # The push was recorded, the message was sent, and the memory write ran --
+        # and the record-before-send ordering holds, with memory last.
+        kinds = [step[0] for step in order]
+        self.assertEqual(kinds, ["post", "send", "memory"])
+        # The push was recorded with the "watch" kind and the alert content...
+        self.assertEqual(order[0], ("post", "watch", f"🛰️ Argo spotted something:\n\n{alert}"))
+        # ...and the very same message reached send_telegram.
+        self.assertEqual(order[1][1], f"🛰️ Argo spotted something:\n\n{alert}")
+
+
 class PushEndpointWritesVolumeTest(unittest.TestCase):
     """(b) Railway side: /push handler records to PUSHES_PATH; idempotent on retry."""
 
