@@ -55,6 +55,7 @@ import argo_http
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_rating
 import argo_reply_context
 import argo_store
@@ -486,6 +487,14 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
         return None
 
     hist = _recent_turns(chat_id)
+
+    # A genuine user turn reached us: link it to the most recent unanswered push
+    # (the weekly project / a tripwire alert) so act_on_rate measures whether
+    # Argo's unprompted sends land. Best-effort -- never block the reply.
+    try:
+        argo_pushes.link_reply(chat_id, time.time())
+    except Exception:
+        log.warning("could not link reply to push", exc_info=True)
 
     last_error = None
     tooled_failed = False  # an MCP-capable model errored earlier this turn

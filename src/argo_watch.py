@@ -36,6 +36,7 @@ load_dotenv(ROOT / ".env")
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_store
 import fetch_signals
 import send_telegram
@@ -281,6 +282,12 @@ def main():
                 except Exception:
                     log.warning("could not record watch alert to chat memory",
                                 exc_info=True)
+                # Instrument the push so act_on_rate can tell whether it landed (a
+                # user reply links it in the webhook). Best-effort: never block.
+                try:
+                    argo_pushes.record("watch", msg)
+                except Exception:
+                    log.warning("could not instrument watch push", exc_info=True)
 
     if no_send:
         print("\n(--no-send: nothing sent, seen-store NOT updated)")

@@ -32,6 +32,7 @@ from pathlib import Path
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_store
 import profile
 import send_telegram
@@ -488,6 +489,12 @@ def main():
         argo_memory.record(os.environ.get("TELEGRAM_CHAT_ID"), "Argo", sent)
     except Exception:
         print("(could not record project to chat memory)")
+    # Instrument the push so act_on_rate can tell whether it landed (a user reply
+    # links it in the webhook). Best-effort, never block delivery.
+    try:
+        argo_pushes.record("project", sent)
+    except Exception:
+        print("(could not instrument project push)")
     print()
 
 

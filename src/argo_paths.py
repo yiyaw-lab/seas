@@ -92,6 +92,12 @@ PENDING_HEAL_PATH = Path(os.environ.get("ARGO_PENDING_HEAL_PATH",
                                         str(DATA / "argo_pending_heal.json")))
 PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
                                        str(DATA / "argo_predictions.json")))
+# Acted-on-push instrumentation (argo_pushes): one row per scheduled/unprompted
+# "push" Argo sends, marked linked when a user reply lands within the window. The
+# proactive senders (project/watch) write it and the webhook links it at chat
+# time on the live bot, so point ARGO_PUSHES_PATH at the Railway volume or each
+# redeploy wipes the act-on-rate history. Gitignored.
+PUSHES_PATH = Path(os.environ.get("ARGO_PUSHES_PATH", str(DATA / "argo_pushes.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.
