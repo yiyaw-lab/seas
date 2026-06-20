@@ -107,6 +107,23 @@ class PersistentContextPopulatedTest(unittest.TestCase):
         self.assertNotIn("Pathology Eval Harness", block)
 
 
+class ActiveProjectLineAttributionTest(unittest.TestCase):
+    """The energy rating in the active-project fact was written by record_rating
+    when the HUMAN sent a 1-10. The fact lands in the SYSTEM prompt where "you" =
+    Argo, so phrasing it "you rated it N/10" misattributes the rating's author to
+    Argo. It must be neutrally, correctly attributed to the builder/human."""
+
+    def test_energy_line_attributes_rating_to_builder_not_argo(self):
+        with _Fixtures(_BELIEFS, _PROJECTS):
+            line = wh._active_project_line()
+        # The project fact carries the energy value...
+        self.assertIn("8/10", line)
+        # ...but never as "you rated" (that reads as Argo rating it in-prompt).
+        self.assertNotIn("you rated", line.lower())
+        # It is correctly attributed to the human who actually rated it.
+        self.assertIn("builder", line.lower())
+
+
 class PersistentContextDegradeTest(unittest.TestCase):
     """(b) Missing/empty/corrupt sources -> block omitted, prompt still valid."""
 

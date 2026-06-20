@@ -185,7 +185,7 @@ def _active_project_line():
     line = line[:120]
     energy = p.get("energy")
     if energy is not None:
-        return f"{line} (you rated it {energy}/10)"
+        return f"{line} (builder's energy rating: {energy}/10)"
     return line
 
 
