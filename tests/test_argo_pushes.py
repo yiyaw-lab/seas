@@ -53,6 +53,37 @@ class PushStoreTest(unittest.TestCase):
     def test_act_on_rate_zero_when_empty(self):
         self.assertEqual(argo_pushes.act_on_rate(), 0.0)
 
+    def test_record_idempotent_within_window(self):
+        """A retry that re-POSTs identical (kind, content) within the dedup window
+        must collapse to ONE row with the SAME id (the at-least-once double-record
+        the round-2 retry could otherwise cause); identical content OUTSIDE the
+        window records separately (a genuinely distinct later send).
+        """
+        base = 2_000_000.0
+
+        # First record.
+        first = argo_pushes.record("project", "same body", ts=base)
+        # The retry re-POSTs the SAME (kind, content) ~10s later (within window):
+        # one row, same id, no new append.
+        retry = argo_pushes.record("project", "same body", ts=base + 10)
+        self.assertEqual(retry, first)
+        self.assertEqual(len(self._events()), 1)
+
+        # The dedup must not mutate the existing row's linked state.
+        self.assertFalse(self._events()[0]["linked"])
+
+        # Identical content OUTSIDE the window is a distinct push -> a SECOND row.
+        far_ts = base + argo_pushes.RECORD_DEDUP_SECONDS + 1
+        second = argo_pushes.record("project", "same body", ts=far_ts)
+        self.assertNotEqual(second, first)
+        self.assertEqual(len(self._events()), 2)
+
+        # A different kind with the same content within the window is also distinct
+        # (content_hash does not incorporate kind, so the kind guard must catch it).
+        other = argo_pushes.record("watch", "same body", ts=base + 10)
+        self.assertNotEqual(other, first)
+        self.assertEqual(len(self._events()), 3)
+
 
 class _Resp:
     """Minimal context-manager stand-in for a urlopen 2xx response."""

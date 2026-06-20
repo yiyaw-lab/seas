@@ -42,6 +42,12 @@ PUSHES_PATH = argo_paths.PUSHES_PATH
 # away) still links. Past this we assume the reply is about something else.
 LINK_WINDOW_SECONDS = 6 * 3600
 
+# How recently an identical (kind, content) push must have been recorded for a
+# repeat record() call to be treated as a re-send of the same push (the at-least-
+# once retry) and collapsed to the existing row rather than appended. 5 min easily
+# absorbs the ~10s retry; identical content sent hours apart is outside it.
+RECORD_DEDUP_SECONDS = 300
+
 # Serializes the read-modify-write of record() and link_reply(). All writers live
 # in the one Railway webhook process (Decision_040): the webhook handles Telegram
 # updates on background threads and the /push handler writes concurrently in the
@@ -58,21 +64,47 @@ def _load():
 
 
 def record(kind, content, ts=None):
-    """Append one push event and return its new id (max existing + 1).
+    """Record one push event and return its id, idempotent within a short window.
 
     Stores a sha256 hash of the content rather than the content itself -- we only
     need to distinguish/audit pushes, not re-read their text (chat memory already
     keeps the full text). ts defaults to now.
+
+    Idempotency: the content_hash is over content ONLY (not kind), so within the
+    lock -- before appending -- we scan for an existing row with the SAME
+    content_hash AND the SAME kind recorded within RECORD_DEDUP_SECONDS of `ts`. If
+    one exists this is the at-least-once retry re-POSTing a push the first POST
+    already committed (the 2xx was lost to a timeout/reset after commit): we RETURN
+    its existing id WITHOUT appending and WITHOUT touching its linked state, so one
+    push is one row and act_on_rate's denominator can't double-count it. The
+    ~10s retry sits well inside the 5-min window; a genuinely identical re-send
+    minutes apart is itself effectively one push event, so collapsing it is correct;
+    legitimately distinct identical content sent HOURS apart (e.g. the same watch
+    alert on two cron runs) is far outside the window and still records separately.
+    Otherwise append a new row with id = max existing + 1.
     """
     if ts is None:
         ts = time.time()
     PUSHES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # Lock the load->mutate->save so a concurrent record/link_reply in the same
-    # webhook process can't drop a row or collide on max(id)+1.
+    content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+    # Lock the load->scan->mutate->save so a concurrent record/link_reply in the
+    # same webhook process can't drop a row, collide on max(id)+1, or race the
+    # dedup scan (the scan + append must be one atomic read-modify-write).
     with _write_lock:
         rows = _load()
+        # Dedup: an identical (kind, content) push within the window is the retry
+        # re-recording an already-committed push -- reuse its id, don't append.
+        for r in rows:
+            if r.get("content_hash") != content_hash or r.get("kind") != kind:
+                continue
+            r_ts = r.get("ts")
+            if not isinstance(r_ts, (int, float)):
+                continue
+            if 0 <= ts - r_ts <= RECORD_DEDUP_SECONDS:
+                log.info("deduped push (kind=%s) to existing id=%d within %ds",
+                         kind, r.get("id"), RECORD_DEDUP_SECONDS)
+                return r.get("id")
         new_id = max((r.get("id", 0) for r in rows), default=0) + 1
-        content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
         rows.append({
             "id": new_id,
             "ts": ts,
@@ -108,13 +140,19 @@ def post_to_webhook(kind, content):
     only -- this POST now precedes the Telegram send (record-before-send), so the
     per-attempt timeout is kept short and the retry capped at one so a flaky webhook
     can't noticeably delay delivery. A 4xx (e.g. bad auth) is permanent, not
-    retried. Residual best-effort limitation (Bugbot PR #36 finding 2, round 2):
-    if the POST still fails after the retry the push stays UNRECORDED while its
+    retried. The at-least-once hazard the retry introduces (the first POST reaches
+    the server and record() commits, but the 2xx is lost to a read timeout / reset
+    AFTER commit, so the retry re-POSTs the same content) is SAFE: record() dedupes
+    identical (kind, content) within RECORD_DEDUP_SECONDS, so the re-POST returns
+    the existing row's id instead of appending a second one -- no double-count in
+    act_on_rate's denominator. Residual best-effort limitations that remain by
+    design: (1) if the POST fails ALL retries the push stays UNRECORDED while its
     Telegram message was delivered, so a later user reply can link a DIFFERENT
-    still-open recorded push within the window and overstate act_on_rate. The retry
-    only shrinks the transient-failure window; closing it fully would need a
-    full per-message reply-attribution engine, which is out of scope for this
-    single honest-rate metric.
+    still-open recorded push within the window and overstate act_on_rate (closing
+    this fully would need a per-message reply-attribution engine, out of scope for
+    this single honest-rate metric); (2) genuinely distinct identical content sent
+    inside the dedup window collapses to one row, which is acceptable -- such a
+    re-send is effectively one push event.
     """
     base = os.environ.get("WEBHOOK_URL")
     token = os.environ.get("ARGO_MCP_TOKEN")

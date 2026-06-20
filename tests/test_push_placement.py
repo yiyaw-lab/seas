@@ -205,15 +205,17 @@ class PushEndpointWritesVolumeTest(unittest.TestCase):
         self.assertEqual(rows[0]["kind"], "project")
         self.assertFalse(rows[0]["linked"])
 
-    def test_retry_records_a_second_distinct_row(self):
-        # "Idempotent on retry" in the placement sense: a retried delivery is a new
-        # push event, recorded with the next id (max+1) -- the store never corrupts
-        # or loses a row, and ids stay monotone.
-        self._post({"kind": "watch", "content": "alert one"})
+    def test_retry_collapses_to_one_row(self):
+        # Idempotent on retry: an at-least-once re-POST of identical (kind, content)
+        # within RECORD_DEDUP_SECONDS (the first POST committed but its 2xx was lost,
+        # so post_to_webhook retried) collapses to ONE row with the SAME id, so
+        # act_on_rate's denominator never double-counts the one push.
+        r1 = self._post({"kind": "watch", "content": "alert one"})
         r2 = self._post({"kind": "watch", "content": "alert one"})
         self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.get_json()["id"], r1.get_json()["id"])
         rows = self._rows()
-        self.assertEqual([row["id"] for row in rows], [1, 2])
+        self.assertEqual([row["id"] for row in rows], [1])
 
     def test_missing_bearer_is_forbidden_and_writes_nothing(self):
         r = self._post({"kind": "project", "content": "x"}, token=None)
