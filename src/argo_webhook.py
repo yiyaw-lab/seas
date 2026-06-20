@@ -152,6 +152,100 @@ def _self_capability_block():
     return ("\n".join(parts) + "\n\n") if parts else ""
 
 
+# Stable header for the persistent-context block, so a test (and the model) can
+# find it deterministically and a prompt refactor can't silently drop it.
+PERSISTENT_CONTEXT_MARKER = "CURRENT CONTEXT (facts you carry between turns):"
+
+
+def _active_project_line():
+    """One factual line for the project the user is most recently looking at:
+    its bet name (or first real line) plus its energy rating if any. Returns ''
+    when no project was genuinely SHOWN (none has shown_at), when none is logged,
+    or the log is unreadable -- a "currently looking at" claim needs a real
+    visibility signal, never target_project's bare last-entry fallback. Reads the
+    module-level PROJECTS_LOG (the test patch point), so an override bites at call
+    time.
+
+    Source availability: the project log lives on the Railway volume
+    (ARGO_PROJECTS_PATH) -- the webhook that writes it is the same process that
+    reads it here, so this source is confirmed present on the live runtime."""
+    log = argo_store.load_json(PROJECTS_LOG, [])
+    if not isinstance(log, list) or not log:
+        return ""
+    p = argo_rating.target_project(log)
+    # Only a GENUINELY-shown project supports a "currently looking at" claim.
+    # target_project falls back to the last log entry when nothing has shown_at
+    # (that fallback is the bare-rating-attachment target, not a visibility
+    # signal), so gate on shown_at to avoid carrying a false "what they're
+    # viewing" fact across turns when nothing was actually shown.
+    if not p or not p.get("shown_at"):
+        return ""
+    text = p.get("text", "") or ""
+    line = ""
+    low = text.lower()
+    if "this week's bet:" in low:
+        after = text[low.find("this week's bet:") + len("this week's bet:"):]
+        line = next((l.strip() for l in after.splitlines() if l.strip()), "")
+    if not line:
+        line = next((l.strip() for l in text.splitlines()
+                     if l.strip() and not l.startswith("⚓")), "")
+    if not line:
+        return ""
+    line = line[:120]
+    energy = p.get("energy")
+    if energy is not None:
+        return f"{line} (builder's energy rating: {energy}/10)"
+    return line
+
+
+def _persistent_context_block():
+    """A conservative, FACTUAL context block for the system prompt, so Argo stays
+    continuous across turns instead of starting cold each time.
+
+    FACTS ONLY -- no personality, no tone: the prompt body above owns Argo's
+    voice, and this block must not shift it. Each fact is drawn ONLY from a source
+    confirmed present on the live Railway runtime:
+      - world_model.json: top frontier beliefs (highest-confidence first). Tracked
+        in the repo and env-overridable (ARGO_WORLD_MODEL_PATH) onto the volume, so
+        it ships and persists.
+      - the project log: the bet the user is currently looking at, with its energy
+        rating. On the Railway volume (ARGO_PROJECTS_PATH); the webhook reads/writes
+        it in-process.
+    DELIBERATELY OMITTED: private/decisions/*.md -- private/ is gitignored, so it is
+    NOT deployed to Railway. Depending on it would inject nothing live and risk an
+    empty/inconsistent block (the F1 placement lesson). Left out entirely.
+
+    Returns '' when every source is empty/unreadable, so the prompt degrades to its
+    prior form and never crashes a chat turn. Built at call time, so a fresh belief
+    or a newly shown project shows up with no second edit."""
+    facts = []
+
+    # Broad nets that LOG (per CLAUDE.md): this block only ENRICHES the prompt, so
+    # any source going bad -- unreadable, or valid-but-wrong shape (a dict where a
+    # list is expected, a hand-edited store) -- must degrade to omitting that fact,
+    # NEVER crash a chat turn. The specific I/O/parse errors are already swallowed
+    # in the loaders; this catches the structural surprises they don't.
+    try:
+        import world_model
+        beliefs = world_model.format_beliefs_for_prompt(limit=3)
+        if beliefs and beliefs != "(no beliefs yet)":
+            facts.append("Your top frontier beliefs right now (confidence is "
+                         "earned, not asserted):\n" + beliefs)
+    except Exception:
+        log.warning("persistent-context: world_model fact omitted", exc_info=True)
+
+    try:
+        proj = _active_project_line()
+        if proj:
+            facts.append("The project the user is currently looking at: " + proj)
+    except Exception:
+        log.warning("persistent-context: active project fact omitted", exc_info=True)
+
+    if not facts:
+        return ""
+    return PERSISTENT_CONTEXT_MARKER + "\n" + "\n\n".join(facts) + "\n\n"
+
+
 def build_system_prompt(p=None):
     """Argo's full system prompt, with the USER IDENTITY span (name, one-liner,
     persona/register) drawn from the active profile and the rest (self-knowledge,
@@ -363,6 +457,7 @@ def build_system_prompt(p=None):
     "from memory rather than guessing at 'latest'.\n"
     "\n"
     + _self_capability_block()
+    + _persistent_context_block()
     + "ATTRIBUTION: when something you say came from what you read, name the source "
     "in passing the way a person would ('their changelog says...', 'saw it on "
     "HN', 'the readme shows...'), and drop the link if it's worth checking. NEVER "
