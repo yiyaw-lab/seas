@@ -45,8 +45,9 @@ log = get_logger(__name__)
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
 # Repo source reads get a bigger cap than web fetches: Argo must read a whole module
 # to rewrite it with propose_change, so a full read has to cover any proposable file.
-# Matches MAX_PROPOSE_BYTES (40_000), defined later -- keep the two in lockstep.
-MAX_REPO_READ_CHARS = 40_000
+# A BYTE cap (like MAX_PROPOSE_BYTES, defined later) so a full read can never exceed the
+# byte size the propose path will accept -- the two are asserted in lockstep below.
+MAX_REPO_READ_BYTES = 40_000
 
 # Every tool runs behind a wall-clock DEADLINE well under the MCP client's fixed
 # 300s CallToolRequest budget. The failure we're guarding against: the Anthropic
@@ -380,7 +381,7 @@ def github_read_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> s
     # Read your OWN repo at the same branch propose_edit applies edits against, so a
     # snippet you copy as `old` matches what the edit is resolved against.
     return argo_github.gh_read_file(
-        repo, path, MAX_REPO_READ_CHARS, offset, limit, _propose_repo_ref(repo))
+        repo, path, MAX_REPO_READ_BYTES, offset, limit, _propose_repo_ref(repo))
 
 
 @mcp.tool()
@@ -1187,7 +1188,7 @@ MAX_PROPOSE_FILES = 5
 MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable
 # A full repo read must cover any file Argo is allowed to propose, or it could not
 # read what it's allowed to rewrite. Enforce the lockstep the constants' comments claim.
-assert MAX_REPO_READ_CHARS >= MAX_PROPOSE_BYTES
+assert MAX_REPO_READ_BYTES >= MAX_PROPOSE_BYTES
 # The self-modification loops (diagnose fixes, frontier evolution) must never be
 # able to touch their own safety rails: CI (which proves fail->pass), and the
 # budget/breaker guards. A proposal naming one of these is refused before any

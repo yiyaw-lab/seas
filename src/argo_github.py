@@ -81,13 +81,23 @@ def gh_api(path, raw=False):
     return False, f"GitHub API error: {type(last).__name__}: {last}{hint}"
 
 
-def gh_read_file(repo, path, max_chars, offset=0, limit=0, ref=None):
+def _cap_bytes(text, max_bytes):
+    """Truncate to at most max_bytes of UTF-8 (not characters), dropping a partial
+    trailing multibyte char. Byte-based so the cap matches MAX_PROPOSE_BYTES, which is
+    also a byte limit -- otherwise a non-ASCII full read could exceed the propose cap."""
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text
+    return data[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def gh_read_file(repo, path, max_bytes, offset=0, limit=0, ref=None):
     """Read a file from a GitHub repo (allowlist-gated, size-capped). Returns the
     file text or a refusal/error string. Backs the github_read_file MCP tool.
 
     With offset (1-based start line) and/or limit (line count), return just that
     window instead of the whole file -- so a large file can be inspected a span at a
-    time. The result is still capped at max_chars. `ref` pins a branch/sha (so a read
+    time. The result is capped at max_bytes of UTF-8. `ref` pins a branch/sha (so a read
     can match the branch a later edit is applied against); None reads the default branch."""
     if "/" not in repo:
         return "Refused: repo must be 'owner/name'."
@@ -103,11 +113,13 @@ def gh_read_file(repo, path, max_chars, offset=0, limit=0, ref=None):
     if offset or limit:
         lines = body.splitlines()
         start = max(0, (offset or 1) - 1)
-        window = "\n".join(lines[start:start + limit] if limit else lines[start:])
-        # Distinguish an out-of-range window from a genuinely empty file, so a caller
-        # can't mistake a bad offset for "(empty file)".
-        return window[:max_chars] or f"(no lines in that range; file has {len(lines)} lines)"
-    return body[:max_chars] or "(empty file)"
+        window_lines = lines[start:start + limit] if limit > 0 else lines[start:]
+        # Empty SLICE = out of range; an empty JOIN (e.g. a selected blank line) is a
+        # real, empty snippet -- test the slice, not the joined text.
+        if not window_lines:
+            return f"(no lines in that range; file has {len(lines)} lines)"
+        return _cap_bytes("\n".join(window_lines), max_bytes)
+    return _cap_bytes(body, max_bytes) or "(empty file)"
 
 
 def gh_list(repo, path=""):
