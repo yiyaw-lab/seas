@@ -159,8 +159,11 @@ PERSISTENT_CONTEXT_MARKER = "CURRENT CONTEXT (facts you carry between turns):"
 def _active_project_line():
     """One factual line for the project the user is most recently looking at:
     its bet name (or first real line) plus its energy rating if any. Returns ''
-    when no project is logged or the log is unreadable. Reads the module-level
-    PROJECTS_LOG (the test patch point), so an override bites at call time.
+    when no project was genuinely SHOWN (none has shown_at), when none is logged,
+    or the log is unreadable -- a "currently looking at" claim needs a real
+    visibility signal, never target_project's bare last-entry fallback. Reads the
+    module-level PROJECTS_LOG (the test patch point), so an override bites at call
+    time.
 
     Source availability: the project log lives on the Railway volume
     (ARGO_PROJECTS_PATH) -- the webhook that writes it is the same process that
@@ -169,7 +172,12 @@ def _active_project_line():
     if not isinstance(log, list) or not log:
         return ""
     p = argo_rating.target_project(log)
-    if not p:
+    # Only a GENUINELY-shown project supports a "currently looking at" claim.
+    # target_project falls back to the last log entry when nothing has shown_at
+    # (that fallback is the bare-rating-attachment target, not a visibility
+    # signal), so gate on shown_at to avoid carrying a false "what they're
+    # viewing" fact across turns when nothing was actually shown.
+    if not p or not p.get("shown_at"):
         return ""
     text = p.get("text", "") or ""
     line = ""

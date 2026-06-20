@@ -124,6 +124,42 @@ class ActiveProjectLineAttributionTest(unittest.TestCase):
         self.assertIn("builder", line.lower())
 
 
+class ActiveProjectLineVisibilityTest(unittest.TestCase):
+    """The active-project fact makes a "currently looking at" VISIBILITY claim.
+    target_project falls back to the LAST log entry when no project has shown_at
+    (that fallback is the bare-rating-attachment target, not a visibility signal),
+    so a project that was never shown must NOT produce the fact -- else Argo carries
+    a false "what they're viewing" claim across turns."""
+
+    # A bare last entry with NO shown_at: logged, but never delivered to the user.
+    _NEVER_SHOWN = [
+        {"id": "P-009",
+         "text": "⚓ Argo\n\nThis week's bet:\nUnseen Draft\n\nA draft never shown.",
+         "energy": 7},
+    ]
+
+    def test_no_shown_at_emits_no_visibility_fact(self):
+        # Negative control: pre-fix, target_project's last-entry fallback returns
+        # this row and _active_project_line emits the false fact (test fails);
+        # post-fix it is gated on shown_at and returns '' (test passes).
+        with _Fixtures(_BELIEFS, self._NEVER_SHOWN):
+            line = wh._active_project_line()
+            block = wh._persistent_context_block()
+        self.assertEqual(line, "")
+        self.assertNotIn("Unseen Draft", block)
+        self.assertNotIn("currently looking at", block)
+        # The world_model fact still rides along; only the visibility claim is gone.
+        self.assertIn("WM-001", block)
+
+    def test_shown_at_emits_visibility_fact(self):
+        # A genuinely-shown project (has shown_at) DOES support the claim.
+        with _Fixtures(_BELIEFS, _PROJECTS):
+            line = wh._active_project_line()
+            block = wh._persistent_context_block()
+        self.assertIn("Pathology Eval Harness", line)
+        self.assertIn("currently looking at", block)
+
+
 class PersistentContextDegradeTest(unittest.TestCase):
     """(b) Missing/empty/corrupt sources -> block omitted, prompt still valid."""
 
