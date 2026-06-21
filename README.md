@@ -389,6 +389,10 @@ Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
 | `ARGO_TASTE_PATH` | `/data/taste_signals.json` (Railway volume; taste signals) |
 | `ARGO_PUSHES_PATH` | `/data/argo_pushes.json` (Railway volume; acted-on-push instrumentation store; wiped each redeploy and `act_on_rate` pinned at `0.0` if left on the default) |
 | `ARGO_CHATMINE_WATERMARK_PATH` | `/data/argo_chatmine_watermark.json` (Railway volume; chat-log weakness-miner high-watermark; without it on the volume, re-mining re-inflates incident counts after a redeploy) |
+| `ARGO_COST_LEDGER_PATH` | `/data/argo_cost_ledger.json` (Railway volume; per-call token/cost telemetry; left on the default it is wiped each redeploy, so the spend history and any cost-based prediction grade reset) |
+| `ARGO_PROACTIVE_PATH` | `/data/argo_proactive.json` (Railway volume; F6 steerable-proactiveness threshold set via the `PROACTIVE` command; resets to the default level each redeploy if left off the volume) |
+| `ARGO_PENDING_DECISIONS_PATH` | `/data/argo_pending_decisions.json` (Railway volume; F7 escalation-broker open decisions from `ask_owner`; an in-flight question is lost on redeploy if left on the default) |
+| `ARGO_CMO_MODES_PATH` | `/data/argo_cmo_modes.json` (Railway volume; CMO-lens per-chat state + timestamped switch log; without it on the volume the lens resets AND the B-007 demand-test return-cadence data is wiped each redeploy) |
 | `ARGO_*_PATH` (self-improvement) | point the incident/proposal ledgers, evolution + prediction stores, and the pending-heal/evolve slots at the `/data` volume so they survive redeploys (`ARGO_INCIDENTS_PATH`, `ARGO_PROPOSALS_PATH`, `ARGO_EVOLUTION_PATH`, `ARGO_PREDICTIONS_PATH`, `ARGO_FRONTIER_SEEN_PATH`, `ARGO_PENDING_EVOLVE_PATH`, `ARGO_PENDING_HEAL_PATH`, `ARGO_WORLD_MODEL_PATH`, `ARGO_LOCAL_SCHED_STATE` — all default to `data/`; see `argo_paths.py`) |
 
 For the acted-on-push instrumentation (F1), `WEBHOOK_URL` and `ARGO_MCP_TOKEN`
