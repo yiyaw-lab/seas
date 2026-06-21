@@ -51,6 +51,7 @@ except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
 
 import argo_bluff
+import argo_cmo
 import argo_http
 import argo_media
 import argo_memory
@@ -247,7 +248,27 @@ def _persistent_context_block():
     return PERSISTENT_CONTEXT_MARKER + "\n" + "\n\n".join(facts) + "\n\n"
 
 
-def build_system_prompt(p=None):
+# CMO role-lens fragment (B-007 demand test). A named constant, not an inline
+# string, so a SECOND role is a small future add (a new constant + a new gate) --
+# but this stays CMO-only on purpose; we are NOT building a generic multi-role
+# command framework yet. Verbatim voice -- keep the house rules (plain text, no
+# markdown, no em dashes, sources cited like a person).
+CMO_LENS_FRAGMENT = (
+    "CMO lens is on. For this thread, reason as the builder's Chief Marketing "
+    "Officer -- lead with demand and distribution, not craft. For whatever they "
+    "raise, push on: who exactly this is for (the specific ICP, not \"developers\"), "
+    "the one-line positioning, the sharpest message and the story behind it, the "
+    "single channel that actually reaches that ICP, what would make them switch "
+    "from what they use today, and the cheapest test that proves demand before "
+    "more building. Be concrete and opinionated: name the channel, the message, "
+    "the experiment, and what you'd cut. You have no live marketing analytics, so "
+    "when an answer needs real numbers (open rates, CAC, conversion) say so plainly "
+    "and give judgment, not invented figures. Keep the house voice: plain text, no "
+    "markdown, no em dashes, sources cited like a person."
+)
+
+
+def build_system_prompt(p=None, cmo_mode=False):
     """Argo's full system prompt, with the USER IDENTITY span (name, one-liner,
     persona/register) drawn from the active profile and the rest (self-knowledge,
     tools, self-heal, attribution) unchanged.
@@ -256,14 +277,19 @@ def build_system_prompt(p=None):
     whole point: the long behavioral body below is verbatim from when this was a
     hardcoded constant, with only the identity tokens (name + pronouns) templated,
     so output is byte-identical for the existing user. `p` defaults to the loaded
-    profile; pass one to build for a specific user (per-user-ready)."""
+    profile; pass one to build for a specific user (per-user-ready).
+
+    `cmo_mode` (the B-007 demand-test lens) appends CMO_LENS_FRAGMENT to the end of
+    the prompt when True, so for a CMO-mode thread Argo reasons as the builder's
+    Chief Marketing Officer. Default False, so non-CMO chats and the
+    proactive/scheduled senders (which never set it) are byte-identical to before."""
     p = p or profile.load()
     name = p["name"]
     subj = p.get("subject", "she")        # she / he / they
     obj = p.get("object", "her")          # her / him / them
     poss = p.get("possessive", "her")     # her / his / their
     Subj = subj[:1].upper() + subj[1:]    # sentence-initial form
-    return (
+    prompt = (
     f"You are Argo. {name} is your person — the one human you work hardest for. "
     f"You've been talking with {name} over Telegram about what's worth building and "
     "what's actually happening at the frontier. You're not a general assistant; "
@@ -467,6 +493,9 @@ def build_system_prompt(p=None):
     "link are the trust signal, not a description of your process. This should "
     "usually make replies shorter, not longer."
     )
+    if cmo_mode:
+        prompt = prompt + "\n\n" + CMO_LENS_FRAGMENT
+    return prompt
 
 # The append-only chat log -- both the LLM's short-term memory AND durable data --
 # now lives in argo_memory, shared with the proactive senders (argo_watch /
@@ -609,7 +638,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
                 # (string or image-block list).
-                system = build_system_prompt()
+                system = build_system_prompt(cmo_mode=argo_cmo.is_active(chat_id))
                 messages = [
                     {
                         "role": "assistant" if t["role"] == "Argo" else "user",
@@ -650,7 +679,8 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # can't take (the "says things it won't do" bug).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
-                    f"{build_system_prompt()}\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
+                    f"{build_system_prompt(cmo_mode=argo_cmo.is_active(chat_id))}"
+                    f"\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
                     f"Conversation so far:\n{convo}\n\n"
                     f"{profile.name()}: {final_content}\n\nArgo:"
                 )
@@ -1033,6 +1063,27 @@ def handle_update(update):
     # Kept upstream of the model so a confirmation never reaches the LLM and a
     # heal only runs on an explicit human okay.
     word = text.strip().upper()
+
+    # /cmo gate (B-007 demand test): toggle the per-chat CMO role lens. Deterministic
+    # and upstream of the model like the other gates, so the toggle is exact and the
+    # confirmation never reaches the LLM. Only the LEADING /cmo token fires it (a
+    # message that merely CONTAINS "cmo" falls through to the model); a Telegram
+    # group sends "/cmo@botname", so strip an @suffix off the first token. Bare /cmo
+    # or "/cmo on" activates; "/cmo off" (also stop/exit/normal) deactivates.
+    parts = text.strip().split()
+    if parts and parts[0].split("@", 1)[0].lower() == "/cmo":
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg in ("off", "stop", "exit", "normal"):
+            argo_cmo.set_active(chat_id, False)
+            send_telegram.send_message(_clean_reply("CMO lens off, back to normal."))
+        else:
+            # bare /cmo or "/cmo on" (and any other arg) activates.
+            argo_cmo.set_active(chat_id, True)
+            send_telegram.send_message(_clean_reply(
+                "CMO lens on. I'll reason as your CMO until you send /cmo off. "
+                "Heads up: this is judgment, not live marketing data."))
+        return
+
     if word in ("CONFIRM", "CANCEL"):
         import argo_mcp_server
         if word == "CANCEL":
