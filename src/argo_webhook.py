@@ -1553,6 +1553,18 @@ def handle_update(update):
         send_telegram.send_message(msg)
         return
 
+    # RECEIPTS gate (F5): surface Argo's graded track record -- recent calls and how
+    # reality graded them, plus the build-call calibration number(s) that clear the
+    # n-floor. Deterministic and upstream of the model, like the other gates, so the
+    # receipt is read straight from the stores (argo_predictions + argo_calibration)
+    # and never a number the LLM narrates. Renders HONESTLY when sparse: "no graded
+    # calls yet" / "insufficient data (n<4)" rather than a fabricated record. Plain
+    # text via _clean_reply, like every surface.
+    if word in ("RECEIPTS", "TRACK RECORD"):
+        import argo_receipts
+        send_telegram.send_message(_clean_reply(argo_receipts.track_record()))
+        return
+
     # Pasted-an-existing-project gate: if she pastes back a project Argo already
     # sent (e.g. to say "I meant THIS one"), treat it as REFERRING to that project
     # and re-anchor on it, instead of letting the LLM turn it into a new idea.
