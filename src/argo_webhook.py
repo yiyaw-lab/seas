@@ -1096,6 +1096,18 @@ def handle_update(update):
             send_telegram.send_message(argo_evolve.accept_pending())
         return
 
+    # STATUS gate (H3.3 ambient status): a read-only "what's in flight / needs
+    # attention" view over the stores Argo already keeps (predictions, the
+    # evolution ledger, the diagnostic fix-proposal ledger, staged gates, open
+    # decisions) with a who-acts-next classifier (needs-you / agent-can-act /
+    # blocked). Deterministic and upstream of the model like the other gates, so
+    # the answer never depends on the LLM choosing a tool, and plain text via the
+    # argo_status renderer. Read-only: it reports state, never mutates a store.
+    if word == "STATUS":
+        import argo_status
+        send_telegram.send_message(_clean_reply(argo_status.render()))
+        return
+
     # PROACTIVE gate (F6): the user tunes how rarely Argo pushes unprompted. Bare
     # "PROACTIVE" reports the current base threshold + the effective one (auto-
     # dialed-up when the recent act-on-rate is low) + that rate; "PROACTIVE <n>"
