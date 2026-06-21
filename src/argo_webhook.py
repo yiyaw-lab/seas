@@ -1412,6 +1412,36 @@ def handle_update(update):
             send_telegram.send_message(argo_evolve.accept_pending())
         return
 
+    # PROACTIVE gate (F6): the user tunes how rarely Argo pushes unprompted. Bare
+    # "PROACTIVE" reports the current base threshold + the effective one (auto-
+    # dialed-up when the recent act-on-rate is low) + that rate; "PROACTIVE <n>"
+    # (0..1) sets the base. Deterministic and upstream of the model, like the other
+    # gates, so tuning is exact and never depends on the LLM. Plain text only.
+    if word == "PROACTIVE" or word.startswith("PROACTIVE "):
+        arg = text.strip().split(maxsplit=1)
+        if len(arg) == 1:
+            base = argo_pushes.get_threshold()
+            eff = argo_pushes.effective_threshold()
+            rate = argo_pushes.act_on_rate()
+            send_telegram.send_message(
+                f"Proactiveness threshold is {base:.2f} (effective {eff:.2f} after "
+                f"your recent act-on-rate of {int(round(rate * 100))}%). Higher means "
+                "I push less, only the higher-stakes things. Send PROACTIVE 0.5 to "
+                "raise the bar, PROACTIVE 0.1 to hear more.")
+            return
+        try:
+            stored = argo_pushes.set_threshold(arg[1])
+        except (ValueError, TypeError):
+            send_telegram.send_message(
+                "Give me a number between 0 and 1, like PROACTIVE 0.4. Higher means "
+                "I push less.")
+            return
+        send_telegram.send_message(
+            f"Done. Proactiveness threshold is now {stored:.2f}. "
+            + ("I'll only push higher-stakes things." if stored >= 0.5
+               else "I'll push a bit more freely."))
+        return
+
     # SELECT gate: the user commits to a project. Bare "SELECT" locks in the
     # latest; "SELECT P-00x" locks in a specific candidate (e.g. the one
     # recommend_project named). Then Rehearse stress-tests the bet BEFORE handing
@@ -1675,18 +1705,28 @@ def create_app():
 
     @app.post("/push")
     def push():
-        """Record a proactive push onto THIS process's volume, bearer-gated.
+        """Gate, then record, a proactive push onto THIS process's volume, bearer-gated.
 
         Placement triad: trigger = the proactive send (argo_project/argo_watch) on
         GitHub Actions, which has no access to the Railway volume; filesystem = the
-        Railway volume's argo_pushes.PUSHES_PATH, written HERE via argo_pushes.record;
-        consumer = the webhook reader (link_reply on the inbound user turn, then
-        act_on_rate) on this same volume. The Actions recorder POSTs here precisely
-        because its own ephemeral checkout is a different filesystem the reader
-        never sees -- this endpoint bridges the two.
+        Railway volume's argo_pushes.PUSHES_PATH + PROACTIVE_PATH, read/written HERE
+        (the gate reads the act-on-rate + the user's threshold, both on the volume;
+        record writes the row); consumer = the SEND DECISION -- this handler returns
+        suppressed=True so the Actions caller (post_to_webhook) skips the Telegram
+        send, and the webhook reader (link_reply, then act_on_rate). All three are
+        this one in-process spot on the volume, the only place act_on_rate and the
+        threshold are both readable; the Actions side has neither, which is exactly
+        why the gate lives here and the verdict is bridged back over this POST.
+
+        F6 gate: a push whose stakes*confidence is below the effective threshold
+        (base, auto-dialed-up on a low act-on-rate) is SUPPRESSED -- NOT recorded
+        (a suppressed push was never sent, so it must not enter act_on_rate's
+        denominator) -- and the caller is told not to send. The gate is evaluated
+        BEFORE record so the suppression decision sees the act-on-rate as it stood
+        for prior pushes, not skewed by this one.
 
         Auth: the same bearer token as /mcp (ARGO_MCP_TOKEN). Only this write route
-        is gated; the health route '/' stays open. Returns the recorded push id.
+        is gated; the health route '/' stays open. Returns {id, suppressed}.
         """
         if not ARGO_MCP_TOKEN:
             return "push disabled", 503
@@ -1697,14 +1737,20 @@ def create_app():
         payload = request.get_json(force=True, silent=True) or {}
         kind = payload.get("kind")
         content = payload.get("content")
+        stakes = payload.get("stakes")
+        confidence = payload.get("confidence")
         if not kind:
             return "missing kind", 400
+        allowed, reason = argo_pushes.should_send(kind, stakes, confidence)
+        if not allowed:
+            log.info("push suppressed (kind=%s): %s", kind, reason)
+            return jsonify({"id": None, "suppressed": True}), 200
         try:
             pid = argo_pushes.record(kind, content or "")
         except (OSError, ValueError) as exc:
             log.warning("push record failed: %s", exc, exc_info=True)
             return "record failed", 500
-        return jsonify({"id": pid}), 200
+        return jsonify({"id": pid, "suppressed": False}), 200
 
     @app.post("/webhook")
     def webhook():

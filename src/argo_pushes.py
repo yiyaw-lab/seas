@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import namedtuple
 
 import argo_http
 import argo_paths
@@ -32,10 +33,19 @@ from argo_log import get_logger
 
 log = get_logger(__name__)
 
+# What post_to_webhook hands back. `recorded` = the server accepted+stored the push
+# (a 2xx that wasn't suppressed); `suppressed` = the F6 gate refused it, so the
+# caller MUST skip the Telegram send. On any POST failure both are False, which is
+# fail-open on the SEND: an un-instrumented push is a missed measurement, never a
+# silenced send (the caller sends unless `suppressed` is True).
+PushResult = namedtuple("PushResult", "recorded suppressed")
+
 # Module-level so tests can patch it (mock.patch.object(argo_pushes, "PUSHES_PATH",
 # tmp)); record/link_reply/act_on_rate read this global at call time so the
 # override bites.
 PUSHES_PATH = argo_paths.PUSHES_PATH
+# Steerable-proactiveness threshold store (F6), same patch convention.
+PROACTIVE_PATH = argo_paths.PROACTIVE_PATH
 
 # How long after a push a user reply still counts as "acting on" it. Default 6h:
 # a proactive send the user reads hours later (different timezone, came back from
@@ -134,7 +144,14 @@ def post_to_webhook(kind, content):
     Best-effort and non-fatal by contract: callers wrap nothing extra -- any
     failure (no WEBHOOK_URL/token in local dev, a timeout, a non-2xx, a network
     error) is logged and swallowed here so a failed POST can never block or fail
-    the Telegram send. Returns True if the push was accepted, else False.
+    the Telegram send. Returns a PushResult(recorded, suppressed):
+      - recorded=True   -> the server stored the push (2xx, gate allowed it);
+      - suppressed=True -> the F6 gate (server-side, on the volume where the
+        act-on-rate + threshold live) refused the push, so the CALLER MUST SKIP
+        the Telegram send -- this is how the gate's send-decision is bridged back
+        to the Actions sender, which has neither the rate nor the threshold;
+      - both False       -> the POST failed; FAIL-OPEN on the send (an un-recorded
+        push is a missed measurement, never a silenced send), so the caller sends.
 
     One fast bounded retry on a TRANSIENT failure (timeout / network error / 5xx)
     only -- this POST now precedes the Telegram send (record-before-send), so the
@@ -157,8 +174,9 @@ def post_to_webhook(kind, content):
     base = os.environ.get("WEBHOOK_URL")
     token = os.environ.get("ARGO_MCP_TOKEN")
     if not base or not token:
-        # Local dev / unconfigured Actions: skip silently, no error.
-        return False
+        # Local dev / unconfigured Actions: skip silently, no error. Fail-open on
+        # the send -- not suppressed, just un-instrumented.
+        return PushResult(False, False)
     url = base.rstrip("/") + "/push"
     body = json.dumps({"kind": kind, "content": content}).encode("utf-8")
     req = urllib.request.Request(
@@ -177,11 +195,27 @@ def post_to_webhook(kind, content):
         try:
             with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
                 ok = 200 <= r.status < 300
+                raw = r.read() if ok else b""
             if ok:
-                log.info("posted push kind=%s to webhook volume", kind)
-            else:
-                log.warning("push POST to webhook returned status %s", r.status)
-            return ok
+                # A 2xx may be a recorded push OR an F6 suppression. Parse the body
+                # to tell them apart; a missing/garbled body is treated as recorded
+                # (the old contract), never as a suppression, so a parse hiccup can
+                # never silence a send.
+                suppressed = False
+                try:
+                    parsed = json.loads(raw or b"{}")
+                    suppressed = bool(parsed.get("suppressed"))
+                except (ValueError, TypeError, AttributeError):
+                    # Garbled body, or a valid-JSON non-object (a list/str has no
+                    # .get -> AttributeError): treat as recorded, never suppressed.
+                    pass
+                if suppressed:
+                    log.info("push kind=%s suppressed by gate (server)", kind)
+                else:
+                    log.info("posted push kind=%s to webhook volume", kind)
+                return PushResult(not suppressed, suppressed)
+            log.warning("push POST to webhook returned status %s", r.status)
+            return PushResult(False, False)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             # Non-fatal: the proactive Telegram message will still be sent; an
             # un-instrumented push is a missed measurement, never a failed send.
@@ -190,8 +224,8 @@ def post_to_webhook(kind, content):
             code = getattr(exc, "code", None)  # HTTPError carries the HTTP status
             permanent = isinstance(code, int) and 400 <= code < 500
             if permanent or attempt == attempts - 1:
-                return False
-    return False
+                return PushResult(False, False)
+    return PushResult(False, False)
 
 
 def link_reply(chat_id, ts=None):
@@ -237,3 +271,125 @@ def act_on_rate():
         return 0.0
     linked = sum(1 for r in rows if r.get("linked"))
     return linked / len(rows)
+
+
+# --- F6: rare / right / steerable proactiveness ---------------------------------
+# The PRD gate, un-gated now that F1 makes proactiveness measurable: before an
+# unprompted push goes out, score it stakes*confidence and only send when it
+# clears a threshold. The threshold is user-TUNABLE (the PROACTIVE command writes
+# the base level) and AUTO-DIALS-UP when the recent act-on-rate is low -- if the
+# user isn't acting on pushes, raise the bar. The measurement-trap guard the PRD
+# insists on: never amplify an unmeasured signal, and at COLD START (too few
+# recorded pushes for act_on_rate to mean anything) do NOT raise the bar at all,
+# so the very first pushes -- the ones that BUILD the act-on-rate -- are judged on
+# their own stakes*confidence, never suppressed for lacking a history.
+
+# The base threshold the user tunes. 0.30 lets a mid-stakes/mid-confidence push
+# (0.6 * 0.6 = 0.36) through by default while suppressing genuinely low ones; the
+# user dials it via the PROACTIVE command. Clamped to [0, 1].
+DEFAULT_THRESHOLD = 0.30
+
+# stakes*confidence defaults per push KIND, used when the caller passes none. A
+# weekly project (the user explicitly opted into) and a frontier-builder watch
+# alert both clear the default; the map is the seam where a future low-stakes push
+# kind (e.g. a chatty nudge) gets a low score and is suppressed first. (stakes,
+# confidence) each in [0, 1].
+_KIND_DEFAULTS = {
+    "project": (0.7, 0.8),  # 0.56
+    "watch": (0.6, 0.7),    # 0.42
+}
+# A push kind we don't recognize is treated as middling, not high -- an unknown
+# sender shouldn't get a free pass above the bar.
+_UNKNOWN_KIND_SCORE = (0.5, 0.5)  # 0.25, below DEFAULT_THRESHOLD
+
+# How much a zero act-on-rate can raise the threshold, scaled linearly by how low
+# the rate is: dial_up = MAX_DIAL_UP * (1 - act_on_rate). At rate 0.0 the bar
+# rises by the full MAX_DIAL_UP; at rate 1.0 it doesn't move. Capped so the
+# combined threshold never exceeds 1.0 (which would suppress everything).
+MAX_DIAL_UP = 0.40
+
+# Cold start: the act-on-rate is only trustworthy once enough pushes have had a
+# chance to be acted on. Below this many recorded pushes we apply NO dial-up --
+# the bar stays at the user's base level so early pushes aren't strangled by a
+# rate computed from too little data (and a divide-by-nothing can't arise:
+# act_on_rate already returns 0.0 on an empty store).
+MIN_PUSHES_FOR_DIALUP = 5
+
+
+def _clamp01(x):
+    return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+
+def get_threshold():
+    """Return the user-tuned base threshold (DEFAULT_THRESHOLD if unset/corrupt)."""
+    cfg = argo_store.load_json(PROACTIVE_PATH, {})
+    if not isinstance(cfg, dict):
+        return DEFAULT_THRESHOLD
+    val = cfg.get("threshold")
+    if not isinstance(val, (int, float)):
+        return DEFAULT_THRESHOLD
+    return _clamp01(float(val))
+
+
+def set_threshold(value):
+    """Persist the user's base threshold, clamped to [0, 1]; returns the stored
+    value. Raises ValueError on a non-numeric input so the command handler can
+    report it rather than writing garbage."""
+    threshold = _clamp01(float(value))  # ValueError on non-numeric, by contract
+    PROACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    argo_store.save_json(PROACTIVE_PATH, {"threshold": threshold})
+    log.info("proactiveness base threshold set to %.2f", threshold)
+    return threshold
+
+
+def effective_threshold():
+    """The base threshold plus the auto-dial-up term for a low act-on-rate.
+
+    dial_up = MAX_DIAL_UP * (1 - act_on_rate), applied ONLY once enough pushes
+    exist (>= MIN_PUSHES_FOR_DIALUP) for the rate to be meaningful -- the cold-
+    start guard. Result clamped to [0, 1]."""
+    base = get_threshold()
+    rows = _load()
+    if len(rows) < MIN_PUSHES_FOR_DIALUP:
+        return base  # cold start: trust the base, don't amplify an unmeasured signal
+    rate = act_on_rate()
+    dial_up = MAX_DIAL_UP * (1.0 - rate)
+    return _clamp01(base + dial_up)
+
+
+def score(kind, stakes=None, confidence=None):
+    """stakes*confidence in [0, 1]. Missing stakes/confidence fall back to the
+    per-kind default (or a middling unknown-kind score)."""
+    if stakes is None or confidence is None:
+        ds, dc = _KIND_DEFAULTS.get(kind, _UNKNOWN_KIND_SCORE)
+        if stakes is None:
+            stakes = ds
+        if confidence is None:
+            confidence = dc
+    return _clamp01(float(stakes)) * _clamp01(float(confidence))
+
+
+def should_send(kind, stakes=None, confidence=None):
+    """Gate one unprompted push: True iff its stakes*confidence score clears the
+    effective threshold (base, auto-dialed-up when the recent act-on-rate is low).
+
+    Returns (allowed: bool, reason: str). reason is a short operator-log string;
+    callers send no part of it to the user. Never raises -- a scoring/threshold
+    error must not block a send, so on an unexpected error we log and ALLOW (fail
+    open: the worst case is one un-gated push, never a silenced bot)."""
+    try:
+        s = score(kind, stakes, confidence)
+        thresh = effective_threshold()
+        allowed = s >= thresh
+        reason = f"score={s:.2f} {'>=' if allowed else '<'} threshold={thresh:.2f} (kind={kind})"
+        if allowed:
+            log.info("push gate ALLOW: %s", reason)
+        else:
+            log.info("push gate SUPPRESS: %s", reason)
+        return allowed, reason
+    except (ValueError, TypeError, OSError) as exc:
+        # Bad number, or a volume read error reaching the score/threshold read:
+        # fail OPEN (allow). A gate error must never silence a real send -- the
+        # worst case is one un-gated push.
+        log.warning("push gate errored, allowing send (fail-open): %s", exc)
+        return True, f"gate error (fail-open): {exc}"
