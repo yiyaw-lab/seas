@@ -201,12 +201,12 @@ def run_batch(items, model, *, system=None, max_tokens=1024,
 
 
 # ---------------------------------------------------------------------------
-# WIRED (opt-in): seas_finding.auto_score_signals(batch=True) now routes the
+# WIRED (opt-in): seas_scoring.auto_score_signals(batch=True) now routes the
 # unscored signals through run_batch. The drop-in described here — collect the
 # unscored signals into (custom_id, prompt) pairs, call run_batch, then map
 # BatchItemResult.text back through the same _extract_json + 5-dimension
 # validation the loop already does — lives in
-# seas_finding._batch_score_signals.
+# seas_scoring._batch_score_signals.
 #
 # The integration is DELIBERATELY OPT-IN and zero-default: auto_score_signals
 # defaults to batch=False (the original one-call-per-signal loop, unchanged).

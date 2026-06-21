@@ -85,8 +85,17 @@ class BatchScoringTest(unittest.TestCase):
         run_batch.assert_called_once()
         items = run_batch.call_args.args[0]
         self.assertEqual([cid for cid, _ in items], ["sig-0", "sig-2"])
-        # SYSTEM is passed through (matches the single-call f"{SYSTEM}..." shape).
-        self.assertEqual(run_batch.call_args.kwargs["system"], sf.SYSTEM)
+        # The batch job text must be IDENTICAL to what the single-call loop sends:
+        # f"{SYSTEM}\n\n{prompt}" in the user turn, and NO separate `system=` param
+        # (otherwise the two paths prompt the model differently and could score the
+        # same signal differently). Lock both halves.
+        self.assertNotIn("system", run_batch.call_args.kwargs)
+        prompt_by_cid = dict(items)
+        for cid in ("sig-0", "sig-2"):
+            sig = next(s for i, s in enumerate(signals) if f"sig-{i}" == cid)
+            expected = f"{sf.SYSTEM}\n\n{sf._score_prompt('SCORE TEMPLATE', sig)}"
+            self.assertEqual(prompt_by_cid[cid], expected)
+            self.assertTrue(prompt_by_cid[cid].startswith(sf.SYSTEM))
 
         # Both unscored signals got the parsed scores; the middle one untouched.
         self.assertEqual(out[0]["scores"]["durability"], 4)

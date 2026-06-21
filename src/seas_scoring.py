@@ -144,7 +144,12 @@ def _batch_score_signals(signals, prompt_template, model, dry_run):
             continue
         cid = f"sig-{idx}"
         by_id[cid] = sig
-        items.append((cid, _score_prompt(prompt_template, sig)))
+        # Send the SAME job text the single-call loop sends: SYSTEM is prepended
+        # into the user turn (matching observe.generate_observations(f"{SYSTEM}\n
+        # \n{prompt}")), NOT passed as a separate batch `system` param. Otherwise
+        # the two paths would prompt the model differently and could score the
+        # same signal differently — the divergence the contract forbids.
+        items.append((cid, f"{SYSTEM}\n\n{_score_prompt(prompt_template, sig)}"))
 
     if dry_run:
         print(f"  [dry-run] would batch {len(items)} unscored signal(s) "
@@ -157,7 +162,9 @@ def _batch_score_signals(signals, prompt_template, model, dry_run):
         return signals
 
     try:
-        results = argo_batch.run_batch(items, model, system=SYSTEM)
+        # No separate `system=`: SYSTEM already rides in each item's user turn
+        # (above), exactly as the single-call path assembles it.
+        results = argo_batch.run_batch(items, model)
     except Exception as exc:
         # A batch-level failure (create/poll/timeout) leaves every signal
         # unscored, exactly as a model outage would in the single-call loop.
