@@ -172,3 +172,54 @@ def summarize(by="model"):
             v = r.get(f, 0)
             agg[f] += v if isinstance(v, (int, float)) else 0
     return out
+
+
+def cache_input_ratio(since_ts=None, model=None, provider=None, label_prefix=None):
+    """Fraction of billable input tokens served from the prompt cache, over a window.
+
+    This is the number the `cache_ratio` prediction is scored against: prompt
+    caching's win is cache_read_tokens that would otherwise have been billed as
+    fresh input, so the measured saving is
+
+        cache_read_tokens / (input_tokens + cache_read_tokens)
+
+    summed over the matching rows (anthropic does NOT fold cache reads into
+    input_tokens, so the denominator adds them back; an OpenAI provider that
+    DOES count cached_tokens inside input_tokens would double-count them in the
+    denominator, which only ever UNDER-states the ratio -- a conservative bias
+    toward not-passing, never a false pass. Scope a claim to a single provider/
+    model via the filters when an exact cross-provider number matters; the
+    default chat-path claim is graded against anthropic, where the math is exact).
+
+    Filters (all optional, AND'd): `since_ts` (epoch float -- only rows with
+    ts >= since_ts, so a prediction scores only the window AFTER it was armed),
+    `model`, `provider`, and `label_prefix` (e.g. 'chat/' to isolate the chat
+    path the caching lever actually targets).
+
+    Returns (ratio, calls): `calls` is the number of matching rows; `ratio` is the
+    float in [0, 1], or None when there is NOTHING to measure -- no matching rows
+    OR a zero denominator (all-zero token counts). The None is the honest
+    insufficient-data signal: the caller must abstain, never treat it as 0.0.
+    Pure read; never writes."""
+    cache_read = 0
+    fresh_input = 0
+    calls = 0
+    for r in _load():
+        ts = r.get("ts")
+        if since_ts is not None and (not isinstance(ts, (int, float)) or ts < since_ts):
+            continue
+        if model is not None and r.get("model") != model:
+            continue
+        if provider is not None and r.get("provider") != provider:
+            continue
+        if label_prefix is not None and not str(r.get("label", "")).startswith(label_prefix):
+            continue
+        calls += 1
+        ci = r.get("input_tokens", 0)
+        cr = r.get("cache_read_tokens", 0)
+        fresh_input += ci if isinstance(ci, (int, float)) else 0
+        cache_read += cr if isinstance(cr, (int, float)) else 0
+    denom = fresh_input + cache_read
+    if calls == 0 or denom <= 0:
+        return (None, calls)
+    return (cache_read / denom, calls)
