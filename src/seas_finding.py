@@ -387,60 +387,11 @@ def _maybe_escalate(urls):
             print(f"  [self-heal] {url}: {action} — {reason}")
 
 
-def auto_score_signals(signals, dry_run=False):
-    """LLM-score any unscored signals using prompts/score_signal.md (5 dimensions).
-    Returns the updated list. Best-effort: silently skips on any model/parse failure
-    so a scoring hiccup never blocks the investigation step."""
-    if not SCORE_PROMPT_PATH.exists():
-        return signals
-    prompt_template = SCORE_PROMPT_PATH.read_text()
-
-    import os
-    # SEAS research can run a different (e.g. stronger) model than Argo's ARGO_MODEL
-    # fallback: ARGO_SEAS_MODEL wins when set, else resolve_models() (ARGO_MODEL).
-    # Falsy-guard so an unset/empty env never injects None/"" as a model.
-    preferred = os.environ.get("ARGO_SEAS_MODEL")
-    models = [m for m in (([preferred] if preferred else []) + observe.resolve_models())
-              if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])]
-    if not models:
-        print("  (no model available for scoring — skipping)")
-        return signals
-    model = models[0]  # cheapest available (Sonnet by default)
-
-    updated = []
-    for sig in signals:
-        if not all(v == 0 for v in sig.get("scores", {}).values()):
-            updated.append(sig)
-            continue
-        if dry_run:
-            print(f"  [dry-run] would score: {sig['title'][:60]}")
-            updated.append(sig)
-            continue
-        prompt = (f"{prompt_template}\n\nSignal to score:\n"
-                  f"Title: {sig['title']}\n"
-                  f"Summary: {sig.get('summary', '')}")
-        try:
-            reply = observe.generate_observations(f"{SYSTEM}\n\n{prompt}", model)
-            scored = _extract_json(reply)
-            if (scored
-                    and isinstance(scored.get("durability"), int)
-                    and isinstance(scored.get("leverage"), int)):
-                sig = dict(sig)
-                sig["scores"] = {
-                    "durability":    int(scored.get("durability", 0)),
-                    "leverage":      int(scored.get("leverage", 0)),
-                    "alignment":     int(scored.get("alignment", 0)),
-                    "accessibility": int(scored.get("accessibility", 0)),
-                    "novelty":       int(scored.get("novelty", 0)),
-                }
-                print(f"  scored: {sig['title'][:55]} "
-                      f"(d={sig['scores']['durability']} "
-                      f"l={sig['scores']['leverage']} "
-                      f"a={sig['scores']['alignment']})")
-        except Exception as exc:
-            print(f"  ! scoring failed for '{sig['title'][:40]}': {exc}")
-        updated.append(sig)
-    return updated
+# Signal scoring (the 5-dimension scorer + opt-in batch path) lives in
+# seas_scoring, which imports the shared primitives SYSTEM, _extract_json, and
+# SCORE_PROMPT_PATH from this module (synthesis + benchmark use them too). The
+# dependency is one-directional (seas_scoring -> seas_finding) to avoid a cycle;
+# callers import seas_scoring.auto_score_signals directly.
 
 
 def main():
