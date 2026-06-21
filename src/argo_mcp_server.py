@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
+import argo_escalation
 import argo_github
 import argo_http
 import argo_paths
@@ -1016,43 +1017,13 @@ def run_reflection() -> str:
 # the most-recent OPEN decision, and marks it answered. Both run inside the
 # bearer-auth'd /mcp mount (BearerAuth in argo_webhook.create_asgi_app), so a
 # credential-less caller still can't reach them without ARGO_MCP_TOKEN.
+#
+# The broker LOGIC lives in argo_escalation; these @mcp.tool() wrappers stay here
+# so the tools register on the one FastMCP instance (and inherit the bearer gate),
+# passing the volume-backed PENDING_DECISIONS_PATH in -- so tests can patch the
+# store path on this module exactly as before.
 
 PENDING_DECISIONS_PATH = argo_paths.PENDING_DECISIONS_PATH  # volume-backed
-
-
-def _next_decision_id(decisions):
-    """Deterministic, collision-free id: D-<n> where n is one past the highest
-    D-<n> already in the store. Derived from the store (not random/uuid), so a
-    test with a known store gets a known next id."""
-    highest = 0
-    for d in decisions:
-        did = str(d.get("id", ""))
-        if did.startswith("D-"):
-            try:
-                highest = max(highest, int(did[2:]))
-            except ValueError:
-                continue
-    return f"D-{highest + 1:03d}"
-
-
-def _record_decision(question, decision_id=None):
-    """Append an OPEN pending decision and return its record. id is derived from
-    the store (or injected, for tests); ts is the same Zulu format the chat log
-    uses, so get_owner_answers can compare a reply's ts against it lexically."""
-    from datetime import datetime, timezone
-    decisions = argo_store.load_json(PENDING_DECISIONS_PATH, [])
-    if not isinstance(decisions, list):
-        decisions = []
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rec = {
-        "id": decision_id or _next_decision_id(decisions),
-        "ts": ts,
-        "question": question,
-        "status": "open",
-    }
-    decisions.append(rec)
-    argo_store.save_json(PENDING_DECISIONS_PATH, decisions)
-    return rec
 
 
 @mcp.tool()
@@ -1063,47 +1034,7 @@ def ask_owner(question: str) -> str:
     credential-less caller (e.g. a scheduled run) that cannot reach Telegram or
     the chat log yourself but needs the owner to decide something before you
     continue. Returns the decision id to poll. Plain text only, no markdown."""
-    question = (question or "").strip()
-    if not question:
-        return "Refused: ask_owner needs a non-empty question."
-    import send_telegram
-    rec = _record_decision(question)
-    # The owner sees a plain-text prompt naming the decision id, so a free-text
-    # reply can be matched back. No markdown / em dashes (Telegram, plain).
-    sent = send_telegram.try_send_message(
-        f"A decision is waiting on you ({rec['id']}): {question}\n\n"
-        "Just reply here and I'll relay your answer.")
-    if not sent:
-        # Send failed: don't leave a phantom OPEN decision claiming the owner was
-        # asked when they never saw it. Mark it failed so it can't be matched, and
-        # report honestly (do not pretend it was delivered).
-        _mark_decision(rec["id"], status="send_failed")
-        log.warning("ask_owner: send failed for %s; marked send_failed", rec["id"])
-        return (f"Recorded decision {rec['id']} but could NOT deliver it to the "
-                "owner (Telegram send failed). Do not wait on an answer; treat "
-                "this as undelivered and decide conservatively or retry later.")
-    log.info("ask_owner: asked owner, decision %s open", rec["id"])
-    return (f"Asked the owner (decision {rec['id']}). Poll get_owner_answers "
-            "later to pick up their reply.")
-
-
-def _mark_decision(decision_id, status, answer=None):
-    """Set a decision's status (and optionally its answer + answered_at). Returns
-    True if the decision was found and updated."""
-    from datetime import datetime, timezone
-    decisions = argo_store.load_json(PENDING_DECISIONS_PATH, [])
-    if not isinstance(decisions, list):
-        return False
-    for d in decisions:
-        if d.get("id") == decision_id:
-            d["status"] = status
-            if answer is not None:
-                d["answer"] = answer
-                d["answered_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-            argo_store.save_json(PENDING_DECISIONS_PATH, decisions)
-            return True
-    return False
+    return argo_escalation.ask_owner_impl(question, PENDING_DECISIONS_PATH)
 
 
 @mcp.tool()
@@ -1116,53 +1047,7 @@ def get_owner_answers(since: str = "") -> str:
     `since` (an ISO ts like 2026-06-20T12:00:00Z) to ignore replies before then;
     leave blank to only require the reply to post-date the question. Returns a
     short no-match note when nothing is waiting or no reply has arrived yet."""
-    decisions = argo_store.load_json(PENDING_DECISIONS_PATH, [])
-    if not isinstance(decisions, list):
-        decisions = []
-    open_decisions = [d for d in decisions if d.get("status") == "open"]
-    if not open_decisions:
-        return "No open decisions waiting on the owner."
-    # Match the MOST-RECENT open decision (per spec), so a new question supersedes
-    # an older unanswered one for the owner's next reply. The store is append-only
-    # and ts is monotonic on append, so the last open record IS the most recent --
-    # no sort needed (this also makes same-second ties resolve to the latest ask).
-    target = open_decisions[-1]
-    # A reply can only be this decision's answer if it post-dates the question;
-    # `since` narrows further. Zulu, fixed-width ts -> lexical compare is correct.
-    # NOTE: the chat log stamps whole seconds, so a (rare) owner message sent in
-    # the SAME second as the question, before it, can be mis-matched; we accept
-    # that <1s window rather than drop genuine same-second replies with a strict >.
-    floor = max(target.get("ts", ""), (since or "").strip())
-
-    # Read ONLY the owner's conversation via argo_memory.recent(chat_id): it
-    # normalizes the chat_id to str (the webhook keys turns by int Telegram id,
-    # proactive sends by the TELEGRAM_CHAT_ID env string) and scopes to one chat,
-    # so a reply from a different conversation can never be mis-matched. A bare
-    # global scan would do neither. The owner's chat is TELEGRAM_CHAT_ID; without
-    # it the bot could not have sent the question, so there is nothing to poll.
-    import argo_memory
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        return (f"Decision {target['id']} is open, but TELEGRAM_CHAT_ID is unset so "
-                "I can't read the owner's chat to match a reply.")
-    # Pull a generous recent window (the poll cadence is far tighter than this).
-    turns = argo_memory.recent(chat_id, n=200)
-    # The owner's turns are any role that isn't Argo's own; take the FIRST such
-    # reply at/after the floor (the answer to the question we just asked).
-    reply = next(
-        (t for t in turns
-         if t.get("role") != "Argo"
-         and (t.get("text") or "").strip()
-         and t.get("ts", "") >= floor),
-        None,
-    )
-    if reply is None:
-        return (f"Decision {target['id']} is still open; the owner hasn't replied "
-                "yet. Poll again later.")
-    answer = reply["text"].strip()
-    _mark_decision(target["id"], status="answered", answer=answer)
-    log.info("get_owner_answers: matched reply to %s, marked answered", target["id"])
-    return json.dumps({"id": target["id"], "answer": answer})
+    return argo_escalation.get_owner_answers_impl(since, PENDING_DECISIONS_PATH)
 
 
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
