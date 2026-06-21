@@ -144,7 +144,7 @@ class OpenAiToolFallbackTest(unittest.TestCase):
                        "supports_mcp": True}
             if m == "claude-x" else {"name": "openai", "key_env": "OPENAI_API_KEY",
                                      "supports_mcp": True}))
-        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda *a, **kw: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))

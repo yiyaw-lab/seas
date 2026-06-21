@@ -133,6 +133,15 @@ COST_LEDGER_PATH = Path(os.environ.get("ARGO_COST_LEDGER_PATH",
 # as a module-level constant (the test patch point), so its helpers read the
 # override at call time.
 PROACTIVE_PATH = Path(os.environ.get("ARGO_PROACTIVE_PATH", str(DATA / "argo_proactive.json")))
+# CMO role-lens state (argo_cmo, B-007 demand test): per-chat on/off plus a
+# timestamped switch log, so a later manual grade can see whether the builder
+# returns to CMO mode unprompted on a real decision. The webhook writes it when
+# the user runs /cmo and reads it on every reply, both in-process on the live bot,
+# so point ARGO_CMO_MODES_PATH at the Railway volume (mirrors ARGO_PROACTIVE_PATH)
+# or each redeploy resets the lens. Gitignored. argo_cmo re-exports this as a
+# module-level constant (the test patch point), so its helpers read the override
+# at call time.
+CMO_MODES_PATH = Path(os.environ.get("ARGO_CMO_MODES_PATH", str(DATA / "argo_cmo_modes.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.

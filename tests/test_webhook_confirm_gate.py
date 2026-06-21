@@ -281,7 +281,7 @@ class AntiBluffReattemptTest(unittest.TestCase):
             observe, "provider_for",
             lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
                        "supports_mcp": True}))
-        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda *a, **kw: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
@@ -341,7 +341,7 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         # is genuinely tool-less (a test overrides MCP_SERVERS to verify tools-kept).
         self.enterContext(mock.patch.object(observe, "supports_mcp", lambda m: True))
         self.enterContext(mock.patch.object(wh, "MCP_SERVERS", None))
-        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda *a, **kw: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
