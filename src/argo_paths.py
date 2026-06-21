@@ -102,6 +102,15 @@ PENDING_HEAL_PATH = Path(os.environ.get("ARGO_PENDING_HEAL_PATH",
                                         str(DATA / "argo_pending_heal.json")))
 PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
                                        str(DATA / "argo_predictions.json")))
+# Escalation-broker store (F7): pending owner-decisions a credential-less cloud
+# caller (e.g. a scheduled /vacation run) brokers through Argo's /mcp. ask_owner
+# records one here and Telegrams the question; get_owner_answers matches the
+# owner's chat reply back. Written at /mcp-tool time on the live bot, so point
+# ARGO_PENDING_DECISIONS_PATH at the Railway volume or each redeploy wipes the
+# open decisions (same reason as PENDING_HEAL_PATH). argo_mcp_server re-exports
+# this as a module-level constant (the test patch point).
+PENDING_DECISIONS_PATH = Path(os.environ.get("ARGO_PENDING_DECISIONS_PATH",
+                                             str(DATA / "argo_pending_decisions.json")))
 # Acted-on-push instrumentation (argo_pushes): one row per scheduled/unprompted
 # "push" Argo sends, marked linked when a user reply lands within the window. The
 # proactive senders (project/watch) write it and the webhook links it at chat
