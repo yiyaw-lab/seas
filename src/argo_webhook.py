@@ -40,7 +40,6 @@ import os
 import re
 import threading
 import time
-from collections import namedtuple
 from pathlib import Path
 
 try:
@@ -51,7 +50,9 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
 
+import argo_bluff
 import argo_http
+import argo_media
 import argo_memory
 import argo_observe as observe
 import argo_paths
@@ -713,194 +714,30 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
 
 
 # --- Claim<->receipt gate -------------------------------------------------
-# A reply can CLAIM an action the model never took: "opening a PR" with no
-# propose_change, "I read the link" with no fetch, "reply CONFIRM" with nothing
-# staged. tool_events is the receipt -- the tools that actually fired this turn
-# (argo_observe.chat_with_mcp). A claim with no backing tool in the receipt is a
-# phantom and must never reach the user. _classify_claim does the detection;
-# _generate_reply re-prompts the model once for the doable-in-turn classes
-# (PR/CONFIRM) before falling back to _guard_phantom_send's honest suppression.
-
-# Project tools that produce a real artifact (legacy class, kept verbatim).
-_PROJECT_TOOLS = frozenset({
-    "new_project", "add_project", "project_too_complex", "recommend_project",
-    "get_latest_project", "scaffold_project", "rehearse_project",
-})
-# Tools that back a PR claim, a read/link claim, and a CONFIRM prompt.
-_PR_TOOLS = frozenset({"propose_change"})
-_LINK_READ_TOOLS = frozenset({
-    "web_fetch", "study_url", "github_read_file", "github_list",
-    "verify_feed", "read_findings", "read_self", "read_taste",
-})
-_HEAL_TOOLS = frozenset({"reregister_webhook", "refetch_signals"})
-
-_PHANTOM_CLAIM_RE = re.compile(
-    r"captured your idea"
-    r"|putting (a|the|your) project together"
-    r"|(sending|sent|drafting|building|shaping)\b[^.!?\n]{0,40}\b(proposal|project)\b",
-    re.IGNORECASE)
-# "I'm opening a PR", "I'll open the PR", "I put up a PR", "the PR is up". The
-# first-person lead (I/we/let me) is what separates an action CLAIM from PR
-# workflow ADVICE ("opening a PR for review involves..."), which must NOT trip.
-_PR_CLAIM_RE = re.compile(
-    r"\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
-    r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
-    r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
-    # Softer verbs (write/try/wrap up) count as a PR CLAIM only when the PR is the
-    # near-direct object -- "I'll write the PR", "let me try the PR" -- NOT when it's
-    # mentioned downstream ("I'll try to explain the PR", "write you a summary of the
-    # PR"), which is honest talk, not a claim. Tight object gap, no {0,30} reach.
-    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
-    r"\b(?:writ(?:e|ing|ten)|tr(?:y|ying)|wrap(?:ped|ping)? up)\b"
-    r"\s+(?:the |a |this |that |my |your |our )?(?:PR|pull request)\b"
-    r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
-    r"(?:open|opened|ready|drafted|submitted|up|live)\b"
-    # PR used as a verb on a specific object: "I'll PR it", "I'm gonna PR this".
-    # Object is a pronoun (it/this/that/them/those) -- NOT bare "a"/"the"/"in",
-    # which over-match prose like "we PR the changes via the dashboard".
-    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,20}"
-    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|them|those)\b"
-    # Writing a repo file is a propose_change action: "I'll add the feed to
-    # feeds.json", "I'm editing feeds.json". (feeds live in the repo.)
-    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,35}"
-    r"\b(?:add(?:ed|ing)?|edit(?:ed|ing)?|updat(?:e|ed|ing)?|commit(?:ted|ting)?"
-    r"|writ(?:e|ing)|stag(?:e|ed|ing)|push(?:ed|ing)?|put(?:ting)?)\b"
-    r"[^.!?\n]{0,40}\bfeeds\.json\b",
-    re.IGNORECASE)
-# "I read/checked/fetched the link", "I looked it up", "the page says", "per URL".
-_LINK_READ_CLAIM_RE = re.compile(
-    r"\bI(?:'ve| have)?\s+(?:just\s+)?(?:read|checked|looked at|reviewed|fetched"
-    r"|pulled|opened|visited|skimmed)\b[^.!?\n]{0,40}\b(?:link|page|article|url"
-    r"|site|repo|file|docs?|post|paper|release)\b"
-    r"|\bI(?:'ve| have)?\s+(?:just\s+)?(?:looked it up|looked up|checked the latest"
-    r"|did some digging|dug into it|searched (?:for|online))\b"
-    r"|\bthe (?:page|article|link|docs?|file|repo|post|paper|release)\b"
-    r"[^.!?\n]{0,20}\b(?:says?|shows?|states?|reads?|confirms?|mentions?)\b"
-    r"|\b(?:per|according to)\s+(?:https?://|the\s)",
-    re.IGNORECASE)
-# Model typing the CONFIRM ritual itself ("reply CONFIRM").
-_CONFIRM_PROMPT_RE = re.compile(
-    r"\b(?:reply|say|send|type|respond(?: with)?|hit)\b[^.!?\n]{0,15}\bCONFIRM\b",
-    re.IGNORECASE)
-# An action mentioned AFTER one of these is being OFFERED, not claimed ("I can
-# open a PR if you want"), or honestly declined ("I can't open a PR").
-_NONCOMMITTAL_RE = re.compile(
-    r"\b(?:can|can't|cannot|could|would|should|may|might|able to|happy to"
-    r"|want me to|do you want|shall i|if you)\b",
-    re.IGNORECASE)
-
-# What _classify_claim hands back about an unbacked claim. reattemptable=True means
-# the action is doable in one turn (PR/CONFIRM), so _generate_reply re-prompts the
-# model with gap_note before suppressing; else replacement is sent as-is.
-_Violation = namedtuple(
-    "_Violation", "reattemptable replacement gap_note incident_kind incident_sig")
-
-_PROJECT_NUDGE = ("hang on, I didn't actually build anything yet. say 'give me a "
-                  "proposal' and I'll ship one for real.")
-_PR_NUDGE = ("correction: I haven't actually opened a PR -- no propose_change ran. "
-             "Say 'propose it' and I'll open a real one for you to merge.")
-_READ_NUDGE = ("correction: I didn't actually fetch that -- no read tool ran, so I "
-               "won't pretend I saw it. Want me to pull it up for real?")
-_CONFIRM_NUDGE = ("correction: there's nothing staged behind a CONFIRM. Tell me "
-                  "what to do (e.g. 'reregister webhook') and I'll stage it for real.")
-
-_PR_GAP = ("\n\n[system note: you said you'd open a PR but no propose_change fired "
-           "this turn. Call propose_change now, or state the EXACT blocker (e.g. a "
-           "missing ARGO_PROPOSE_TOKEN, via check_config). Do NOT repeat the claim "
-           "without calling the tool.]")
-_CONFIRM_GAP = ("\n\n[system note: you told the user to reply CONFIRM but you "
-                "staged nothing (no reregister_webhook/refetch_signals call). Call "
-                "the heal tool now so there's something behind CONFIRM, or don't "
-                "ask for CONFIRM.]")
-
-
-def _claim_unbacked(claim_re, reply):
-    """True if claim_re matches reply somewhere the match span carries NO
-    non-committal marker, so an offer/decline ('I can open a PR if you want',
-    'I can't open a PR') doesn't count. The window spans the match itself (the
-    claim is first-person-anchored, so 'can'/'could'/etc. sit inside it) plus a
-    few leading chars for a marker that immediately precedes the subject."""
-    for m in claim_re.finditer(reply):
-        window = reply[max(0, m.start() - 4):m.end()]
-        if not _NONCOMMITTAL_RE.search(window):
-            return True
-    return False
+# The anti-bluff / phantom-send gate (classify, suppress, name the PR blocker,
+# the regexes/constants) lives in argo_bluff now -- one cohesive seam out of this
+# server, with no Telegram or model dependency. These thin wrappers keep the exact
+# names _generate_reply and the tests (test_anti_bluff_pr / test_webhook_confirm_gate)
+# use, and forward this module's MCP_SERVERS global (the patch point tests override),
+# _note_incident (also patched), and the module logger -- so argo_bluff needs no
+# knowledge of the override and there's no circular import. Re-export the regex and
+# the nudge text the tests reference directly.
+_PR_CLAIM_RE = argo_bluff._PR_CLAIM_RE
+_PR_NUDGE = argo_bluff._PR_NUDGE
+_claim_unbacked = argo_bluff.claim_unbacked
 
 
 def _pr_blocker():
-    """A concrete reason propose_change cannot open a PR right now, or None if the
-    config looks complete. Lets an unbacked PR claim name the real blocker ('repo
-    still points at the placeholder') instead of the generic 'say propose it', and
-    lets _classify_claim skip a pointless re-attempt -- re-prompting the model can't
-    conjure a missing token. Reads os.environ fresh (not the import-time constants in
-    argo_mcp_server) so a late-set var is seen."""
-    if MCP_SERVERS is None:
-        return ("no MCP server is wired (WEBHOOK_URL / ARGO_MCP_TOKEN unset), so I "
-                "can't run propose_change at all")
-    if not os.environ.get("ARGO_PROPOSE_TOKEN"):
-        return "ARGO_PROPOSE_TOKEN isn't set, so I can't push a branch to GitHub"
-    repo = os.environ.get("ARGO_PROPOSE_REPO", "")
-    # "your-org/your-repo" mirrors the PROPOSE_REPO default in argo_mcp_server.py --
-    # keep the two in sync. Not imported: argo_mcp_server is faked in tests and lazily
-    # imported here elsewhere to avoid a cycle, so a shared constant isn't worth it.
-    if not repo or repo == "your-org/your-repo":
-        return ("ARGO_PROPOSE_REPO still points at the placeholder repo, so there's "
-                "nowhere to open the PR")
-    return None
+    return argo_bluff.pr_blocker(MCP_SERVERS)
 
 
 def _classify_claim(reply, tool_events):
-    """Return a _Violation if the reply makes an action-claim no tool in tool_events
-    backs, else None. Ordered: project -> PR -> link/read -> CONFIRM."""
-    fired = set(tool_events)
-    if not (fired & _PROJECT_TOOLS) and _PHANTOM_CLAIM_RE.search(reply):
-        return _Violation(False, _PROJECT_NUDGE, None, "phantom_send",
-                          "reply claimed a proposal but no project tool fired")
-    if not (fired & _PR_TOOLS) and _claim_unbacked(_PR_CLAIM_RE, reply):
-        blocker = _pr_blocker()
-        if blocker is None:
-            # Config is fine -- the model just didn't call the tool. Worth one
-            # re-attempt to make it actually fire propose_change.
-            return _Violation(True, _PR_NUDGE, _PR_GAP, "phantom_claim",
-                              "reply narrated a PR but propose_change never fired")
-        # A hard config blocker: re-prompting can't fix it, so don't retry --
-        # replace the bluff with the honest, specific reason so the user can act.
-        return _Violation(False,
-                          f"correction: I haven't opened a PR and can't right now -- "
-                          f"{blocker}. Flagging the config so you can fix it.",
-                          None, "phantom_claim",
-                          "reply narrated a PR but propose_change is misconfigured")
-    if not (fired & _LINK_READ_TOOLS) and _claim_unbacked(_LINK_READ_CLAIM_RE, reply):
-        return _Violation(False, _READ_NUDGE, None, "phantom_claim",
-                          "reply claimed it read a source but no read tool fired")
-    if _CONFIRM_PROMPT_RE.search(reply) and not (fired & _HEAL_TOOLS):
-        staged = None
-        try:  # late import + swallow: observability never breaks a chat turn
-            import argo_mcp_server
-            staged = argo_mcp_server.pending_heal_action()
-        except Exception:
-            staged = None
-        if staged is None:
-            return _Violation(True, _CONFIRM_NUDGE, _CONFIRM_GAP, "phantom_claim",
-                              "reply asked the user to reply CONFIRM with nothing staged")
-    return None
+    return argo_bluff.classify_claim(reply, tool_events, MCP_SERVERS)
 
 
 def _guard_phantom_send(reply, tool_events):
-    """Terminal claim<->receipt backstop: if the reply makes an action-claim no tool
-    backs (opened a PR / read a link / asked for CONFIRM with nothing staged),
-    replace the false claim with an honest correction and log it. _generate_reply
-    re-prompts the doable classes (PR/CONFIRM) once before this fires; the
-    deterministic routes (FIX/EVOLVE/CONFIRM gates) open real PRs and never pass
-    through here."""
-    v = _classify_claim(reply, tool_events)
-    if v is None:
-        return reply
-    log.warning("phantom claim suppressed: %s (events=%s)",
-                v.incident_sig, tool_events or "none")
-    _note_incident(v.incident_kind, v.incident_sig,
-                   f"events={tool_events or 'none'}; reply={reply[:120]}")
-    return v.replacement
+    return argo_bluff.guard_phantom_send(
+        reply, tool_events, MCP_SERVERS, _note_incident, log)
 
 
 def _llm_reply(chat_id, user_text):
@@ -1090,205 +927,52 @@ def _set_project_outcome(shipped, project_id=None):
     return argo_rating.set_project_outcome(PROJECTS_LOG, shipped, project_id)
 
 
-def _download_telegram_file(file_id):
-    """Download any Telegram file by file_id. Returns (bytes, file_path) or
-    (None, None). Two steps: getFile to resolve a CDN file_path, then download
-    from the file CDN — both need the token."""
-    import urllib.request
+# The Telegram media pipeline (download a file/photo, save it, run a photo or
+# document turn through the brain) lives in argo_media now -- one cohesive seam
+# out of this server, pure of the chat routing. These thin wrappers keep the exact
+# names handle_update and the tests (test_files / test_image_routing) use, and
+# forward this module's own functions/globals resolved at call time -- the patch
+# points tests override (_download_telegram_file, _download_telegram_photo,
+# _generate_reply, FILES_DIR) -- so argo_media never imports argo_webhook and there
+# is no circular import.
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not file_id or not token:
-        return None, None
-    ctx = argo_http.tls_context()
-    try:
-        api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
-        with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
-            path = json.loads(r.read().decode()).get("result", {}).get("file_path")
-        if not path:
-            return None, None
-        dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
-        with urllib.request.urlopen(dl, timeout=30, context=ctx) as r:
-            return r.read(), path
-    except Exception as exc:
-        log.warning("telegram file download failed: %s", exc)
-        return None, None
-
-
-def _download_telegram_photo(msg):
-    """Download the largest photo in a Telegram message. Returns (bytes,
-    media_type) or (None, None)."""
-    # Telegram delivers an image two ways:
-    #   - "photo" (compressed, via the image picker): msg['photo'] = [sizes...]
-    #   - "document" (sent as a FILE, common on desktop / to keep quality):
-    #     msg['document'] = {file_id, mime_type: 'image/...'}
-    # We must handle BOTH, or a screenshot sent as a file is silently dropped.
-    file_id = None
-    media = None
-    photos = msg.get("photo") or []
-    doc = msg.get("document") or {}
-    if photos:
-        file_id = photos[-1].get("file_id")  # array of sizes; last is largest
-    elif doc and str(doc.get("mime_type", "")).startswith("image/"):
-        file_id = doc.get("file_id")
-        media = doc.get("mime_type")
-    data, path = _download_telegram_file(file_id)
-    if data is None:
-        return None, None
-    # Prefer the document's declared mime_type; else infer from the path.
-    if not media:
-        media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
-    return data, media
-
-
-def _handle_photo(chat_id, msg):
-    """A screenshot/image: SEE it inside the conversation and respond to what the
-    user actually wants. The image goes through Argo's normal tool-enabled brain
-    (history + MCP tools), so it can react, identify, brainstorm, look things up --
-    and, when it JUDGES the image is genuinely design/product inspiration, call
-    save_taste_signal itself. No longer force-converted into a 'taste lesson'; no
-    longer silently dropped."""
-    import base64
-
-    caption = msg.get("caption", "") or ""
-    img, media = _download_telegram_photo(msg)
-    if img is None:
-        send_telegram.send_message(
-            "got an image but couldn't pull it down, mind resending?")
-        return
-
-    # Anthropic image block + a text block carrying the caption (or a neutral note
-    # so the model knows there was none). Mirrors observe.describe_image's shape.
-    content = [
-        {"type": "image", "source": {
-            "type": "base64", "media_type": media,
-            "data": base64.b64encode(img).decode(),
-        }},
-        {"type": "text",
-         "text": caption or "[the user sent this image with no caption]"},
-    ]
-    log_user_text = f"[image]{(' ' + caption) if caption else ''}"
-    try:
-        reply = _generate_reply(chat_id, content, log_user_text,
-                                route_text=caption, anthropic_only=True)
-    except Exception as exc:
-        send_telegram.send_message(f"saw the image but couldn't process it: {exc}")
-        return
-    if reply is None:
-        # No vision-capable (Anthropic) model configured this turn. Still record
-        # the user's image turn so the gap shows up in history.
-        _append_turn(chat_id, profile.name(), log_user_text)
-        no_vision_msg = ("got an image but can't see it right now "
-                         "(no vision model configured). mind describing it, "
-                         "or resending in a bit?")
-        _append_turn(chat_id, "Argo", no_vision_msg)
-        send_telegram.send_message(no_vision_msg)
-        return
-    send_telegram.send_message(reply)
-
-
-# Files Argo reads inline as text, by extension (Telegram clients' mime types
-# are unreliable for these). Anything else non-PDF is saved but not parsed.
-_TEXT_EXTS = frozenset({
-    ".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".toml", ".xml",
-    ".py", ".js", ".ts", ".html", ".css", ".sh", ".log",
-})
-_MAX_FILE_CHARS = 12000  # keep a huge file from blowing the prompt/budget
-_MAX_FILE_BYTES = 19 * 1024 * 1024  # Telegram's bot-API download cap is 20MB
-
-# Re-exported so tests can patch wh.FILES_DIR; helpers read it at call time.
+# Re-exported so tests can patch wh.FILES_DIR; the wrapper reads it at call time.
 FILES_DIR = argo_paths.FILES_DIR
 
 
+def _download_telegram_file(file_id):
+    return argo_media.download_telegram_file(file_id)
+
+
+def _download_telegram_photo(msg):
+    return argo_media.download_telegram_photo(msg, download_file=_download_telegram_file)
+
+
 def _save_incoming_file(name, data):
-    """Persist a user-sent file into FILES_DIR (point ARGO_FILES_DIR at the
-    Railway volume so it survives redeploys). Returns the saved Path. The name
-    is sanitized to a safe basename and uniquified, never overwritten."""
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "file").name) or "file"
-    files_dir = Path(FILES_DIR)
-    files_dir.mkdir(parents=True, exist_ok=True)
-    dest = files_dir / safe
-    n = 1
-    while dest.exists():
-        dest = files_dir / f"{Path(safe).stem}-{n}{Path(safe).suffix}"
-        n += 1
-    dest.write_bytes(data)
-    return dest
+    return argo_media.save_incoming_file(name, data, FILES_DIR)
+
+
+def _handle_photo(chat_id, msg):
+    argo_media.handle_photo(
+        chat_id, msg,
+        send_message=send_telegram.send_message,
+        download_photo=_download_telegram_photo,
+        generate_reply=_generate_reply,
+        append_turn=_append_turn,
+        user_name=profile.name(),
+    )
 
 
 def _handle_document(chat_id, msg):
-    """A non-image file (PDF, notes, csv, code...): download it, SAVE it to
-    FILES_DIR, and read it through the normal history-aware brain. Previously
-    these fell through the text guard and were silently dropped — the user
-    sent Argo a file and got nothing back."""
-    import base64
-
-    doc = msg.get("document") or {}
-    caption = msg.get("caption", "") or ""
-    name = doc.get("file_name") or "file"
-    if (doc.get("file_size") or 0) > _MAX_FILE_BYTES:
-        send_telegram.send_message(
-            f"{name} is over Telegram's 20MB bot limit so I can't pull it "
-            "down. mind sending a smaller version or a link?")
-        return
-    data, _ = _download_telegram_file(doc.get("file_id"))
-    if data is None:
-        send_telegram.send_message(
-            f"got {name} but couldn't pull it down, mind resending?")
-        return
-    try:
-        saved_note = f"saved to {_save_incoming_file(name, data)}"
-    except OSError as exc:
-        log.warning("could not save incoming file %s: %s", name, exc)
-        saved_note = "could not be saved to disk"
-
-    mime = str(doc.get("mime_type") or "")
-    suffix = Path(name).suffix.lower()
-    caption_note = caption or "[no caption -- react to the file]"
-    anthropic_only = False
-    if mime == "application/pdf" or suffix == ".pdf":
-        # Claude reads PDFs natively via a document block (vision models only).
-        anthropic_only = True
-        content = [
-            {"type": "document", "source": {
-                "type": "base64", "media_type": "application/pdf",
-                "data": base64.b64encode(data).decode(),
-            }},
-            {"type": "text",
-             "text": f"[the user sent this PDF: {name}, {saved_note}] "
-                     f"{caption_note}"},
-        ]
-    elif mime.startswith("text/") or suffix in _TEXT_EXTS:
-        body = data.decode("utf-8", errors="replace")
-        clipped = ""
-        if len(body) > _MAX_FILE_CHARS:
-            body = body[:_MAX_FILE_CHARS]
-            clipped = ", clipped here because it's long"
-        content = (f"[the user sent a file: {name}, {saved_note}{clipped}]\n"
-                   f"---\n{body}\n---\n{caption_note}")
-    else:
-        content = (f"[the user sent a file you can't read inline: {name} "
-                   f"({mime or 'unknown type'}), {saved_note}. acknowledge it "
-                   f"honestly and ask what they want done with it] {caption_note}")
-
-    log_user_text = f"[file: {name}]{(' ' + caption) if caption else ''}"
-    try:
-        reply = _generate_reply(chat_id, content, log_user_text,
-                                route_text=caption,
-                                anthropic_only=anthropic_only)
-    except Exception as exc:
-        send_telegram.send_message(f"saved {name} but couldn't read it: {exc}")
-        return
-    if reply is None:
-        # PDFs need a Claude model; or no model is configured at all. Still
-        # record the turn so the gap shows up in history.
-        _append_turn(chat_id, profile.name(), log_user_text)
-        no_model_msg = (f"saved {name}, but I can't read it right now (no "
-                        "usable model configured). mind telling me what's in "
-                        "it, or resending in a bit?")
-        _append_turn(chat_id, "Argo", no_model_msg)
-        send_telegram.send_message(no_model_msg)
-        return
-    send_telegram.send_message(reply)
+    argo_media.handle_document(
+        chat_id, msg,
+        send_message=send_telegram.send_message,
+        download_file=_download_telegram_file,
+        save_file=_save_incoming_file,
+        generate_reply=_generate_reply,
+        append_turn=_append_turn,
+        user_name=profile.name(),
+    )
 
 
 def handle_update(update):
