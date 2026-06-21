@@ -72,6 +72,19 @@ class CostLedgerTest(unittest.TestCase):
         self.assertEqual(r["cache_creation_tokens"], 0)
         self.assertEqual(r["cache_read_tokens"], 0)
 
+    def test_openai_chat_completions_cached_tokens_nested(self):
+        # OpenAI/xAI chat-completions nest cache reads under
+        # prompt_tokens_details.cached_tokens (NOT input_tokens_details). The
+        # telemetry exists to measure caching wins, so this field must be captured.
+        resp = _Resp(_Usage(
+            prompt_tokens=900, completion_tokens=30,
+            prompt_tokens_details=_Usage(cached_tokens=750)))
+        argo_cost.record_usage(resp, "gpt-4.1", "openai", "openai/gpt-4.1")
+        r = self._rows()[0]
+        self.assertEqual(r["input_tokens"], 900)
+        self.assertEqual(r["output_tokens"], 30)
+        self.assertEqual(r["cache_read_tokens"], 750)
+
     def test_openai_responses_cached_tokens_nested(self):
         # OpenAI Responses API nests cache reads under input_tokens_details.
         resp = _Resp(_Usage(

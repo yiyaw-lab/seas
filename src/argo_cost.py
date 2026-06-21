@@ -72,10 +72,11 @@ def normalize(usage, provider):
     actually carried; never raises on a missing field.
 
     anthropic carries input/output_tokens + the two cache_* fields directly. The
-    OpenAI/xAI chat-completions API uses prompt/completion_tokens and has no cache
-    fields; the OpenAI Responses API uses input/output_tokens and nests cache reads
-    under input_tokens_details.cached_tokens. We read every variant and take the one
-    that is present, so the same record shape covers all three providers."""
+    The OpenAI/xAI chat-completions API uses prompt/completion_tokens and nests cache
+    reads under prompt_tokens_details.cached_tokens; the OpenAI Responses API uses
+    input/output_tokens and nests cache reads under input_tokens_details.cached_tokens.
+    We read every variant and take the one that is present, so the same record shape
+    covers all three providers."""
     if usage is None:
         return {"input_tokens": 0, "output_tokens": 0,
                 "cache_creation_tokens": 0, "cache_read_tokens": 0}
@@ -86,15 +87,19 @@ def normalize(usage, provider):
     output_tokens = _g(usage, "output_tokens") or _g(usage, "completion_tokens")
 
     # cache: anthropic exposes creation + read directly; the OpenAI Responses API
-    # nests cached reads under input_tokens_details.cached_tokens.
+    # nests cached reads under input_tokens_details.cached_tokens and the OpenAI/xAI
+    # chat-completions API under prompt_tokens_details.cached_tokens.
     cache_creation = _g(usage, "cache_creation_input_tokens")
     cache_read = _g(usage, "cache_read_input_tokens")
     if not cache_read:
-        details = getattr(usage, "input_tokens_details", None)
-        if details is None and isinstance(usage, dict):
-            details = usage.get("input_tokens_details")
-        if details is not None:
-            cache_read = _g(details, "cached_tokens")
+        for details_field in ("input_tokens_details", "prompt_tokens_details"):
+            details = getattr(usage, details_field, None)
+            if details is None and isinstance(usage, dict):
+                details = usage.get(details_field)
+            if details is not None:
+                cache_read = _g(details, "cached_tokens")
+                if cache_read:
+                    break
 
     return {
         "input_tokens": int(input_tokens),
