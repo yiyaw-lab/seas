@@ -96,9 +96,15 @@ crash a thread or a chat turn, and make that net log. Target under 500 lines per
 module. `argo_mcp_server.py`, `argo_webhook.py`, `argo_evolve.py`, and
 `argo_observe.py` exceed that today — don't split them speculatively, but when one
 next needs a substantive change, extract one cohesive seam as part of that work.
-The rating helpers already came out as `argo_rating.py`; the project-state helpers
-`_target_project`/`_match_existing_project` are the next cohesive seam in
-`argo_webhook`.
+The rating + project-state helpers already came out as `argo_rating.py` (incl.
+`_target_project`/`_match_existing_project`, moved in 9ecd38f) — `argo_webhook`
+only keeps thin delegating wrappers now, so that is no longer the seam to chase.
+The next real cohesive seam in `argo_webhook` is the anti-bluff / phantom-send
+gate (`_classify_claim`, `_guard_phantom_send`, `_claim_unbacked`, `_pr_blocker`
+plus their regexes — ~190 lines, no external callers, already covered by
+`test_anti_bluff_pr.py`) → extract as `argo_bluff.py`; the Telegram media pipeline
+(`_download_telegram_*`, `_handle_photo`, `_handle_document` — ~200 lines) →
+`argo_media.py` is the one after.
 
 **Argo output rules** (already enforced in code via `_clean_reply`, keep them):
 plain text only — no markdown, no em dashes; sources cited like a human, never
