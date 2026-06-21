@@ -34,6 +34,10 @@ PREDICTIONS_PATH = argo_paths.PREDICTIONS_PATH
 # project-outcome metric reads the project log at score time, and tests override
 # this to a tmp path (mock.patch.object(argo_predictions, "PROJECTS_LOG", ...)).
 PROJECTS_LOG = argo_paths.PROJECTS_LOG
+# Re-exported for the same patch-the-global reason: the finding_prediction metric
+# reads the finding JSON at score time to find the human verdict, and tests
+# override this to a tmp dir (mock.patch.object(argo_predictions, "FINDINGS_DIR", ...)).
+FINDINGS_DIR = argo_paths.FINDINGS_DIR
 
 # The project-entry fields that hold a committed bet's judgment-prediction ids: the
 # project_shipped pred (judgment_prediction_id -- kept for step-1 back-compat) and the
@@ -171,7 +175,7 @@ MATTERED_ENERGY_MIN = 7
 # Recognized metric kinds: a None verdict for one of these is an expected "no
 # outcome yet" pending state (logged quietly), not an unknown metric (which warns).
 _KNOWN_KINDS = ("incident_absent", "project_shipped", "project_mattered",
-                "cache_ratio")
+                "cache_ratio", "finding_prediction")
 
 def _project_entry(project_id):
     """The project-log entry for `project_id`, or None. Reads the bare PROJECTS_LOG
@@ -182,6 +186,14 @@ def _project_entry(project_id):
     if not isinstance(items, list):
         return None
     return next((p for p in items if p.get("id") == project_id), None)
+
+
+def _finding_entry(finding_id):
+    """The finding JSON for `finding_id`, or None. Reads FINDINGS_DIR/<fid>.json at
+    call time (bare name) so a test override of the global bites (mirrors _load)."""
+    if not finding_id:
+        return None
+    return argo_store.load_json(FINDINGS_DIR / f"{finding_id}.json", None)
 
 
 def _evaluate(metric, armed_at):
@@ -220,6 +232,22 @@ def _evaluate(metric, armed_at):
           volume ledger argo_cost writes (placement: score_due rides the daily
           'frontier' LOCAL_COMMAND on the webhook's Railway volume, where the cost
           rows live), so it needs ZERO new scheduler wiring.
+
+    v4 kinds (finding-backed, HUMAN-graded -- the research-judgment loop, ROADMAP
+    Stage 2: 'every SEAS finding carries a dated prediction that gets scored'):
+      {"kind": "finding_prediction", "finding_id": "F-NNN"}
+          a SEAS finding's dated prediction (the falsifiable claim + refutation
+          condition the emission gate already requires). The finding's `checkable`
+          and `refutation_condition` are free-text prose (e.g. 'open the PDFs and
+          verify the results table'), which NO store Argo keeps can settle
+          mechanically -- so, exactly like project_mattered, this grades against an
+          EXTERNAL human verdict stamped onto the finding JSON, never telemetry Argo
+          writes about itself: True once the finding records prediction_outcome
+          'held', False on 'refuted', None while unjudged. The None is the honest
+          abstention -- an unjudged finding is unknown, never a fabricated pass.
+          Reads the same findings/ dir seas_finding writes (placement: score_due
+          rides the daily 'frontier' LOCAL_COMMAND on the webhook's volume, where
+          the findings live), so it needs ZERO new scheduler wiring.
     """
     kind = (metric or {}).get("kind")
     if kind == "incident_absent":
@@ -270,6 +298,16 @@ def _evaluate(metric, armed_at):
         if ratio is None or calls < min_calls:
             return None
         return ratio >= min_ratio
+    if kind == "finding_prediction":
+        finding = _finding_entry(metric.get("finding_id"))
+        if not isinstance(finding, dict):
+            return None  # finding gone/unreadable -> abstain
+        outcome = finding.get("prediction_outcome")
+        if outcome == "held":
+            return True
+        if outcome == "refuted":
+            return False
+        return None  # unjudged -> abstain (never a guessed pass)
     return None
 
 
