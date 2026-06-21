@@ -18,6 +18,7 @@ Standard-library + the shared-utils layer. JSON store at data/argo_predictions.j
 
 from datetime import datetime, timedelta, timezone
 
+import argo_cost
 import argo_incidents
 import argo_paths
 import argo_store
@@ -169,7 +170,8 @@ MATTERED_ENERGY_MIN = 7
 
 # Recognized metric kinds: a None verdict for one of these is an expected "no
 # outcome yet" pending state (logged quietly), not an unknown metric (which warns).
-_KNOWN_KINDS = ("incident_absent", "project_shipped", "project_mattered")
+_KNOWN_KINDS = ("incident_absent", "project_shipped", "project_mattered",
+                "cache_ratio")
 
 def _project_entry(project_id):
     """The project-log entry for `project_id`, or None. Reads the bare PROJECTS_LOG
@@ -204,6 +206,20 @@ def _evaluate(metric, armed_at):
           calibration number, which counts a dropped bet as a ship-and-matter miss.
           Graded against the user's OWN rating (an external label), never telemetry Argo
           writes itself.
+
+    v3 kinds (cost-ledger backed -- the first MEASURED cost claim, ROADMAP Stage 2):
+      {"kind": "cache_ratio", "min_ratio": 0.50, "min_calls": 20,
+       "model": "<m>"?, "provider": "<p>"?, "label_prefix": "chat/"?}
+          a dated prompt-caching savings claim: True once the actual fraction of
+          billable input tokens served from cache (argo_cost.cache_input_ratio over
+          the rows logged SINCE this prediction was armed) reaches min_ratio across
+          at least min_calls calls, False once the window has enough calls but the
+          ratio falls short, None while the ledger is too thin to judge (fewer than
+          min_calls, or no measurable tokens). The None is the honest abstention --
+          an unscorable metric stays unscored, never a guessed pass. Reads the same
+          volume ledger argo_cost writes (placement: score_due rides the daily
+          'frontier' LOCAL_COMMAND on the webhook's Railway volume, where the cost
+          rows live), so it needs ZERO new scheduler wiring.
     """
     kind = (metric or {}).get("kind")
     if kind == "incident_absent":
@@ -236,6 +252,24 @@ def _evaluate(metric, armed_at):
         if not isinstance(energy, (int, float)):
             return None  # shipped but unrated -> did-it-matter unanswered -> abstain
         return energy >= MATTERED_ENERGY_MIN
+    if kind == "cache_ratio":
+        try:
+            min_ratio = float(metric.get("min_ratio"))
+        except (TypeError, ValueError):
+            return None  # malformed claim -> abstain (warns as not-checkable below)
+        min_calls = metric.get("min_calls", 1)
+        min_calls = int(min_calls) if isinstance(min_calls, (int, float)) else 1
+        # Measure only the window AFTER arming, so the claim grades the change that
+        # was live, not the pre-caching baseline.
+        since = _parse_ts(armed_at)
+        since_ts = since.timestamp() if since else None
+        ratio, calls = argo_cost.cache_input_ratio(
+            since_ts=since_ts, model=metric.get("model"),
+            provider=metric.get("provider"), label_prefix=metric.get("label_prefix"))
+        # Honest insufficient-data: too few calls, or nothing measurable -> abstain.
+        if ratio is None or calls < min_calls:
+            return None
+        return ratio >= min_ratio
     return None
 
 
@@ -282,3 +316,71 @@ def score_due(notify=None):
     if changed:
         _save(items)
     return scored
+
+
+# --- arming a concrete cost prediction ---------------------------------------
+
+def arm_cost_prediction(min_ratio=0.50, days=14, min_calls=20,
+                        model=None, provider=None, label_prefix="chat/"):
+    """Arm ONE concrete, dated prompt-caching savings claim so the milestone can
+    fire. Creates (or reuses) a world-model belief that caching cut chat input
+    spend, records a `cache_ratio` prediction bound to it, and ARMS it now -- the
+    clock starts immediately because the cost telemetry (PR #41) is already live,
+    so 'within `days` days' means `days` of real logged traffic. The prediction
+    grades only the rows logged AFTER arming, against the >= min_ratio claim across
+    at least min_calls calls; until that many calls accrue it stays honestly
+    unscored (never a guessed pass). Returns the prediction id.
+
+    Default scope is the chat path (label_prefix='chat/') -- the path PR #30's
+    caching actually targets -- across all models/providers. NO ledger data is
+    fabricated; this only registers the claim. Idempotent on the belief (add_belief
+    dedupes the claim text); each call records a fresh prediction."""
+    pct = int(round(min_ratio * 100))
+    claim = (f"Prompt caching serves at least {pct}% of chat input tokens from "
+             f"cache (measured over {days} days of live traffic).")
+    belief_id = world_model.add_belief(claim, source_finding="cost-telemetry:PR#41")
+    metric = {"kind": "cache_ratio", "min_ratio": float(min_ratio),
+              "min_calls": int(min_calls), "label_prefix": label_prefix}
+    if model:
+        metric["model"] = model
+    if provider:
+        metric["provider"] = provider
+    pid = record(belief_id, claim, metric, int(days), source="cost-telemetry")
+    arm(pid)  # clock starts now -- telemetry is already recording
+    log.info("armed cost prediction %s (belief %s): >= %d%% cache over %d days",
+             pid, belief_id, pct, days)
+    return pid
+
+
+def main(argv=None):
+    """Minimal CLI to arm the concrete cost prediction (mirrors how levers arm
+    theirs in argo_evolve, but operator-invoked):
+
+        python3 src/argo_predictions.py arm-cost [--min-ratio 0.5] [--days 14]
+                [--min-calls 20] [--model M] [--provider P] [--label-prefix chat/]
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="argo_predictions")
+    sub = parser.add_subparsers(dest="cmd")
+    a = sub.add_parser("arm-cost", help="arm one dated prompt-caching savings claim")
+    a.add_argument("--min-ratio", type=float, default=0.50)
+    a.add_argument("--days", type=int, default=14)
+    a.add_argument("--min-calls", type=int, default=20)
+    a.add_argument("--model", default=None)
+    a.add_argument("--provider", default=None)
+    a.add_argument("--label-prefix", default="chat/")
+    args = parser.parse_args(argv)
+    if args.cmd == "arm-cost":
+        pid = arm_cost_prediction(
+            min_ratio=args.min_ratio, days=args.days, min_calls=args.min_calls,
+            model=args.model, provider=args.provider, label_prefix=args.label_prefix)
+        print(f"armed cost prediction {pid} (due in {args.days} days)")
+        return 0
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
