@@ -1,9 +1,10 @@
 {
   "fired": [
-    "Self-diagnosis@2026-06-21T13",
     "Tripwire sweep@2026-06-21T00",
-    "Tripwire sweep@2026-06-21T14",
+    "Self-diagnosis@2026-06-21T13",
+    "Frontier evolution@2026-06-21T17",
     "Weekly self-reflection@2026-06-21T16",
-    "Frontier evolution@2026-06-21T17"
+    "Tripwire sweep@2026-06-21T14",
+    "Tripwire sweep@2026-06-21T19"
   ]
 }
