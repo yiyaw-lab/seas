@@ -87,14 +87,18 @@ class PushStoreTest(unittest.TestCase):
 
 class _Resp:
     """Minimal context-manager stand-in for a urlopen 2xx response."""
-    def __init__(self, status=200):
+    def __init__(self, status=200, body=b"{}"):
         self.status = status
+        self._body = body
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return False
+
+    def read(self):
+        return self._body
 
 
 class PostToWebhookRetryTest(unittest.TestCase):
@@ -121,8 +125,9 @@ class PostToWebhookRetryTest(unittest.TestCase):
             return _Resp(200)
 
         with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
-            ok = argo_pushes.post_to_webhook("project", "hi")
-        self.assertTrue(ok)
+            result = argo_pushes.post_to_webhook("project", "hi")
+        self.assertTrue(result.recorded)
+        self.assertFalse(result.suppressed)
         self.assertEqual(len(calls), 2)  # retried exactly once
 
     def test_persistent_5xx_retries_once_then_gives_up(self):
@@ -134,8 +139,9 @@ class PostToWebhookRetryTest(unittest.TestCase):
             raise urllib.error.HTTPError("https://x", 503, "unavailable", {}, None)
 
         with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
-            ok = argo_pushes.post_to_webhook("project", "hi")
-        self.assertFalse(ok)
+            result = argo_pushes.post_to_webhook("project", "hi")
+        self.assertFalse(result.recorded)
+        self.assertFalse(result.suppressed)  # a failed POST is fail-open, not suppressed
         self.assertEqual(len(calls), 2)  # 5xx is transient -> one retry, then stop
 
     def test_permanent_4xx_not_retried(self):
@@ -147,8 +153,9 @@ class PostToWebhookRetryTest(unittest.TestCase):
             raise urllib.error.HTTPError("https://x", 401, "unauthorized", {}, None)
 
         with mock.patch.object(argo_pushes.urllib.request, "urlopen", fake_urlopen):
-            ok = argo_pushes.post_to_webhook("project", "hi")
-        self.assertFalse(ok)
+            result = argo_pushes.post_to_webhook("project", "hi")
+        self.assertFalse(result.recorded)
+        self.assertFalse(result.suppressed)  # a failed POST is fail-open, not suppressed
         self.assertEqual(len(calls), 1)  # 4xx is permanent -> no retry
 
 

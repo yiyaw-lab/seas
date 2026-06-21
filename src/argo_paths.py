@@ -102,6 +102,15 @@ PENDING_HEAL_PATH = Path(os.environ.get("ARGO_PENDING_HEAL_PATH",
                                         str(DATA / "argo_pending_heal.json")))
 PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
                                        str(DATA / "argo_predictions.json")))
+# Escalation-broker store (F7): pending owner-decisions a credential-less cloud
+# caller (e.g. a scheduled /vacation run) brokers through Argo's /mcp. ask_owner
+# records one here and Telegrams the question; get_owner_answers matches the
+# owner's chat reply back. Written at /mcp-tool time on the live bot, so point
+# ARGO_PENDING_DECISIONS_PATH at the Railway volume or each redeploy wipes the
+# open decisions (same reason as PENDING_HEAL_PATH). argo_mcp_server re-exports
+# this as a module-level constant (the test patch point).
+PENDING_DECISIONS_PATH = Path(os.environ.get("ARGO_PENDING_DECISIONS_PATH",
+                                             str(DATA / "argo_pending_decisions.json")))
 # Acted-on-push instrumentation (argo_pushes): one row per scheduled/unprompted
 # "push" Argo sends, marked linked when a user reply lands within the window. The
 # proactive senders (project/watch) write it and the webhook links it at chat
@@ -115,6 +124,15 @@ PUSHES_PATH = Path(os.environ.get("ARGO_PUSHES_PATH", str(DATA / "argo_pushes.js
 # the Railway volume or each redeploy wipes the spend history. Gitignored.
 COST_LEDGER_PATH = Path(os.environ.get("ARGO_COST_LEDGER_PATH",
                                        str(DATA / "argo_cost_ledger.json")))
+# Steerable-proactiveness setting (argo_pushes.should_send, F6): the single
+# user-tunable base threshold a push's stakes*confidence must clear to send. The
+# webhook writes it when the user runs the PROACTIVE command and the push gate
+# reads it on every send, both in-process on the live bot, so point
+# ARGO_PROACTIVE_PATH at the Railway volume (mirrors ARGO_PUSHES_PATH) or each
+# redeploy resets the user's chosen level. Gitignored. argo_pushes re-exports this
+# as a module-level constant (the test patch point), so its helpers read the
+# override at call time.
+PROACTIVE_PATH = Path(os.environ.get("ARGO_PROACTIVE_PATH", str(DATA / "argo_proactive.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.
