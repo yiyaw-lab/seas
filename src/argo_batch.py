@@ -201,18 +201,22 @@ def run_batch(items, model, *, system=None, max_tokens=1024,
 
 
 # ---------------------------------------------------------------------------
-# DEFERRED: wiring this into seas_finding.auto_score_signals.
+# WIRED (opt-in): seas_finding.auto_score_signals(batch=True) now routes the
+# unscored signals through run_batch. The drop-in described here — collect the
+# unscored signals into (custom_id, prompt) pairs, call run_batch, then map
+# BatchItemResult.text back through the same _extract_json + 5-dimension
+# validation the loop already does — lives in
+# seas_finding._batch_score_signals.
 #
-# auto_score_signals currently scores signals one Claude call at a time. The
-# drop-in is: collect the unscored signals into (signal_id, prompt) pairs, call
-# run_batch, then map BatchItemResult.text back through the same _extract_json +
-# 5-dimension validation the loop already does. We DEFER that here because:
-#   - it changes a live research path (the scored-prediction milestone rides on
-#     it), so it deserves its own dry-run/rehearse gate and its own PR, not a
-#     rider on the primitive;
-#   - batches are asynchronous (minutes, not ms), so the caller's control flow
-#     changes shape (the `seas` CLI step would block on the poll, or hand off) —
-#     a real design decision, not a mechanical swap.
-# The primitive + its unit test are the minimal, verifiable capability; the
-# integration is explicitly out of scope for this seed.
+# The integration is DELIBERATELY OPT-IN and zero-default: auto_score_signals
+# defaults to batch=False (the original one-call-per-signal loop, unchanged).
+# `seas.py --batch` flips it on; `seas.py --batch --dry-run` only ASSEMBLES and
+# reports what would be sent (no live call, nothing spent) — the rehearse gate.
+# Per-item batch failures are surfaced and leave that signal unscored, never
+# silently dropped; results map back BY custom_id, never by position.
+#
+# The poll is synchronous (the `seas` CLI step blocks on run_batch until the
+# batch ends, bounded by max_wait_s). A true async hand-off (kick off the batch,
+# return, collect on a later run) remains future work if scoring volume ever
+# makes the in-line wait too long.
 # ---------------------------------------------------------------------------
