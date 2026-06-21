@@ -131,6 +131,31 @@ class ClassifierTest(StatusBase):
         ids = {it["id"] for it in status.collect()["items"]}
         self.assertEqual(ids, set())
 
+    def test_evolution_pr_not_double_counted_as_fix_pr(self):
+        # argo_evolve._ensure_proposal_row records every adopted EVOLVE PR in the
+        # SAME proposals ledger with incident_key=None. The lever sits at pr_open.
+        # The PR must surface exactly once -- as the evolution lever -- and NOT a
+        # second time mislabelled "fix PR ... for an incident."
+        self._write(ev, "EVOLUTION_PATH",
+                    {"_meta": {}, "levers": [
+                        {"id": "EV-050", "feature": "prompt caching",
+                         "status": "pr_open", "pr_number": 77}]})
+        self._write(argo_paths, "PROPOSALS_PATH",
+                    [{"pr_number": 77, "incident_key": None, "url": "http://x",
+                      "merged": False, "ci_failed": False, "resolved": False}])
+
+        items = status.collect()["items"]
+        # Exactly one item for this PR, and it's the evolution lever (needs-you).
+        evo = [it for it in items if it["kind"] == "evolution"]
+        fixprs = [it for it in items if it["kind"] == "fix-pr"]
+        self.assertEqual(len(evo), 1)
+        self.assertEqual(evo[0]["id"], "EV-050")
+        self.assertEqual(evo[0]["verdict"], status.NEEDS_YOU)
+        self.assertEqual(fixprs, [])  # NOT surfaced again as a phantom incident fix
+        # And the rendered text never frames the upgrade as an incident fix.
+        text = status.render()
+        self.assertNotIn("for an incident", text)
+
 
 class RenderTest(StatusBase):
     def test_render_is_plain_text_and_lists_items(self):

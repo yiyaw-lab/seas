@@ -154,7 +154,14 @@ def _evolution_in_flight():
 def _proposals_in_flight():
     """In-flight diagnostic fix PRs from the proposal ledger. CI failed -> blocked;
     merged-but-not-resolved -> the confirm loop will close it (agent-can-act);
-    open and not failed -> awaiting your merge (needs-you)."""
+    open and not failed -> awaiting your merge (needs-you).
+
+    Skips evolution-origin rows (incident_key falsy): argo_evolve's _ensure_proposal_row
+    records every adopted EVOLVE PR in this same ledger with incident_key=None, so
+    without this skip a single upgrade PR would surface TWICE -- once correctly as an
+    evolution lever (pr_open) and once here mislabelled as a "fix PR for an incident."
+    Real diagnostic self-fixes always carry a truthy incident_key (the incident cluster
+    key), so this never drops a genuine fix PR."""
     proposals = argo_store.load_json(argo_paths.PROPOSALS_PATH, [])
     if not isinstance(proposals, list):
         return []
@@ -162,6 +169,8 @@ def _proposals_in_flight():
     for p in proposals:
         if p.get("resolved"):
             continue  # terminal
+        if not p.get("incident_key"):
+            continue  # evolution-origin PR -- surfaced by _evolution_in_flight, not here
         num = p.get("pr_number", "?")
         key = p.get("incident_key") or "an incident"
         if p.get("ci_failed"):
