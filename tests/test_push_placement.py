@@ -88,6 +88,19 @@ class RecorderPostsToVolumeTest(unittest.TestCase):
         self.assertFalse(result.suppressed)  # a failed POST is fail-open, not suppressed
         self.assertFalse(self.local_path.exists())
 
+    def test_garbled_2xx_body_is_recorded_not_suppressed(self):
+        # A 2xx whose body is valid JSON but NOT an object (e.g. a list) has no
+        # .get -> the parse must not raise out of post_to_webhook and must NEVER be
+        # read as suppressed (that would silence a real send). Treated as recorded.
+        class _NonObjBody(_FakeResp):
+            def read(self):
+                return b"[1, 2, 3]"
+
+        with mock.patch("urllib.request.urlopen", return_value=_NonObjBody(200)):
+            result = argo_pushes.post_to_webhook("project", "hi")
+        self.assertTrue(result.recorded)
+        self.assertFalse(result.suppressed)
+
     def test_unset_env_skips_silently(self):
         # Local dev with no WEBHOOK_URL/token: skip, no error, no write, no POST.
         with mock.patch.dict("os.environ", {}, clear=True):

@@ -203,8 +203,11 @@ def post_to_webhook(kind, content):
                 # never silence a send.
                 suppressed = False
                 try:
-                    suppressed = bool(json.loads(raw or b"{}").get("suppressed"))
-                except (ValueError, TypeError):
+                    parsed = json.loads(raw or b"{}")
+                    suppressed = bool(parsed.get("suppressed"))
+                except (ValueError, TypeError, AttributeError):
+                    # Garbled body, or a valid-JSON non-object (a list/str has no
+                    # .get -> AttributeError): treat as recorded, never suppressed.
                     pass
                 if suppressed:
                     log.info("push kind=%s suppressed by gate (server)", kind)
@@ -384,6 +387,9 @@ def should_send(kind, stakes=None, confidence=None):
         else:
             log.info("push gate SUPPRESS: %s", reason)
         return allowed, reason
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, OSError) as exc:
+        # Bad number, or a volume read error reaching the score/threshold read:
+        # fail OPEN (allow). A gate error must never silence a real send -- the
+        # worst case is one un-gated push.
         log.warning("push gate errored, allowing send (fail-open): %s", exc)
         return True, f"gate error (fail-open): {exc}"

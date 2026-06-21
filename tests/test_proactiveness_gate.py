@@ -93,6 +93,17 @@ class GateThresholdTest(_PushTmp):
         self.assertEqual(argo_pushes.get_threshold(), argo_pushes.DEFAULT_THRESHOLD)
 
 
+class GateFailOpenTest(_PushTmp):
+    def test_internal_error_fails_open_allows_send(self):
+        # A gate-internal error (here a volume read error reaching the threshold
+        # read) must NEVER silence a send: should_send fails OPEN (allowed=True).
+        with mock.patch.object(argo_pushes, "effective_threshold",
+                               side_effect=OSError("volume read error")):
+            allowed, reason = argo_pushes.should_send("project")
+        self.assertTrue(allowed)
+        self.assertIn("fail-open", reason)
+
+
 class ColdStartTest(_PushTmp):
     def test_no_dialup_below_min_pushes(self):
         # (d) Below MIN_PUSHES_FOR_DIALUP, even a 0.0 act-on-rate must NOT raise the
