@@ -103,6 +103,40 @@ class GetBytesRetryTest(unittest.TestCase):
         self.assertNotIn(secret, joined)
         self.assertIn("api.telegram.org", joined)  # host is still logged for debugging
 
+    def test_retries_urlerror_network_fault(self):
+        # Many real urlopen failures arrive as URLError wrapping a socket error whose
+        # bare type name/message dodge the classifier; get_bytes must still retry them
+        # (the hand-rolled get_webhook_health loop it replaced always made a 2nd try).
+        import urllib.error
+        calls = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+            return _FakeResp(b"ok")
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                mock.patch("time.sleep"):
+            out = argo_http.get_bytes("https://x/y", timeout=5, retries=1)
+        self.assertEqual(out, b"ok")
+        self.assertEqual(len(calls), 2)  # retried the URLError-wrapped network fault
+
+
+class IsTransientClassifyTest(unittest.TestCase):
+    def test_urlerror_network_faults_are_transient(self):
+        import socket
+        import urllib.error
+        self.assertTrue(argo_guard._is_transient(
+            urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))))
+        self.assertTrue(argo_guard._is_transient(urllib.error.URLError("timed out")))
+        self.assertTrue(argo_guard._is_transient(socket.timeout("timed out")))
+
+    def test_billing_400_still_not_transient(self):
+        e = Exception("Your credit balance is too low")
+        e.status_code = 400
+        self.assertFalse(argo_guard._is_transient(e))
+
 
 class CircuitBreakerClassifyTest(unittest.TestCase):
     @mock.patch("argo_incidents.record_incident")
@@ -134,6 +168,32 @@ class CircuitBreakerClassifyTest(unittest.TestCase):
                 cb.call(outage)
         self.assertEqual(cb.failures, 4)
         self.assertEqual(cb._state(), "open")  # real outages still trip it
+
+    @mock.patch("argo_incidents.record_incident")
+    def test_half_open_nontransient_probe_closes_breaker(self, _rec):
+        # cooldown=0 -> the breaker is half-open the instant it opens.
+        cb = argo_guard.CircuitBreaker("anthropic", threshold=4, cooldown=0.0)
+
+        def outage():
+            e = Exception("service unavailable")
+            e.status_code = 503
+            raise e
+
+        for _ in range(4):
+            with self.assertRaises(Exception):
+                cb.call(outage)
+        self.assertEqual(cb._state(), "half-open")
+
+        def billing():
+            e = Exception("credit balance too low")
+            e.status_code = 400
+            raise e
+
+        with self.assertRaises(Exception):
+            cb.call(billing)  # half-open probe hits a non-transient error
+        # ...the breaker closes instead of dangling half-open and probing every call.
+        self.assertEqual(cb._state(), "closed")
+        self.assertEqual(cb.failures, 0)
 
 
 if __name__ == "__main__":
