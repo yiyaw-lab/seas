@@ -17,6 +17,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import argo_memory as mem  # noqa: E402
+import argo_observe as observe  # noqa: E402
+import argo_webhook as wh  # noqa: E402
 
 
 class RelevantRecallTest(unittest.TestCase):
@@ -55,6 +57,37 @@ class RelevantRecallTest(unittest.TestCase):
             mem.record(self.chat, "Yiya", f"project Falcon milestone {i}")
         hits = mem.relevant(self.chat, "Falcon project status", k=3)
         self.assertLessEqual(len(hits), 3)
+
+
+class RecallQueryUsesUserTextTest(unittest.TestCase):
+    """The recall query must be the user's ACTUAL words (log_user_text), not route_text,
+    which can be a synthetic routing/recovery note (Bugbot #59)."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.object(
+            mem, "CHAT_LOG_PATH", Path(tempfile.mkdtemp()) / "chat.json"))
+
+    def test_recall_queries_user_text_not_synthetic_note(self):
+        captured = {}
+
+        def fake_relevant(chat_id, query, *a, **k):
+            captured["query"] = query
+            return []
+
+        def fake_chat(system, messages, model, mcp_servers=None,
+                      return_tool_events=False, **kw):
+            return ("ok", []) if return_tool_events else "ok"
+
+        # The CONFIRM-dead-end path: final_content is a synthetic system note, while the
+        # user's real words ("CONFIRM") are passed as log_user_text.
+        note = ("CONFIRM\n\n[system note: the user replied CONFIRM but nothing is "
+                "staged; reregister_webhook or refetch_signals ...]")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=True), \
+                mock.patch.object(observe, "chat_with_mcp", fake_chat), \
+                mock.patch.object(observe, "resolve_models", lambda: []), \
+                mock.patch.object(mem, "relevant", fake_relevant):
+            wh._generate_reply(999, note, "CONFIRM")
+        self.assertEqual(captured.get("query"), "CONFIRM")  # the user's words, not the note
 
 
 if __name__ == "__main__":

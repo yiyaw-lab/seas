@@ -498,11 +498,14 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     hist = _recent_turns(chat_id)
 
     # Long-term recall: surface older turns (outside the recency window) whose words
-    # overlap this message, so a fact from turn 3 isn't lost by turn 15. Augments only
-    # the MODEL-facing content; log_user_text (what we persist) stays the user's words,
-    # and the system prompt + history are untouched so prompt-cache prefixes hold.
-    if isinstance(final_content, str) and route_text:
-        earlier = argo_memory.relevant(chat_id, route_text)
+    # overlap this message, so a fact from turn 3 isn't lost by turn 15. Query on
+    # log_user_text -- the user's ACTUAL words -- not route_text, which can be a
+    # synthetic routing/recovery note (e.g. the CONFIRM-dead-end system note) that would
+    # recall irrelevant context. Augments only the MODEL-facing content; log_user_text
+    # (what we persist) stays clean, and the system prompt + history are untouched so
+    # prompt-cache prefixes hold.
+    if isinstance(final_content, str) and isinstance(log_user_text, str) and log_user_text.strip():
+        earlier = argo_memory.relevant(chat_id, log_user_text)
         if earlier:
             final_content = _earlier_context_block(earlier) + final_content
 
