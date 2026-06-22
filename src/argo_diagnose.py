@@ -192,7 +192,12 @@ def _diagnose_cluster(cluster):
     except Exception:
         log.error("diagnose: model call failed", exc_info=True)
         return None
-    return _parse_json(raw)
+    diagnosis = _parse_json(raw)
+    if diagnosis is None:
+        # A non-empty reply the diagnoser couldn't parse is itself a model_failure;
+        # record it so the diagnoser's own JSON misses stop disappearing silently.
+        argo_incidents.record_model_failure("diagnose: unparseable JSON reply", raw)
+    return diagnosis
 
 
 def _nudge_budget_left():

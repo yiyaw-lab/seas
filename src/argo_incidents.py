@@ -127,6 +127,20 @@ def record_incident(kind, signature, sample=""):
         return None
 
 
+def record_model_failure(signature, raw):
+    """Surface a SILENT model failure: a non-empty reply that should have parsed as
+    JSON but did not. The JSON-mapper swallow sites (argo_evolve, argo_diagnose) used
+    to drop these and return None, so they 'disappeared'; recording a model_failure
+    incident makes them visible to the diagnose loop and measurable for the
+    structured-outputs prediction. No-op for an empty/whitespace reply -- that is an
+    infra/outage failure, surfaced on its own call path -- and never raises (delegates
+    to record_incident, which caps the sample and swallows store errors)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    return record_incident("model_failure", signature, sample=text)
+
+
 def open_clusters(min_count=3, window_hours=24):
     """Eligible clusters for diagnosis: status 'open', count >= min_count, last seen
     within window_hours. Ranked worst-first by count, then recency. Free, read-only,
