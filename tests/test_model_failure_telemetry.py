@@ -42,6 +42,13 @@ class RecordModelFailureTest(unittest.TestCase):
         self.assertIsNone(key)
         self.assertEqual(inc._load(), {})  # an empty reply is infra failure, not a model failure
 
+    def test_diagnose_signature_matches_prediction_cluster_key(self):
+        # argo_diagnose records under this exact signature; it must fingerprint to the
+        # cluster key the structured_outputs seed prediction watches, or the failures
+        # are invisible to its incident_absent metric (Bugbot #58).
+        key = inc.record_model_failure("diagnose json parse failed", "oops, not json")
+        self.assertEqual(key, "model_failure|diagnose json parse failed")
+
 
 class EvolveMapperTelemetryTest(unittest.TestCase):
     def setUp(self):

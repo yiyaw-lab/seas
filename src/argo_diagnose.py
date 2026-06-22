@@ -196,7 +196,10 @@ def _diagnose_cluster(cluster):
     if diagnosis is None:
         # A non-empty reply the diagnoser couldn't parse is itself a model_failure;
         # record it so the diagnoser's own JSON misses stop disappearing silently.
-        argo_incidents.record_model_failure("diagnose: unparseable JSON reply", raw)
+        # Signature must fingerprint to "model_failure|diagnose json parse failed" --
+        # the exact cluster key the structured_outputs seed prediction watches
+        # (argo_evolve _SEED_LEVERS) -- so these failures actually move that metric.
+        argo_incidents.record_model_failure("diagnose json parse failed", raw)
     return diagnosis
 
 
