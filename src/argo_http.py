@@ -48,6 +48,7 @@ def get_bytes(url, *, timeout, retries=1, headers=None):
     """
     import random
     import time
+    import urllib.parse
     import urllib.request
 
     import argo_guard  # late import: keeps argo_http free of a module-level dep
@@ -66,6 +67,10 @@ def get_bytes(url, *, timeout, retries=1, headers=None):
             delay = min(argo_guard.BASE_DELAY * (2 ** (attempt - 1)),
                         argo_guard.MAX_DELAY)
             delay += random.uniform(0, delay * 0.25)  # jitter
+            # Log host only, never the full URL: get_webhook_health's URL embeds the
+            # Telegram bot token in its PATH, so logging the URL would leak the secret
+            # to operator logs on a flaky retry. The host alone identifies the dep.
+            host = urllib.parse.urlsplit(url).netloc or "?"
             log.warning("get_bytes: transient %s on %s, retry %d/%d in %.1fs",
-                        type(exc).__name__, url, attempt, retries, delay)
+                        type(exc).__name__, host, attempt, retries, delay)
             time.sleep(delay)

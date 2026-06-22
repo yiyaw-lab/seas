@@ -83,6 +83,26 @@ class GetBytesRetryTest(unittest.TestCase):
                 argo_http.get_bytes("https://x/y", timeout=5, retries=0)
         self.assertEqual(len(calls), 1)
 
+    def test_retry_log_does_not_leak_a_token_in_the_url(self):
+        # get_webhook_health's URL embeds the bot token in its path; a retry must not
+        # write that secret to operator logs.
+        secret = "123456:SUPERSECRETTOKEN"
+        url = f"https://api.telegram.org/bot{secret}/getWebhookInfo"
+
+        def fake_urlopen(req, timeout=None, context=None):
+            if not getattr(fake_urlopen, "done", False):
+                fake_urlopen.done = True
+                raise TimeoutError("read timed out")
+            return _FakeResp(b"{}")
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                mock.patch("time.sleep"), \
+                self.assertLogs("argo_http", level="WARNING") as logs:
+            argo_http.get_bytes(url, timeout=5, retries=1)
+        joined = "\n".join(logs.output)
+        self.assertNotIn(secret, joined)
+        self.assertIn("api.telegram.org", joined)  # host is still logged for debugging
+
 
 class CircuitBreakerClassifyTest(unittest.TestCase):
     @mock.patch("argo_incidents.record_incident")
