@@ -11,7 +11,7 @@
 
 [![Modules](https://img.shields.io/badge/modules-42-8b5cf6.svg)](src/)
 &nbsp;[![Lines](https://img.shields.io/badge/lines-~13k-8b5cf6.svg)](src/)
-&nbsp;[![Tests](https://img.shields.io/badge/tests-407_passing-3fb950.svg)](tests/)
+&nbsp;[![Tests](https://img.shields.io/badge/tests-594_passing-3fb950.svg)](tests/)
 &nbsp;[![Deps](https://img.shields.io/badge/deps-10_stdlib_core-3fb950.svg)](requirements.txt)
 &nbsp;[![Loops](https://img.shields.io/badge/self--improvement_loops-3-7d4fff.svg)](#how-argo-improves-itself)
 
@@ -22,7 +22,7 @@
 | Stat | Value |
 |---|---|
 | **Code** | 42 modules · ~13,000 lines of Python 3.11 |
-| **Tests** | 407 · zero network · zero LLM · no real data files |
+| **Tests** | 594 · zero network · zero LLM · no real data files |
 | **Dependencies** | 10 pinned, at the I/O edge — a **pure-stdlib core** (gate, world model, probes) |
 | **Self-improvement loops** | 3 — self-diagnosis · frontier-evolution · capability-gap (all human-gated) |
 | **Live** | Argo on Railway + Telegram, behind a human merge gate |
@@ -49,6 +49,59 @@ next capability.
 │  "What is true?"             │ ─────► │  "What should I do next?"    │
 │  → findings & theories       │        │  → one project worth building │
 └──────────────────────────────┘        └──────────────────────────────┘
+```
+
+## How it works
+
+SEAS is a pipeline that earns knowledge: a curated signal is scored and ranked,
+fetched against topical sources, and a model proposes a finding — but a
+deterministic **emission gate** disposes of it, rejecting anything that lacks
+cross-source convergence, a dated prediction, or quotes that are real substrings
+of the fetched pages. What passes seeds a *belief* in the world model whose
+confidence then moves only by evidence or by a scored prediction. Argo is the
+live agentic scout that turns that knowledge into motion: it chats on Telegram,
+reads the live web through an allowlisted MCP server, reads SEAS findings, scouts
+the frontier, and stress-tests one project bet through adversarial rehearsal
+before recommending it. Layered on top, three self-improvement loops let Argo
+draft upgrades to *itself* — each routed through a PR that **only a human merges**.
+
+```mermaid
+flowchart TB
+    subgraph SEAS["SEAS — research engine: 'what is true?'"]
+        direction LR
+        SIG[Signals<br/>curated feeds] --> SCORE[Score + rank<br/>opportunities]
+        SCORE --> SYN[Synthesis<br/>fetch topical sources]
+        SYN --> GATE{Emission gate<br/>convergence · dated prediction<br/>quotes are real substrings}
+        GATE -->|pass| FIND[Finding]
+        GATE -->|fail| PROBE[Probe<br/>honest dead end]
+        FIND --> WM[(World model<br/>beliefs + theories)]
+        FIND --> PRED[Dated prediction]
+        PRED -->|reality scores it| WM
+    end
+
+    subgraph ARGO["Argo — frontier scout: 'what should I do next?'"]
+        direction TB
+        TG([Telegram chat]) <--> WH[argo_webhook]
+        WH --> OBS[argo_observe<br/>model-routed LLM]
+        OBS <--> MCP[argo_mcp_server<br/>allowlisted web · GitHub · feeds]
+        MCP --> WATCH[argo_watch<br/>tripwire alerts]
+        OBS --> PROJ[argo_project<br/>weekly bet]
+        PROJ --> REH{argo_rehearse<br/>3 critics + judge<br/>SHIP / REVISE / KILL}
+        REH --> BET[One project bet + energy score]
+    end
+
+    subgraph LOOPS["Self-improvement loops — each ends at a human merge gate"]
+        direction LR
+        SPOT[Spot<br/>failure · frontier release · own gap] --> DIAG[diagnose / rehearse<br/>incidents · evolve · capability-gap]
+        DIAG --> PROP[propose_change<br/>opens a PR]
+        PROP --> REVIEW{Human review + merge}
+        REVIEW --> DEPLOY[Railway redeploy]
+        DEPLOY --> SCORE2[Prediction scored by reality]
+    end
+
+    FIND -.read_findings.-> OBS
+    BET -.recurring failures + own gaps.-> SPOT
+    DEPLOY -.improves.-> ARGO
 ```
 
 ---
@@ -329,7 +382,7 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (407 tests total):
+passes after. New coverage (594 tests total):
 
 - **self-improvement loops** — self-diagnosis gates + proposal lifecycle
   (`test_diagnose.py`, `test_incidents.py`), the frontier-evolution funnel +
@@ -359,7 +412,7 @@ passes after. New coverage (407 tests total):
 ## Quickstart (what works at each key tier)
 
 ```
-PYTHONPATH=src python3 -m unittest discover -s tests   # 407 tests, no keys needed
+PYTHONPATH=src python3 -m unittest discover -s tests   # 594 tests, no keys needed
 ```
 
 | You have… | What runs |
