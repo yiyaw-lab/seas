@@ -280,7 +280,8 @@ def drain_critical_alert(send):
             store[_CRITICAL_ALERT_KEY] = alert
             _save(store)
             return None
-        text = _critical_alert_text(alert["pending"])
+        sent_pending = alert["pending"]
+        text = _critical_alert_text(sent_pending)
         ok = bool(send(text))  # may record a delivery_failure incident on failure
         # Reload AFTER the send so a delivery_failure (or concurrent) write isn't clobbered.
         store = _load()
@@ -289,8 +290,11 @@ def drain_critical_alert(send):
             alert = {"pending": None}
         alert["date"] = today
         alert["attempts_today"] = attempts + 1
-        if ok:
-            alert["pending"] = None  # delivered; clear. Otherwise keep it for the next tick.
+        # Clear ONLY if the same alert is still pending. A newer severe incident queued
+        # during the send I/O must not be dropped just because the older one delivered;
+        # leave it so the next tick delivers it. A failed send also keeps pending (retry).
+        if ok and alert.get("pending") == sent_pending:
+            alert["pending"] = None
         store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
         return text if ok else None

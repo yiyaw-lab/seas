@@ -85,6 +85,20 @@ class CriticalAlertQueueTest(unittest.TestCase):
         self.assertEqual(sent, [])           # capped: no send
         self.assertIsNone(self._pending())   # but dropped so it can't accumulate
 
+    def test_success_does_not_clear_a_superseding_alert(self):
+        inc.record_incident("circuit_open", "anthropic")  # alert A is pending
+
+        def send_then_supersede(text):
+            # a newer severe incident lands during the (mocked) Telegram I/O
+            inc.record_incident("budget_exceeded", "daily call cap reached")  # alert B
+            return True
+
+        out = inc.drain_critical_alert(send_then_supersede)
+        self.assertIsNotNone(out)                       # A was delivered
+        p = self._pending()
+        self.assertIsNotNone(p)                         # B was NOT dropped
+        self.assertEqual(p["kind"], "budget_exceeded")  # the newer alert survives for next tick
+
     def test_failed_send_keeps_pending_for_retry_then_attempt_capped(self):
         inc.record_incident("circuit_open", "anthropic")
         # A failed delivery must NOT lose the alert: pending is kept for the next tick.
