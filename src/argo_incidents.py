@@ -256,24 +256,30 @@ def drain_critical_alert(send):
     send_telegram.try_send_message), which also keeps this module free of a send-layer
     import cycle. Daily-capped; clears the flag whether or not it sent (a capped day
     drops the ping silently -- the incident still rides the daily diagnose funnel).
-    Never raises; returns the text sent, or None."""
+    Never raises; returns the text sent, or None.
+
+    The flag is cleared and SAVED *before* the send, deliberately: `send` may itself
+    record an incident (try_send_message logs a delivery_failure on failure), and a
+    save AFTER send would overwrite that nested write with our stale snapshot. Saving
+    first means the only write touching the ledger after send is record_incident's own.
+    A crash in the gap between save and send drops one best-effort ping -- acceptable."""
     try:
         store = _load()
         alert = store.get(_CRITICAL_ALERT_KEY)
         if not isinstance(alert, dict) or not alert.get("pending"):
             return None
         today = _now_iso()[:10]
-        if alert.get("date") != today:
-            alert["date"] = today
-            alert["sent_today"] = 0
-        text = None
-        if int(alert.get("sent_today", 0)) < MAX_CRITICAL_ALERTS_PER_DAY:
-            text = _critical_alert_text(alert["pending"])
-            send(text)  # best-effort; clear regardless to avoid a per-tick retry storm
-            alert["sent_today"] = int(alert.get("sent_today", 0)) + 1
+        sent_today = 0 if alert.get("date") != today else int(alert.get("sent_today", 0))
+        text = None if sent_today >= MAX_CRITICAL_ALERTS_PER_DAY \
+            else _critical_alert_text(alert["pending"])
+        # Persist the cleared flag + counter BEFORE sending (see docstring).
         alert["pending"] = None
+        alert["date"] = today
+        alert["sent_today"] = sent_today + (1 if text is not None else 0)
         store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
+        if text is not None:
+            send(text)
         return text
     except Exception:
         log.warning("drain_critical_alert failed", exc_info=True)

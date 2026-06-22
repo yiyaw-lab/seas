@@ -57,6 +57,20 @@ class CriticalAlertQueueTest(unittest.TestCase):
         self.assertEqual(sent, [])
         self.assertIsNone(out)
 
+    def test_drain_does_not_clobber_a_write_made_during_send(self):
+        # send_telegram records a delivery_failure incident when delivery fails. The
+        # drain must not overwrite that nested write with a stale pre-send snapshot.
+        inc.record_incident("circuit_open", "anthropic")
+
+        def failing_send(text):
+            inc.record_incident("delivery_failure", "telegram timed out")
+            return False
+
+        inc.drain_critical_alert(failing_send)
+        kinds = [c.get("kind") for k, c in inc._load().items()
+                 if not k.startswith("_") and isinstance(c, dict)]
+        self.assertIn("delivery_failure", kinds)  # survived the drain's save
+
     def test_daily_cap_drops_without_sending(self):
         # Simulate having already sent the max today: a new severe failure queues, but
         # drain must NOT send (it clears the flag; the incident is still in the ledger).
