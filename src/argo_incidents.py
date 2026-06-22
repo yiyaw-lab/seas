@@ -132,10 +132,10 @@ def record_incident(kind, signature, sample=""):
         if kind in CRITICAL_ALERT_KINDS:
             # Queue a same-day heads-up for the local_loop tick (delivery, capping, and
             # clearing all live in drain_critical_alert -- NOT here). Latest wins; the
-            # daily cap bounds how many actually send.
+            # daily attempt cap bounds how many actually send.
             alert = store.get(_CRITICAL_ALERT_KEY)
             if not isinstance(alert, dict):
-                alert = {"pending": None, "date": "", "sent_today": 0}
+                alert = {}
             alert["pending"] = {"kind": kind, "signature": str(signature)[:200], "ts": now}
             store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
@@ -247,40 +247,53 @@ def _critical_alert_text(pending):
 
 
 def drain_critical_alert(send):
-    """Deliver at most one queued critical-failure heads-up, then clear it. Called from
-    the local_loop tick so failure-to-human latency drops from ~daily to one cycle.
+    """Deliver one queued critical-failure heads-up. Called from the local_loop tick so
+    failure-to-human latency drops from ~daily to one cycle.
 
     NOT called from record_incident: that must never send (send_telegram records
     incidents on delivery failure, so sending from inside record_incident risks
     re-entrancy). `send` is an injected callable(text)->bool seam (the tick passes
     send_telegram.try_send_message), which also keeps this module free of a send-layer
-    import cycle. Daily-capped; clears the flag whether or not it sent (a capped day
-    drops the ping silently -- the incident still rides the daily diagnose funnel).
-    Never raises; returns the text sent, or None.
+    import cycle. Never raises; returns the text on a delivered send, else None.
 
-    The flag is cleared and SAVED *before* the send, deliberately: `send` may itself
-    record an incident (try_send_message logs a delivery_failure on failure), and a
-    save AFTER send would overwrite that nested write with our stale snapshot. Saving
-    first means the only write touching the ledger after send is record_incident's own.
-    A crash in the gap between save and send drops one best-effort ping -- acceptable."""
+    Delivery discipline (each clause fixes a real failure mode):
+      - SEND, then RELOAD before the bookkeeping save. `send` may itself write the
+        ledger (try_send_message logs a delivery_failure on failure); reloading after
+        the send means our save can't clobber that nested write with a stale snapshot.
+      - Clear `pending` ONLY on a delivered send. A failed send keeps the alert so the
+        next tick retries it -- a critical heads-up shouldn't vanish on one Telegram
+        hiccup.
+      - Count every ATTEMPT (success or failure) toward the daily cap. That bounds a
+        permanently-failing send to MAX attempts/day instead of retrying forever, and
+        still caps a flapping failure's successful pings. Past the cap the pending is
+        dropped (the incident still rides the daily diagnose funnel)."""
     try:
         store = _load()
         alert = store.get(_CRITICAL_ALERT_KEY)
         if not isinstance(alert, dict) or not alert.get("pending"):
             return None
         today = _now_iso()[:10]
-        sent_today = 0 if alert.get("date") != today else int(alert.get("sent_today", 0))
-        text = None if sent_today >= MAX_CRITICAL_ALERTS_PER_DAY \
-            else _critical_alert_text(alert["pending"])
-        # Persist the cleared flag + counter BEFORE sending (see docstring).
-        alert["pending"] = None
+        attempts = 0 if alert.get("date") != today else int(alert.get("attempts_today", 0))
+        if attempts >= MAX_CRITICAL_ALERTS_PER_DAY:
+            alert["pending"] = None  # exhausted today's attempts; drop so it can't pile up
+            alert["date"] = today
+            store[_CRITICAL_ALERT_KEY] = alert
+            _save(store)
+            return None
+        text = _critical_alert_text(alert["pending"])
+        ok = bool(send(text))  # may record a delivery_failure incident on failure
+        # Reload AFTER the send so a delivery_failure (or concurrent) write isn't clobbered.
+        store = _load()
+        alert = store.get(_CRITICAL_ALERT_KEY)
+        if not isinstance(alert, dict):
+            alert = {"pending": None}
         alert["date"] = today
-        alert["sent_today"] = sent_today + (1 if text is not None else 0)
+        alert["attempts_today"] = attempts + 1
+        if ok:
+            alert["pending"] = None  # delivered; clear. Otherwise keep it for the next tick.
         store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
-        if text is not None:
-            send(text)
-        return text
+        return text if ok else None
     except Exception:
         log.warning("drain_critical_alert failed", exc_info=True)
         return None

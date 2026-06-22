@@ -72,18 +72,31 @@ class CriticalAlertQueueTest(unittest.TestCase):
         self.assertIn("delivery_failure", kinds)  # survived the drain's save
 
     def test_daily_cap_drops_without_sending(self):
-        # Simulate having already sent the max today: a new severe failure queues, but
-        # drain must NOT send (it clears the flag; the incident is still in the ledger).
+        # Simulate the day's attempts already exhausted: a new severe failure queues, but
+        # drain must NOT send (it drops the flag; the incident is still in the ledger).
         inc.record_incident("circuit_open", "anthropic")
         today = inc._now_iso()[:10]
         inc.set_meta(inc._CRITICAL_ALERT_KEY, {
             "pending": self._pending(), "date": today,
-            "sent_today": inc.MAX_CRITICAL_ALERTS_PER_DAY,
+            "attempts_today": inc.MAX_CRITICAL_ALERTS_PER_DAY,
         })
         sent = []
         inc.drain_critical_alert(lambda t: sent.append(t) or True)
         self.assertEqual(sent, [])           # capped: no send
-        self.assertIsNone(self._pending())   # but cleared so it can't accumulate
+        self.assertIsNone(self._pending())   # but dropped so it can't accumulate
+
+    def test_failed_send_keeps_pending_for_retry_then_attempt_capped(self):
+        inc.record_incident("circuit_open", "anthropic")
+        # A failed delivery must NOT lose the alert: pending is kept for the next tick.
+        out = inc.drain_critical_alert(lambda t: False)
+        self.assertIsNone(out)                       # nothing delivered
+        self.assertIsNotNone(self._pending())        # retained for retry
+        alert = inc.get_meta(inc._CRITICAL_ALERT_KEY, {})
+        self.assertEqual(alert.get("attempts_today"), 1)  # the attempt is counted (bounded)
+        # Repeated failures are bounded by the daily attempt cap, then dropped.
+        for _ in range(inc.MAX_CRITICAL_ALERTS_PER_DAY + 1):
+            inc.drain_critical_alert(lambda t: False)
+        self.assertIsNone(self._pending())           # eventually dropped, not retried forever
 
 
 class LocalLoopDrainWiringTest(unittest.TestCase):
