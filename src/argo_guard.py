@@ -95,11 +95,19 @@ class CircuitBreaker:
                 f"[guard] circuit '{self.name}' is open; failing fast")
         try:
             result = fn()
-        except Exception:
+        except Exception as exc:
+            # Only retry-eligible (transient) failures count toward opening. A
+            # permanent error -- a billing 400, an auth failure -- fails fast and
+            # propagates, but must NOT advance the breaker: a half-open probe can
+            # never recover a billing/auth condition, and counting it would mask a
+            # since-recovered provider behind a still-open breaker. So circuit_open
+            # now means a genuine provider outage, not "out of credits".
+            if not _is_transient(exc):
+                raise
             self.failures += 1
             if self.failures >= self.threshold:
                 self.opened_at = time.monotonic()
-                log.warning("circuit '%s' OPENED after %d failures",
+                log.warning("circuit '%s' OPENED after %d transient failures",
                             self.name, self.failures)
                 try:  # late import: guard is a low-level dep, avoid an import cycle
                     import argo_incidents

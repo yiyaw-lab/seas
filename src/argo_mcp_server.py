@@ -369,23 +369,22 @@ def get_webhook_health() -> str:
     update count, and the last delivery error (if any). Use when asked 'are you
     healthy / is the bot working / why might messages be dropping'."""
     import json as _json
-    import urllib.request
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         return "TELEGRAM_BOT_TOKEN not set, can't check webhook."
-    ctx = argo_http.tls_context()
     # Railway's outbound to api.telegram.org is sometimes slow; a short timeout
-    # with one retry keeps us well under the @with_deadline(20) cap with margin.
+    # with one transient retry (backoff via argo_http) keeps us well under the
+    # @with_deadline(20) cap, and a permanent error (bad token 401) fails fast
+    # instead of being retried microseconds apart.
     url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
     info = None
-    for attempt in (1, 2):
-        try:
-            with urllib.request.urlopen(url, timeout=6, context=ctx) as r:
-                info = _json.loads(r.read().decode()).get("result", {})
-            break
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
+    last = "no attempt made"
+    try:
+        raw = argo_http.get_bytes(url, timeout=6, retries=1)
+        info = _json.loads(raw.decode()).get("result", {})
+    except Exception as exc:
+        last = f"{type(exc).__name__}: {exc}"
     if info is None:
         # A slow/failed CHECK is not the same as a DOWN webhook — say so loudly
         # so Argo stops concluding the bot is broken and pushing a re-register.

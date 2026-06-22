@@ -21,7 +21,6 @@ import json
 import os
 import random
 import sys
-import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,12 +115,14 @@ USER_AGENT = os.environ.get(
     "ARGO_USER_AGENT", "argo-fetch-signals/1.0 (+https://github.com/argo-scout/seas)")
 
 
-def _fetch_url(url, timeout=20):
-    """Fetch raw bytes for a feed URL, verifying TLS via certifi when present."""
-    ctx = argo_http.tls_context()
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return resp.read()
+def _fetch_url(url, timeout=20, retries=1):
+    """Fetch raw bytes for a feed URL, verifying TLS via certifi when present.
+
+    Retries once on a transient error (timeout/connection/5xx) so a single feed
+    blip doesn't silently drop a source; permanent errors (404/410) fail fast.
+    The retry/backoff lives in argo_http.get_bytes."""
+    return argo_http.get_bytes(url, timeout=timeout, retries=retries,
+                               headers={"User-Agent": USER_AGENT})
 
 
 def _parse_with_feedparser(raw):
