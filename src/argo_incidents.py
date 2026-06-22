@@ -50,6 +50,15 @@ MAX_SAMPLES = 3        # keep the few most recent example messages per cluster
 SAMPLE_CHARS = 240     # cap each sample so the ledger stays small
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
+# Severe kinds worth a same-day proactive heads-up (not just the daily diagnose):
+# the breaker tripping or the budget capping means Argo is partly down NOW. Recording
+# one of these queues a _critical_alert flag that the local_loop tick delivers; the
+# send NEVER happens here (record_incident must never send -- send_telegram records
+# incidents on delivery failure, so sending from here risks re-entrancy/storm).
+CRITICAL_ALERT_KINDS = frozenset({"circuit_open", "budget_exceeded"})
+MAX_CRITICAL_ALERTS_PER_DAY = 3   # spam guard on a flapping severe failure
+_CRITICAL_ALERT_KEY = "_critical_alert"
+
 
 def _now_iso():
     return datetime.now(timezone.utc).strftime(_TS_FMT)
@@ -120,6 +129,15 @@ def record_incident(kind, signature, sample=""):
             mu = c.get("muted_until")
             if mu and mu < now:
                 c["status"] = "open"
+        if kind in CRITICAL_ALERT_KINDS:
+            # Queue a same-day heads-up for the local_loop tick (delivery, capping, and
+            # clearing all live in drain_critical_alert -- NOT here). Latest wins; the
+            # daily cap bounds how many actually send.
+            alert = store.get(_CRITICAL_ALERT_KEY)
+            if not isinstance(alert, dict):
+                alert = {"pending": None, "date": "", "sent_today": 0}
+            alert["pending"] = {"kind": kind, "signature": str(signature)[:200], "ts": now}
+            store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
         return key
     except Exception:
@@ -212,6 +230,54 @@ def set_meta(meta_key, value):
         _save(store)
     except Exception:
         log.warning("set_meta failed (%s)", meta_key, exc_info=True)
+
+
+def _critical_alert_text(pending):
+    """Argo's voice for a proactive failure heads-up: plain text, lowercase, honest,
+    no markdown/em dashes. Tells the owner what just broke and that it's pre-emptive."""
+    kind = pending.get("kind")
+    sig = (pending.get("signature") or "").strip()
+    lead = {
+        "circuit_open": "heads up: my circuit breaker just tripped",
+        "budget_exceeded": "heads up: i just hit my daily call budget",
+    }.get(kind, "heads up: something of mine just failed")
+    tail = f" ({sig})" if sig else ""
+    return (lead + tail + ". flagging it now instead of waiting for the daily check. "
+            "nothing for you to do unless it keeps happening.")
+
+
+def drain_critical_alert(send):
+    """Deliver at most one queued critical-failure heads-up, then clear it. Called from
+    the local_loop tick so failure-to-human latency drops from ~daily to one cycle.
+
+    NOT called from record_incident: that must never send (send_telegram records
+    incidents on delivery failure, so sending from inside record_incident risks
+    re-entrancy). `send` is an injected callable(text)->bool seam (the tick passes
+    send_telegram.try_send_message), which also keeps this module free of a send-layer
+    import cycle. Daily-capped; clears the flag whether or not it sent (a capped day
+    drops the ping silently -- the incident still rides the daily diagnose funnel).
+    Never raises; returns the text sent, or None."""
+    try:
+        store = _load()
+        alert = store.get(_CRITICAL_ALERT_KEY)
+        if not isinstance(alert, dict) or not alert.get("pending"):
+            return None
+        today = _now_iso()[:10]
+        if alert.get("date") != today:
+            alert["date"] = today
+            alert["sent_today"] = 0
+        text = None
+        if int(alert.get("sent_today", 0)) < MAX_CRITICAL_ALERTS_PER_DAY:
+            text = _critical_alert_text(alert["pending"])
+            send(text)  # best-effort; clear regardless to avoid a per-tick retry storm
+            alert["sent_today"] = int(alert.get("sent_today", 0)) + 1
+        alert["pending"] = None
+        store[_CRITICAL_ALERT_KEY] = alert
+        _save(store)
+        return text
+    except Exception:
+        log.warning("drain_critical_alert failed", exc_info=True)
+        return None
 
 
 def prune(max_age_days=14):
