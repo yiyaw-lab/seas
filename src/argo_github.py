@@ -214,11 +214,17 @@ def _search_roots():
     return [d for d in _SEARCH_DIRS if (_SELFREAD_ROOT / d).is_dir()]
 
 
+_MAX_SEARCH_BYTES = 1_000_000  # per-file read cap, shared by BOTH search paths so the
+                               # rg and stdlib results can't diverge on big files
+
+
 def _code_search_fallback(pattern, max_results):
     """Stdlib substring search (literal, == ripgrep -F) for hosts without rg -- the
     likely live case (a minimal Railway image). Walks only the source dirs, and routes
     every candidate through _confined_path so a symlink pointing out of the tree (or a
-    non-source file) is NEVER read -- identical confinement to read_local_source."""
+    non-source file) is NEVER read -- identical confinement to read_local_source. Skips
+    files over _MAX_SEARCH_BYTES, matching rg's --max-filesize, so neither path reads a
+    huge file (which would also blow the 10s tool deadline)."""
     hits = []
     for root in _search_roots():
         for p in sorted((_SELFREAD_ROOT / root).rglob("*")):
@@ -230,6 +236,8 @@ def _code_search_fallback(pattern, max_results):
             if _confined_path(str(rel)) is None:  # extension allowlist + containment
                 continue
             try:
+                if p.stat().st_size > _MAX_SEARCH_BYTES:  # match rg --max-filesize
+                    continue
                 for i, line in enumerate(
                         p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if pattern in line:
@@ -269,11 +277,16 @@ def code_search(pattern, max_results=40):
         for ext in _SELFREAD_EXTS:
             ext_globs += ["-g", "*" + ext]
         cmd = [rg, "--no-heading", "--line-number", "--color", "never",
-               "--fixed-strings", "--max-filesize", "1M", "--max-columns", "300",
-               *ext_globs, "--", pattern, *roots]
+               "--fixed-strings", "--max-filesize", str(_MAX_SEARCH_BYTES),
+               "--max-columns", "300", *ext_globs, "--", pattern, *roots]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
                                   cwd=str(_SELFREAD_ROOT))  # never shell=True; no -L so no symlink follow
+            # rg exit codes: 0 = matches, 1 = no matches (both fine), 2+ = a real error.
+            # subprocess.run does NOT raise on non-zero, so without this check an rg error
+            # would look like "no matches" and silently skip the stdlib fallback.
+            if proc.returncode >= 2:
+                raise OSError(f"rg exited {proc.returncode}: {proc.stderr[:120]}")
             raw = [ln for ln in proc.stdout.splitlines() if ln.strip()]
             # Confine rg results too (defense in depth): drop any hit whose path is not a
             # confined source file, so a symlink-out can't leak even if rg surfaced it.

@@ -117,6 +117,26 @@ class CodeSearchTest(_TmpRootMixin, unittest.TestCase):
             out = g.code_search("NEEDLE_TOML")
         self.assertIn("src/conf.toml", out)
 
+    def test_rg_error_exit_code_falls_back_to_stdlib(self):
+        # Bugbot: rg exit 2 (a runtime error, NOT raised by subprocess.run) must not read
+        # as "no matches" -- it must fall back to the stdlib walk.
+        import types
+        err = types.SimpleNamespace(returncode=2, stdout="", stderr="rg: boom")
+        with mock.patch.object(g.shutil, "which", return_value="/usr/bin/rg"), \
+             mock.patch.object(g.subprocess, "run", return_value=err):
+            out = g.code_search("with_deadline")
+        self.assertIn("src/mod.py", out)  # fallback found it despite the rg error
+
+    def test_fallback_skips_oversize_file(self):
+        # Bugbot: the fallback must honor the same per-file cap as rg (--max-filesize),
+        # so a huge file isn't fully read (which would also blow the 10s tool deadline).
+        (self.root / "src" / "huge.py").write_text("BIGTOKEN\n" + "x = 0\n" * 200_000)  # >1MB
+        (self.root / "src" / "small.py").write_text("BIGTOKEN = 1\n")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("BIGTOKEN")
+        self.assertIn("src/small.py", out)
+        self.assertNotIn("huge.py", out)
+
 
 if __name__ == "__main__":
     unittest.main()
