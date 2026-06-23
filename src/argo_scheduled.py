@@ -192,15 +192,34 @@ def fire_due(only=None, dry=False, state_path=None):
     return ran
 
 
+def _drain_critical_alerts():
+    """Deliver any queued critical-failure heads-up (circuit_open / budget_exceeded)
+    so Argo pings the owner within one tick instead of waiting for the daily diagnose.
+    Lazy imports keep this off the hot import path and keep argo_incidents free of a
+    send-layer dependency (send_telegram records incidents on failure -> cycle risk).
+
+    Placement: this runs ONLY inside local_loop (the live webhook process on the
+    Railway volume, where the incidents ledger lives and is written). Actions never
+    calls local_loop, so the inert Actions ledger is never drained -- by design."""
+    try:
+        import argo_incidents
+        import send_telegram
+        argo_incidents.drain_critical_alert(send_telegram.try_send_message)
+    except Exception:
+        log.error("critical-alert drain failed", exc_info=True)
+
+
 def local_loop(only=LOCAL_COMMANDS, interval=LOCAL_INTERVAL_SECONDS):
     """Blocking forever-loop for the webhook's in-process scheduler thread: runs
     only the volume-dependent commands (LOCAL_COMMANDS) against this process's
     filesystem. The per-window dedupe still applies, so polling every 15 minutes
-    fires each window once; the grace window covers a slow boot."""
+    fires each window once; the grace window covers a slow boot. Each pass first
+    delivers any queued critical-failure heads-up."""
     import time
     log.info("local scheduler: running [%s] every %ds", ", ".join(only), interval)
     while True:
         try:
+            _drain_critical_alerts()
             fire_due(only=only, state_path=LOCAL_STATE_PATH)
         except Exception:
             log.error("local scheduler pass failed", exc_info=True)

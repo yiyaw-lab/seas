@@ -127,6 +127,21 @@ Now memory survives redeploys and restarts. To analyse it, pull the file from
 the volume (Railway shell/CLI) — it's a plain JSON array of
 `{ts, chat_id, role, text}` turns.
 
+The chat log is not the only store that needs the volume: every `ARGO_*_PATH`
+store defaults to the ephemeral `data/` dir and resets on each redeploy unless
+pointed at `/data`. The full list is the env-var table in `README.md`; the ones
+most easily forgotten are the newer judgment/instrumentation stores —
+`ARGO_COST_LEDGER_PATH`, `ARGO_PROACTIVE_PATH`, `ARGO_PENDING_DECISIONS_PATH`,
+and `ARGO_CMO_MODES_PATH` (the CMO-lens state + switch log, whose data is the
+B-007 demand test). Set each to `/data/<file>.json` alongside `ARGO_CHAT_LOG`.
+
+For the acted-on-push instrumentation (F1), also set `WEBHOOK_URL` and
+`ARGO_MCP_TOKEN` as **GitHub Actions secrets**, not only in `.env`/Railway. The
+scheduled senders (`argo_project.py` / `argo_watch.py`) run on GitHub Actions and
+POST each push to this webhook via `${{ secrets.* }}`. If they are missing as
+Actions secrets, Actions injects an empty string and `post_to_webhook` skips
+silently, leaving the push store empty.
+
 Without a volume the bot still works and remembers within a single deploy, but
 history is lost on each redeploy.
 

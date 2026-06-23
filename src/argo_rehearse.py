@@ -42,10 +42,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import argo_calibration
 import argo_observe as observe
 import argo_paths
+import argo_predictions
 import argo_store
 import profile
+import world_model
 from argo_log import get_logger
 
 log = get_logger(__name__)
@@ -82,6 +85,37 @@ JUDGE_MODEL = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
 TRANSCRIPT_PATH = Path(
     os.environ.get("ARGO_REHEARSE_LOG", str(REHEARSAL_DIR / "transcripts.jsonl"))
 )
+
+# Grounding the verdict in the belief graph (the #1 cofounder move): a SHIP/REVISE
+# verdict is bound to TWO dated, falsifiable predictions (argo_predictions), each tied
+# to its own per-verdict-class belief (world_model), so reality grades whether Argo's
+# build decision was right -- the same earned-confidence discipline a SEAS finding uses:
+#   - project_shipped : did the committed bet ship rather than get dropped? (graded by
+#                       the human SHIPPED/DROPPED reply)
+#   - project_mattered: did the operator rate it high-energy? (graded by the 1-10 rating
+#                       -- an external label, the uncopyable "did Argo's call match my
+#                       taste" signal)
+# The clock starts at SELECT (the user committing is the merge-equivalent); the daily
+# score_due run moves each belief +-0.20. A KILL records nothing (and voids any prior
+# predictions): the gate refused the bet, so there is nothing to grade. The horizon is
+# the GRADING DELAY (when score_due checks), not a hard cutoff. Env-tunable.
+SHIP_HORIZON_DAYS = int(os.environ.get("ARGO_SHIP_HORIZON_DAYS", "14"))
+
+# The two judgment predictions a SHIP/REVISE binds live in the project-entry fields
+# argo_predictions.JUDGMENT_PRED_FIELDS (shared with argo_rating so the set can't drift):
+# judgment_prediction_id (project_shipped) + judgment_mattered_prediction_id.
+_VERDICT_BELIEFS = {
+    "SHIP": {
+        "shipped": "When Argo rehearses a bet to a SHIP verdict, the bet ships.",
+        "mattered": ("When Argo rehearses a bet to a SHIP verdict, the bet matters "
+                     "(the operator rates it high-energy)."),
+    },
+    "REVISE": {
+        "shipped": "When Argo rehearses a bet to a REVISE verdict, the bet ships.",
+        "mattered": ("When Argo rehearses a bet to a REVISE verdict, the bet matters "
+                     "(the operator rates it high-energy)."),
+    },
+}
 
 
 def _now():
@@ -433,26 +467,208 @@ def _summary_line(project_id, verdict, judge_text):
     out = f"Rehearsed {project_id}. {verb} ({verdict})."
     if risk:
         out += f" Biggest thing to watch: {risk}"
+    # Conversational accountability: append how the class the bet will ACTUALLY grade
+    # under has panned out so far. Cite judgment_verdict (the grounded class on the
+    # stamped entry), NOT the display verdict -- they can differ when grounding froze or a
+    # void failed, and the phrase must match what will grade. Falls back to the display
+    # verdict if the bet has no grounded class yet (called pre-stamp, or KILL). n-floor
+    # gated (phrase is "" below the floor); the just-stamped bet has no outcome yet so it
+    # can't pad its own number. Best-effort: never sink the (completed) rehearsal summary.
+    try:
+        projects = argo_store.load_json(PROJECTS_LOG, [])
+        entry = next((p for p in projects if p.get("id") == project_id), None)
+        grading_verdict = (entry or {}).get("judgment_verdict") or verdict
+        phrase = argo_calibration.format_phrase(
+            argo_calibration.compute_calibration(projects), grading_verdict)
+        if phrase:
+            out += f" {phrase}"
+    except Exception:
+        log.debug("rehearse: calibration phrase unavailable", exc_info=True)
     return out
+
+
+def _record_judgment_prediction(entry, verdict):
+    """Bind a SHIP/REVISE verdict to TWO dated, scorable predictions so reality grades
+    the build decision: project_shipped (graded by the human SHIPPED/DROPPED reply) and
+    project_mattered (graded by the operator's 1-10 energy rating). Mutates `entry`
+    (sets judgment_prediction_id, judgment_mattered_prediction_id, judgment_verdict) --
+    the caller persists it. Idempotent per project while the verdict is unchanged. A
+    re-rehearsal that CHANGES the verdict (SHIP<->REVISE, or anything->KILL) voids the old
+    predictions first -- UNLESS the bet's outcome was already graded, in which case it
+    FREEZES (changing nothing) so one real outcome can't be re-graded against a fresh
+    belief. A missing leg (a legacy shipped-only row, or a void+save-failure that orphaned
+    one leg) is backfilled; a field pointing at a voided pred is treated as absent and
+    re-recorded. Records the predictions UNARMED: the caller arms them only AFTER it
+    durably saves the binding (so a project-log save failure leaves them inert, not
+    orphaned-and-armed); a standalone REHEARSE is armed later by SELECT.
+    Best-effort: a store error must never sink the rehearsal (it already happened).
+    Returns the project_shipped prediction id, or None."""
+    pid = entry.get("id")
+    fields = argo_predictions.JUDGMENT_PRED_FIELDS
+    # A binding counts only if its prediction is LIVE in the store (exists, not voided). A
+    # field left pointing at a VOIDED pred -- e.g. a verdict flip whose store-void succeeded
+    # but whose project-log save then failed, leaving the stale id on the entry -- is
+    # treated as ABSENT, so it gets re-recorded fresh rather than left bound to a pred that
+    # can never grade.
+    sp = (argo_predictions.get_prediction(entry["judgment_prediction_id"])
+          if entry.get("judgment_prediction_id") else None)
+    mp = (argo_predictions.get_prediction(entry["judgment_mattered_prediction_id"])
+          if entry.get("judgment_mattered_prediction_id") else None)
+
+    def _live(p):
+        return p is not None and not p.get("voided")
+
+    has_ship, has_matter = _live(sp), _live(mp)
+    bound = [p["id"] for p in (sp, mp) if _live(p)]
+    # A verdict change retires the old predictions: they grade the wrong (or, for KILL,
+    # a now-refused) verdict-class belief. Void BOTH atomically before recording. If the
+    # void fails (store error), cancel_many's single save means NOTHING was voided, so we
+    # keep the OLD bindings intact rather than orphaning a still-live armed pred AND
+    # recording duplicates (which would double-count one outcome across two beliefs).
+    # Reusing the stale bindings degrades to at-worst the wrong verdict-class, never a
+    # partial void or a double move.
+    # Void the old predictions when EITHER (a) a known verdict-class flip retires them
+    # (SHIP<->REVISE), or (b) the new verdict is refused (KILL/unknown), so the bet keeps
+    # no grounding. A MISSING judgment_verdict must NOT itself count as a flip (None !=
+    # "SHIP" would otherwise void a correct-class prediction and discard its armed clock
+    # with no real change) -- a same-class re-rehearse of such a row falls through to
+    # backfill the missing legs and stamp the verdict instead.
+    old_verdict = entry.get("judgment_verdict")
+    is_flip = old_verdict is not None and old_verdict != verdict
+    is_refused = verdict not in _VERDICT_BELIEFS
+    if bound and (is_flip or is_refused):
+        # A flip (SHIP<->REVISE) or refusal (KILL) retires the old preds. But a bet whose
+        # outcome was ALREADY GRADED (a live bound pred is scored) can't be cleanly retired
+        # -- cancel_many skips a scored pred, and recording a fresh pair would re-grade one
+        # real outcome against a new belief (double-count). Freeze: keep the graded
+        # grounding, change nothing (the displayed verdict still updates; the grading class
+        # stays put). A MISSING judgment_verdict is NOT a flip (None != "SHIP" must not void
+        # a correct-class pred) -- a same-class re-rehearse falls through to backfill.
+        if any(p.get("scored_at") for p in (sp, mp) if _live(p)):
+            return entry.get("judgment_prediction_id")
+        try:
+            argo_predictions.cancel_many(
+                bound, f"re-rehearsed {old_verdict} -> {verdict}")
+            for f in fields:
+                entry.pop(f, None)
+            entry.pop("judgment_verdict", None)
+            has_ship = has_matter = False
+        except Exception:
+            # Void failed (cancel_many is atomic, so NOTHING was voided): keep the OLD
+            # bindings AND the old judgment_verdict, and do not rebind. Degrades to the old
+            # verdict-class entirely -- never a partial void or a judgment_verdict that
+            # disagrees with the still-live old-class predictions.
+            log.warning("rehearse: could not void predictions for %s", pid,
+                        exc_info=True)
+            return entry.get("judgment_prediction_id")
+    if verdict not in _VERDICT_BELIEFS:
+        # KILL/unknown: the gate refused the bet -> no grounding. Clear any binding fields
+        # and judgment_verdict, even if there were no LIVE preds to void above (e.g. the
+        # fields point at already-voided preds that `bound` skipped) -- otherwise the log
+        # would show KILL while calibration still buckets the bet under its old class. A
+        # KILL on an already-GRADED bet returned via the freeze above, so this never erases
+        # a real graded grounding.
+        for f in fields:
+            entry.pop(f, None)
+        entry.pop("judgment_verdict", None)
+        return None
+    beliefs = _VERDICT_BELIEFS[verdict]
+
+    def _rec_ship():
+        b = world_model.add_belief(beliefs["shipped"], status="unverified")
+        return argo_predictions.record(
+            b, f"{pid}, rehearsed {verdict}, gets built and shipped rather than dropped "
+               f"(graded {SHIP_HORIZON_DAYS} days after selection).",
+            {"kind": "project_shipped", "project_id": pid},
+            SHIP_HORIZON_DAYS, source="rehearse")
+
+    def _rec_matter():
+        b = world_model.add_belief(beliefs["mattered"], status="unverified")
+        return argo_predictions.record(
+            b, f"{pid}, rehearsed {verdict}, matters to {profile.name()} -- rated "
+               f"energy {argo_predictions.MATTERED_ENERGY_MIN}+/10 "
+               f"(graded {SHIP_HORIZON_DAYS} days after selection).",
+            {"kind": "project_mattered", "project_id": pid},
+            SHIP_HORIZON_DAYS, source="rehearse")
+
+    try:
+        if not has_ship and not has_matter:
+            # Fresh (no LIVE binding -- new bet, or all legs voided/absent): record BOTH,
+            # building the ids in one tuple so a failure on the second leaves NEITHER entry
+            # field set (the RHS evaluates fully before the unpack). No half-bound entry; a
+            # stray unbound pred from a failed attempt is unarmed (score_due needs armed_at).
+            ship_id, matter_id = _rec_ship(), _rec_matter()
+            entry["judgment_prediction_id"] = ship_id
+            entry["judgment_mattered_prediction_id"] = matter_id
+        else:
+            # Backfill ONLY the absent/dead leg (never re-record a LIVE pred -- no
+            # duplicate/orphan). Heals a row bound to one live leg: a legacy step-1 row
+            # carried just the shipped pred, and a void+save-failure can leave one leg
+            # voided -- either way the missing leg gets grounded so the project_mattered
+            # loop exists. Safe even on a terminal bet: a missing leg was never graded, so
+            # first-time grounding of it cannot double-count.
+            if not has_ship:
+                entry["judgment_prediction_id"] = _rec_ship()
+            if not has_matter:
+                entry["judgment_mattered_prediction_id"] = _rec_matter()
+        entry["judgment_verdict"] = verdict
+    except Exception:
+        # Best-effort: grounding the verdict must never sink the rehearsal (the debate
+        # already happened and the blueprint is written). Broad net, logged.
+        log.warning("rehearse: judgment predictions not recorded for %s",
+                    pid, exc_info=True)
+        return None
+    # NOTE: arming is deliberately NOT done here. The caller (_stamp_project) arms only
+    # AFTER it durably saves the project log with these bindings, so a project-log save
+    # failure leaves the predictions UNARMED (inert -- score_due never grades an unarmed
+    # pred) instead of orphaning an ARMED pred the on-disk entry no longer references,
+    # which a later re-rehearse could then double-grade.
+    return entry.get("judgment_prediction_id")
 
 
 def _stamp_project(project_id, verdict, blueprint_path):
     """Record the rehearsal result on the project entry, mirroring how the webhook
     stamps selected/selected_at. Additive fields; existing readers ignore them.
+    Also grounds the verdict in the belief graph (the build-decision loop).
     Best-effort: never raises (the rehearsal already happened)."""
     projects = argo_store.load_json(PROJECTS_LOG, None)
     if not isinstance(projects, list):
         return
+    stamped = None
     for entry in projects:
         if entry.get("id") == project_id:
             entry["rehearsed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             entry["verdict"] = verdict
             entry["blueprint_path"] = str(blueprint_path.relative_to(ROOT))
+            # Ground the verdict: record/void the belief-bound predictions. Mutates entry
+            # with the bindings (UNARMED) -- the save below persists them, and only then
+            # do we arm.
+            _record_judgment_prediction(entry, verdict)
+            stamped = entry
             break
     try:
         argo_store.save_json(PROJECTS_LOG, projects)
     except OSError:
-        pass
+        # The bindings are NOT on disk. Leave the predictions UNARMED: an unarmed pred is
+        # inert (score_due never grades it), so a lost binding under-grounds the bet (it
+        # re-grounds on a successful re-rehearse) rather than orphaning an armed pred that
+        # would double-grade. Arming below is skipped by returning here.
+        log.warning("rehearse: could not persist judgment bindings for %s; leaving "
+                    "predictions unarmed", project_id, exc_info=True)
+        return
+    # Binding durably saved: now arm the committed bet's predictions. Per prediction and
+    # best-effort (idempotent; the next select/outcome touch re-arms via
+    # argo_rating._arm_judgment_predictions if one fails); broad net because this runs in
+    # the chat-turn thread, which must not crash on a store hiccup.
+    if stamped is not None and stamped.get("selected"):
+        for f in argo_predictions.JUDGMENT_PRED_FIELDS:
+            if stamped.get(f):
+                try:
+                    argo_predictions.arm(stamped[f])
+                except Exception:
+                    log.warning("rehearse: could not arm %s for %s now (re-arms on the "
+                                "next select/outcome)", stamped[f], project_id,
+                                exc_info=True)
 
 
 def _load_project(project_id):
@@ -511,7 +727,6 @@ def rehearse(project_id=""):
         return "ERROR", None, judge_text  # judge_text holds the error message
 
     doc = _blueprint_doc(pid, verdict, project_text, critiques, judge_text)
-    summary = _summary_line(pid, verdict, judge_text)
 
     # A KILL writes no build plan -- the gate refusing to bless a weak bet. We
     # still persist the debate doc (so the reasoning is on record) but return no
@@ -519,6 +734,9 @@ def rehearse(project_id=""):
     # handing over build steps.
     path = _write_blueprint(pid, doc)
     _stamp_project(pid, verdict, path)
+    # Summary AFTER stamping so its calibration phrase reads the grounded judgment_verdict
+    # (the class that will actually grade this bet), not the display verdict.
+    summary = _summary_line(pid, verdict, judge_text)
     blueprint_path = None if verdict == "KILL" else path
     _log_run(run_id, pid, verdict, path, models)
     return verdict, blueprint_path, summary

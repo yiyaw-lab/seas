@@ -43,12 +43,24 @@ def _is_transient(exc):
     msg = str(exc).lower()
     if any(s in name for s in ("timeout", "connection")):
         return True
+    # urllib.error.URLError hides the real cause in .reason (often an OSError like
+    # ConnectionRefusedError / socket.timeout / gaierror) -- a bare URLError's own
+    # type name is just "URLError" and its message phrasing ("timed out") dodges the
+    # checks above, so unwrap .reason and re-check it by type name.
+    reason = getattr(exc, "reason", None)
+    if reason is not None and reason is not exc:
+        rname = type(reason).__name__.lower()
+        if any(s in rname for s in ("timeout", "connection", "gaierror", "reset")):
+            return True
     # status codes if the SDK exposes one
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if isinstance(code, int):
         return code == 429 or 500 <= code < 600
-    return any(s in msg for s in ("429", "timeout", "temporarily",
-                                  "overloaded", "503", "502", "500", "rate limit"))
+    return any(s in msg for s in ("429", "timeout", "timed out", "temporarily",
+                                  "overloaded", "503", "502", "500", "rate limit",
+                                  "connection refused", "connection reset",
+                                  "name resolution", "temporary failure",
+                                  "network is unreachable"))
 
 
 def retry(fn, *, max_retries=MAX_RETRIES, label="call"):
@@ -95,11 +107,27 @@ class CircuitBreaker:
                 f"[guard] circuit '{self.name}' is open; failing fast")
         try:
             result = fn()
-        except Exception:
+        except Exception as exc:
+            # Only retry-eligible (transient) failures count toward opening. A
+            # permanent error -- a billing 400, an auth failure -- fails fast and
+            # propagates, but must NOT advance the breaker: a half-open probe can
+            # never recover a billing/auth condition, and counting it would mask a
+            # since-recovered provider behind a still-open breaker. So circuit_open
+            # now means a genuine provider outage, not "out of credits".
+            if not _is_transient(exc):
+                # The provider answered (just with a non-transient error like a billing
+                # 400), so any transient outage the breaker was guarding is over: close
+                # it. Without this, a half-open probe that hits a non-transient error
+                # re-raises WITHOUT refreshing opened_at, leaving the breaker dangling
+                # half-open so every later call runs the provider instead of failing
+                # fast. The error still propagates and fails fast at the call level.
+                self.failures = 0
+                self.opened_at = None
+                raise
             self.failures += 1
             if self.failures >= self.threshold:
                 self.opened_at = time.monotonic()
-                log.warning("circuit '%s' OPENED after %d failures",
+                log.warning("circuit '%s' OPENED after %d transient failures",
                             self.name, self.failures)
                 try:  # late import: guard is a low-level dep, avoid an import cycle
                     import argo_incidents

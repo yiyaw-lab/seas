@@ -32,6 +32,12 @@ seasar-landing.html
 proof-draft.html
 docs/DESIGN_dispatch_to_coder.md
 
+# Generated strategy briefs live here and stay local (like VISION/ROADMAP); the
+# two pre-existing plan docs remain tracked.
+docs/plans/
+!docs/plans/ARGO_V2_MIGRATION.md
+!docs/plans/PHASE_1_PLAN.md
+
 # Investor / pitch letters and internal HTML build reports
 docs/build-log/2026-06-05-release-letter.md
 docs/build-log/*.html
@@ -50,6 +56,9 @@ data/argo_budget.json
 # Transient pending self-heal action (argo_mcp_server L1)
 data/argo_pending_heal.json
 
+# Escalation-broker pending owner-decisions (argo_mcp_server ask_owner / F7)
+data/argo_pending_decisions.json
+
 # Argo's self-model: beliefs about itself + reflection state (argo_self).
 # Per-deploy runtime state; schema documented in data/argo_self.example.json.
 data/argo_self.json
@@ -60,6 +69,10 @@ data/argo_self.json
 # Railway volume so they survive redeploys.
 data/argo_incidents.json
 data/argo_proposals.json
+# Chat-log weakness miner high-watermark (argo_chatmine): the count of chat-log
+# turns already mined, so each daily run only scans turns appended since the last.
+# Per-deploy runtime state; ARGO_CHATMINE_WATERMARK_PATH points it at the volume.
+data/argo_chatmine_watermark.json
 
 # Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
 # seen-store, lever ledger, EVOLVE staging slot, prediction store, and the local
@@ -70,6 +83,18 @@ data/argo_evolution.json
 data/argo_pending_evolve.json
 data/argo_predictions.json
 data/schedule_state_local.json
+
+# Acted-on-push instrumentation (argo_pushes): the push-event store the webhook
+# writes (via the bearer-auth'd POST /push) and reads for act_on_rate. Runtime
+# state; point ARGO_PUSHES_PATH at the Railway volume so the writer and reader
+# share one filesystem (the F1 placement triad).
+data/argo_pushes.json
+
+# Usage/cost telemetry (argo_cost): one row per LLM call (model + provider +
+# normalized token counts) the model-call path writes for cost-claim scoring.
+# Runtime state; point ARGO_COST_LEDGER_PATH at the Railway volume so the spend
+# history survives redeploys.
+data/argo_cost_ledger.json
 
 # Local Claude Code agent config (not project code)
 .claude/

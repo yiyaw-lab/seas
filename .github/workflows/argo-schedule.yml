@@ -34,6 +34,14 @@ jobs:
           ARGO_MODEL: ${{ vars.ARGO_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Acted-on-push instrumentation (F1). The proactive senders (project,
+          # watch) run HERE on Actions, but the push store lives on the Railway
+          # volume the reader uses -- so they POST each push to the running
+          # webhook's authenticated /push endpoint instead of this ephemeral
+          # checkout. Both must be set for instrumentation to land (unset = skip
+          # silently, the send still goes out).
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          ARGO_MCP_TOKEN: ${{ secrets.ARGO_MCP_TOKEN }}
           # Optional Grok live X/web news source (grok_search). 'watch' runs HERE on
           # Actions, not the Railway webhook, so these must be set as Actions
           # secrets/vars -- a Railway-only ARGO_GROK_SOURCE never reaches this job.

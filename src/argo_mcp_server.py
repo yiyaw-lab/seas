@@ -19,6 +19,7 @@ Later phases add repo-read (C), self-status (D), and gated self-heal (E) tools.
 """
 
 import ast
+import asyncio
 import functools
 import ipaddress
 import json
@@ -31,6 +32,7 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
+import argo_escalation
 import argo_github
 import argo_http
 import argo_paths
@@ -42,6 +44,11 @@ from argo_log import get_logger
 log = get_logger(__name__)
 
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
+# Repo source reads get a bigger cap than web fetches: Argo must read a whole module
+# to rewrite it with propose_change, so a full read has to cover any proposable file.
+# A BYTE cap (like MAX_PROPOSE_BYTES, defined later) so a full read can never exceed the
+# byte size the propose path will accept -- the two are asserted in lockstep below.
+MAX_REPO_READ_BYTES = 40_000
 
 # Every tool runs behind a wall-clock DEADLINE well under the MCP client's fixed
 # 300s CallToolRequest budget. The failure we're guarding against: the Anthropic
@@ -53,35 +60,54 @@ MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scrape
 TOOL_DEADLINE_DEFAULT = 45  # generous for a single network call, far under 300s
 
 
+def _settle(fut, payload):
+    """Deliver a with_deadline worker's (value, error) to its future, in the loop
+    thread. No-op if wait_for already cancelled the future on timeout."""
+    if not fut.cancelled():
+        fut.set_result(payload)
+
+
 def with_deadline(seconds=TOOL_DEADLINE_DEFAULT):
-    """Decorator: run a tool with a hard wall-clock cap. If it overruns, return a
-    clean timeout message instead of letting the call block to the 300s MCP
-    limit. Runs the body in a daemon worker thread and joins with a timeout; an
-    overrun thread is abandoned (daemon, so it can't keep the process alive) and
-    the connector gets an immediate, useful answer for this turn."""
+    """Decorator: run a sync tool body OFF the event loop with a hard wall-clock cap.
+
+    FastMCP runs a *sync* tool body inline on the asyncio event loop (func_metadata:
+    `return fn(...)`), so a tool that blocks for seconds -- a network fetch, a GitHub
+    PR chain, a full model call -- freezes the loop and starves the streamable-HTTP
+    transport; the Anthropic MCP connector then reports "Error while communicating
+    with MCP server" and the work (the PR, the project) silently never lands. So this
+    returns an ASYNC wrapper (wraps-preserved, which FastMCP correctly detects as
+    async) that runs the body in a FRESH DAEMON thread and awaits the result via the
+    loop. Daemon + fresh-per-call are deliberate, carried over from the old sync
+    version: a daemon can't block process exit on a redeploy, and a fresh thread (not
+    a shared pool) means an abandoned overrun never starves a later tool call.
+    wait_for enforces the cap and returns a relayable string on overrun (under the
+    300s MCP limit) instead of hanging to silence; the overrun thread is abandoned."""
     def decorator(fn):
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            result = {}
+        async def wrapper(*args, **kwargs):
+            loop = asyncio.get_running_loop()
+            done = loop.create_future()
 
             def run():
                 try:
-                    result["value"] = fn(*args, **kwargs)
+                    payload = (fn(*args, **kwargs), None)
                 except Exception as exc:  # surface, don't swallow into a hang
-                    result["error"] = f"{type(exc).__name__}: {exc}"
+                    payload = (None, f"{fn.__name__} failed: {type(exc).__name__}: {exc}")
+                try:
+                    loop.call_soon_threadsafe(_settle, done, payload)
+                except RuntimeError:
+                    pass  # loop already closed (we timed out / shut down); drop it
 
-            t = threading.Thread(target=run, daemon=True)
-            t.start()
-            t.join(seconds)
-            if t.is_alive():
+            threading.Thread(target=run, daemon=True).start()
+            try:
+                value, err = await asyncio.wait_for(done, timeout=seconds)
+            except asyncio.TimeoutError:
                 return (f"Timed out after {seconds}s running {fn.__name__} "
                         f"(under the 300s limit, so you get this instead of "
                         f"silence). The service may be slow right now — tell the "
                         f"user plainly and suggest retrying; do not pretend it "
                         f"succeeded.")
-            if "error" in result:
-                return f"{fn.__name__} failed: {result['error']}"
-            return result.get("value", "(no result)")
+            return err if err is not None else value
         return wrapper
     return decorator
 
@@ -334,13 +360,29 @@ def list_feeds() -> str:
 # argo_github now. These @mcp.tool() wrappers must stay here -- they register on
 # the FastMCP instance at import -- so they're thin delegations. Their docstrings
 # are the model-facing tool spec; keep them.
+def _propose_repo_ref(repo):
+    """Pin reads of the propose repo to PROPOSE_BASE so a read matches the branch
+    propose_edit edits against; None (default branch) for any other repo. Compared
+    case-insensitively, since GitHub owner/repo names are case-insensitive."""
+    return PROPOSE_BASE if repo.lower() == PROPOSE_REPO.lower() else None
+
+
 @mcp.tool()
 @with_deadline(20)
-def github_read_file(repo: str, path: str) -> str:
+def github_read_file(repo: str, path: str, offset: int = 0, limit: int = 0) -> str:
     """Read a file from a GitHub repo. `repo` is 'owner/name', `path` is the file
     path within it. Use this to read actual source/README/config of any project,
-    especially a trending repo you just surfaced, instead of guessing."""
-    return argo_github.gh_read_file(repo, path, MAX_FETCH_CHARS)
+    especially a trending repo you just surfaced, instead of guessing.
+
+    Returns the whole file (up to ~40KB) by default -- enough to read one of your own
+    modules in full before you propose_change to it. To inspect just a span of a large
+    file, pass offset (1-based start line) and limit (line count), e.g. offset=700,
+    limit=40. Read a file IN FULL before propose_change (you must resubmit the whole
+    file); a windowed read is for looking, or for crafting a propose_edit."""
+    # Read your OWN repo at the same branch propose_edit applies edits against, so a
+    # snippet you copy as `old` matches what the edit is resolved against.
+    return argo_github.gh_read_file(
+        repo, path, MAX_REPO_READ_BYTES, offset, limit, _propose_repo_ref(repo))
 
 
 @mcp.tool()
@@ -369,23 +411,22 @@ def get_webhook_health() -> str:
     update count, and the last delivery error (if any). Use when asked 'are you
     healthy / is the bot working / why might messages be dropping'."""
     import json as _json
-    import urllib.request
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         return "TELEGRAM_BOT_TOKEN not set, can't check webhook."
-    ctx = argo_http.tls_context()
     # Railway's outbound to api.telegram.org is sometimes slow; a short timeout
-    # with one retry keeps us well under the @with_deadline(20) cap with margin.
+    # with one transient retry (backoff via argo_http) keeps us well under the
+    # @with_deadline(20) cap, and a permanent error (bad token 401) fails fast
+    # instead of being retried microseconds apart.
     url = f"https://api.telegram.org/bot{token.strip()}/getWebhookInfo"
     info = None
-    for attempt in (1, 2):
-        try:
-            with urllib.request.urlopen(url, timeout=6, context=ctx) as r:
-                info = _json.loads(r.read().decode()).get("result", {})
-            break
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
+    last = "no attempt made"
+    try:
+        raw = argo_http.get_bytes(url, timeout=6, retries=1)
+        info = _json.loads(raw.decode()).get("result", {})
+    except Exception as exc:
+        last = f"{type(exc).__name__}: {exc}"
     if info is None:
         # A slow/failed CHECK is not the same as a DOWN webhook — say so loudly
         # so Argo stops concluding the bot is broken and pushing a re-register.
@@ -966,6 +1007,48 @@ def run_reflection() -> str:
     return head + f". Recorded {n} new lesson(s); read_self to see them."
 
 
+# --- F7: escalation broker (ask_owner / get_owner_answers) ------------------
+# A scheduled cloud caller (e.g. a /vacation run) has NEITHER the Railway volume
+# NOR the Telegram secrets, so it cannot send_telegram or read the chat log
+# directly (the placement-triad trap). It brokers through Argo, which is
+# in-container with both: ask_owner Telegrams a question and records a pending
+# decision; get_owner_answers reads the chat log, matches the owner's reply to
+# the most-recent OPEN decision, and marks it answered. Both run inside the
+# bearer-auth'd /mcp mount (BearerAuth in argo_webhook.create_asgi_app), so a
+# credential-less caller still can't reach them without ARGO_MCP_TOKEN.
+#
+# The broker LOGIC lives in argo_escalation; these @mcp.tool() wrappers stay here
+# so the tools register on the one FastMCP instance (and inherit the bearer gate),
+# passing the volume-backed PENDING_DECISIONS_PATH in -- so tests can patch the
+# store path on this module exactly as before.
+
+PENDING_DECISIONS_PATH = argo_paths.PENDING_DECISIONS_PATH  # volume-backed
+
+
+@mcp.tool()
+@with_deadline(35)  # one Telegram send + a small local read-write
+def ask_owner(question: str) -> str:
+    """Ask the owner a question over Telegram and record it as a pending decision
+    you can poll later with get_owner_answers. Use this when you are a
+    credential-less caller (e.g. a scheduled run) that cannot reach Telegram or
+    the chat log yourself but needs the owner to decide something before you
+    continue. Returns the decision id to poll. Plain text only, no markdown."""
+    return argo_escalation.ask_owner_impl(question, PENDING_DECISIONS_PATH)
+
+
+@mcp.tool()
+@with_deadline(15)  # two local reads + a small write; no network
+def get_owner_answers(since: str = "") -> str:
+    """Check whether the owner has answered a pending decision (from ask_owner).
+    Reads the chat log for the owner's most-recent reply that came AFTER the
+    most-recent still-open decision was asked, matches it to that decision, marks
+    it answered, and returns the decision id + the owner's answer text. Pass
+    `since` (an ISO ts like 2026-06-20T12:00:00Z) to ignore replies before then;
+    leave blank to only require the reply to post-date the question. Returns a
+    short no-match note when nothing is waiting or no reply has arrived yet."""
+    return argo_escalation.get_owner_answers_impl(since, PENDING_DECISIONS_PATH)
+
+
 # --- Phase E2/E3: self-heal ACTIONS (gated by ARGO_HEAL_LEVEL) --------------
 # L0 (default): report-only. The tools describe the fix and refuse to execute.
 # L1: the tool stages a pending action and tells the user to reply CONFIRM in
@@ -1145,6 +1228,9 @@ PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 PROPOSE_BASE = os.environ.get("ARGO_PROPOSE_BASE", "main")
 MAX_PROPOSE_FILES = 5
 MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable
+# A full repo read must cover any file Argo is allowed to propose, or it could not
+# read what it's allowed to rewrite. Enforce the lockstep the constants' comments claim.
+assert MAX_REPO_READ_BYTES >= MAX_PROPOSE_BYTES
 # The self-modification loops (diagnose fixes, frontier evolution) must never be
 # able to touch their own safety rails: CI (which proves fail->pass), and the
 # budget/breaker guards. A proposal naming one of these is refused before any
@@ -1238,16 +1324,39 @@ def _referenced_names(files):
     return refs
 
 
-def _validate_files(files):
+def _path_refusal(path):
+    """Why `path` may not be written, or None. Shared by _validate_files and the
+    edit path so a protected/unsafe path is refused identically (and, for edits,
+    BEFORE any GitHub read happens)."""
+    if path.startswith("/") or ".." in path:
+        return f"Refused: unsafe path '{path}'."
+    if any(path == prot or path.startswith(prot) for prot in PROTECTED_PATHS):
+        return f"Refused: '{path}' is a protected safety path."
+    return None
+
+
+def _validate_paths_and_count(files):
+    """Count + path safety -- the checks that apply however the contents were produced
+    (a whole-file submit OR a resolved surgical edit)."""
     if len(files) > MAX_PROPOSE_FILES:
         return f"Too many files ({len(files)}); max {MAX_PROPOSE_FILES} per proposal."
+    for p in files:
+        refusal = _path_refusal(p)
+        if refusal:
+            return refusal
+    return None
+
+
+def _validate_files(files):
+    """Full validation for a whole-file proposal (propose_change): the model submits each
+    file IN FULL, so cap each at MAX_PROPOSE_BYTES to keep the proposal reviewable. (The
+    surgical-edit path caps the EDIT instead, so a small edit to a big file is fine.)"""
+    err = _validate_paths_and_count(files)
+    if err:
+        return err
     for p, c in files.items():
         if not isinstance(c, str) or len(c.encode()) > MAX_PROPOSE_BYTES:
             return f"File '{p}' is missing content or exceeds {MAX_PROPOSE_BYTES} bytes."
-        if p.startswith("/") or ".." in p:
-            return f"Refused: unsafe path '{p}'."
-        if any(p == prot or p.startswith(prot) for prot in PROTECTED_PATHS):
-            return f"Refused: '{p}' is a protected safety path."
     return None
 
 
@@ -1330,6 +1439,19 @@ def _open_pr(title, description, files):
                   "head_sha": pr.get("head", {}).get("sha"), "branch": branch}
 
 
+def _gate_and_open(title, description, files, validate=_validate_paths_and_count):
+    """Shared tail of every propose path: run the size/path validator + the repro-wiring gate,
+    then open the PR. Returns (True, info) on success, or (False, error_string) on a gate
+    refusal OR an _open_pr failure -- so the self-fix path can never drift from the
+    propose_change / propose_edit tools' gate. The whole-file path passes
+    validate=_validate_files (per-file byte cap); the edit paths take the default
+    _validate_paths_and_count (the cap is on the edit, not the resolved file)."""
+    err = validate(files) or _proposal_gate(files)
+    if err:
+        return False, err
+    return _open_pr(title, description, files)
+
+
 def _propose_change_impl(title, description, files_json):
     """Validate -> gate (repro + wire-check) -> open PR. Returns (text, info_or_None) so
     both the MCP tool (text) and the self-fix path (info, for the ledger) can use it."""
@@ -1338,17 +1460,14 @@ def _propose_change_impl(title, description, files_json):
         assert isinstance(files, dict) and files
     except Exception:
         return "files_json must be a non-empty JSON object of {path: contents}.", None
-    err = _validate_files(files) or _proposal_gate(files)
-    if err:
-        return err, None
-    ok, info = _open_pr(title, description, files)
+    ok, info = _gate_and_open(title, description, files, _validate_files)
     if not ok:
         return info, None
     return f"Opened PR for review: {info['url']}", info
 
 
 @mcp.tool()
-@with_deadline(120)  # chains 5+ GitHub calls; generous but far under 300s
+@with_deadline(120)  # chains 5+ GitHub calls; offloaded off-loop by the decorator
 def propose_change(title: str, description: str, files_json: str) -> str:
     """Propose a new capability or fix by opening a GitHub PR for human review.
     Argo NEVER merges or deploys this itself — it drafts; a human approves.
@@ -1367,6 +1486,121 @@ def propose_change(title: str, description: str, files_json: str) -> str:
     the default branch."""
     text, _info = _propose_change_impl(title, description, files_json)
     return text
+
+
+def _resolve_edits(edits):
+    """Turn a list of {path, old?, new} edits into a {path: full_new_contents} dict by
+    applying each surgical replacement against the CURRENT base-branch file -- so Argo
+    can change a large module without reading or resubmitting the whole thing (and so it
+    cannot clobber code it never saw). An entry WITHOUT 'old' writes 'new' as the full
+    file (e.g. a brand-new reproduction test). Returns (files, None) or (None, error)."""
+    import base64
+
+    if not isinstance(edits, list) or not edits:
+        return None, "edits must be a non-empty JSON array of {path, old?, new} objects."
+    if len(edits) > MAX_PROPOSE_FILES:
+        # Bound the GitHub reads up front (one GET per edit) -- don't read N files only
+        # for _validate_files to reject the proposal for being too big afterward.
+        return None, f"too many edits ({len(edits)}); max {MAX_PROPOSE_FILES}."
+    files = {}
+    for e in edits:
+        if not isinstance(e, dict):
+            return None, "each edit must be an object with 'path' and 'new'."
+        path, new = e.get("path"), e.get("new")
+        if not path or not isinstance(new, str):
+            return None, "each edit needs a 'path' and a string 'new'."
+        if path in files:
+            return None, f"two edits target '{path}'; combine them into one."
+        refusal = _path_refusal(path)  # refuse unsafe/protected paths BEFORE any read
+        if refusal:
+            return None, refusal
+        if "old" not in e:
+            # No 'old' = CREATE a new file submitted in full, so cap it like a
+            # propose_change file (the surgical size exemption is only for edits).
+            if len(new.encode()) > MAX_PROPOSE_BYTES:
+                return None, f"new file '{path}' exceeds {MAX_PROPOSE_BYTES} bytes."
+            # Allow the create ONLY when we positively confirm the path is absent (a clean
+            # 404). Any 2xx means it exists -- a file dict, a >1MB file with no inline
+            # content, or a directory listing -- so refuse; and an unreadable GET
+            # (timeout/5xx) is UNKNOWN, so also refuse. Never clobber a file Argo didn't
+            # read just because the existence check was inconclusive. Match the exact
+            # "HTTP Error 404" so an unrelated error string (e.g. one containing "4042")
+            # can't be mistaken for a confirmed absence.
+            ok, cur = _gh_write(
+                "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+            if ok:
+                return None, (f"'{path}' already exists; to change it, use an edit with "
+                              f"'old'. Omit 'old' only to create a NEW file.")
+            if "HTTP Error 404:" not in str(cur):  # urllib formats as "HTTP Error 404: ..."
+                return None, (f"couldn't verify whether '{path}' already exists ({cur}); "
+                              f"not creating it blindly -- try again.")
+            files[path] = new
+            continue
+        old = e["old"]
+        if not isinstance(old, str) or not old:
+            return None, (f"edit for '{path}' has an empty 'old'; to create a file, omit "
+                          f"'old' and put the full contents in 'new'.")
+        if old == new:
+            return None, f"edit for '{path}' has identical 'old' and 'new' (no change)."
+        # Cap the EDIT, not the resulting file: a small edit may land in a module far
+        # larger than MAX_PROPOSE_BYTES (that's the whole reason this tool exists).
+        if len(old.encode()) + len(new.encode()) > MAX_PROPOSE_BYTES:
+            return None, (f"the edit for '{path}' is too large (>{MAX_PROPOSE_BYTES} bytes "
+                          f"of old+new text); split it into smaller edits.")
+        ok, cur = _gh_write(
+            "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+        if not ok or not isinstance(cur, dict) or "content" not in cur:
+            return None, f"couldn't read the current '{path}' to edit it: {cur}"
+        try:
+            content = base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            return None, f"couldn't decode the current '{path}'."
+        n = content.count(old)
+        if n == 0:
+            return None, (f"the 'old' text was not found in '{path}'; it must match the "
+                          f"current file exactly (read it first with github_read_file).")
+        if n > 1:
+            return None, (f"the 'old' text appears {n} times in '{path}'; include more "
+                          f"surrounding lines so it matches exactly once.")
+        files[path] = content.replace(old, new, 1)
+    return files, None
+
+
+def _propose_edit_impl(title, description, edits_json):
+    """Resolve {path, old?, new} edits against current files, then run the SAME count/path
+    + repro-test/wiring gates as propose_change and open the PR. The per-file SIZE cap is
+    NOT applied to the resolved files -- _resolve_edits already capped each edit, so a
+    small edit may land in a module bigger than MAX_PROPOSE_BYTES. Returns user text."""
+    try:
+        edits = json.loads(edits_json)
+    except (ValueError, TypeError):
+        return "edits_json must be a JSON array of {path, old?, new} objects."
+    files, err = _resolve_edits(edits)
+    if err:
+        return err
+    ok, info = _gate_and_open(title, description, files)
+    if not ok:
+        return info
+    return f"Opened PR for review: {info['url']}"
+
+
+@mcp.tool()
+@with_deadline(120)  # one GET per edited file + the propose chain; offloaded off-loop
+def propose_edit(title: str, description: str, edits_json: str) -> str:
+    """Propose a change by SURGICAL EDITS instead of resubmitting whole files -- use this
+    for a small change to a large module you don't want to (or can't) resend in full.
+    Argo NEVER merges; it drafts a PR a human reviews.
+
+    title: short PR title.  description: what + why (PR body).
+    edits_json: a JSON array of edits. Each edit is one of:
+      - {"path": "src/x.py", "old": "<exact current text>", "new": "<replacement>"}
+        -- 'old' must appear EXACTLY ONCE in the current file (read it first to be sure).
+      - {"path": "tests/test_x.py", "new": "<full file contents>"}  (omit 'old' to
+        create a new file -- e.g. the reproduction test).
+    Max 5 files. Like propose_change, a fix that touches a src/ module MUST include a
+    reproduction test under tests/. Opens a NEW branch only; cannot touch the default
+    branch. Returns the PR URL on success."""
+    return _propose_edit_impl(title, description, edits_json)
 
 
 def _check_proposal_ci(pr_number):
@@ -1399,35 +1633,187 @@ def _check_proposal_ci(pr_number):
     return out
 
 
+# External code-review bots whose PR findings Argo surfaces to the owner. Matched
+# by substring on the GitHub login (raw REST reports "cursor[bot]"; the gh CLI
+# normalizes it to "cursor"), so one entry covers both forms.
+_REVIEW_BOT_LOGINS = ("cursor",)
+
+
+def _is_review_bot(login):
+    lo = (login or "").lower()
+    return any(b in lo for b in _REVIEW_BOT_LOGINS)
+
+
+def _strip_html_comments(text):
+    """Bugbot embeds metadata in <!-- ... --> blocks; drop them for readability."""
+    import re as _re
+    return _re.sub(r"<!--.*?-->", "", text or "", flags=_re.DOTALL).strip()
+
+
+def _check_proposal_reviews(pr_number, seen_ids=None):
+    """Read external code-review bot (e.g. Cursor Bugbot) findings on a PR via the
+    propose token -- the sibling of _check_proposal_ci. Returns
+    {"summary": str|None, "findings": [{id, path, line, body}]}. With seen_ids given,
+    only inline findings whose comment id is NOT already in it are returned, so a
+    re-poll never re-surfaces the same finding; the summary is always the latest bot
+    review body. Best-effort: an unreadable PR returns empty, never raises."""
+    seen = set(seen_ids or [])
+    out = {"summary": None, "findings": []}
+    ok, reviews = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/pulls/{pr_number}/reviews?per_page=100", None)
+    if ok and isinstance(reviews, list):
+        # Reviews are oldest-first; take the newest bot review with a NON-empty body.
+        # A re-review can post an inline-only review whose body is empty, which must
+        # not blank out an earlier real summary.
+        for r in reversed(reviews):
+            if _is_review_bot((r.get("user") or {}).get("login")):
+                body = _strip_html_comments(r.get("body"))
+                if body:
+                    out["summary"] = body
+                    break
+    ok2, comments = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/pulls/{pr_number}/comments?per_page=100", None)
+    if ok2 and isinstance(comments, list):
+        for c in comments:
+            cid = c.get("id")
+            if cid in seen or not _is_review_bot((c.get("user") or {}).get("login")):
+                continue
+            body = _strip_html_comments(c.get("body"))
+            if body:
+                out["findings"].append({
+                    "id": cid, "path": c.get("path"),
+                    "line": c.get("line") or c.get("original_line"), "body": body})
+    return out
+
+
+@mcp.tool()
+@with_deadline(20)  # two short GitHub GETs
+def read_pr_review(pr: str) -> str:
+    """Read external code-review bot findings (e.g. Cursor Bugbot) on one of your
+    open PRs, so you can view and address them. `pr` is the PR number or its URL.
+    Returns the bot's summary plus each inline finding (file:line and the comment).
+    Use when asked about a PR's review comments, or to act on Bugbot's feedback."""
+    import re as _re
+    s = str(pr).strip()
+    # Prefer the /pull/<n> segment of a URL; fall back to a bare "42" or "#42".
+    # A plain \d+ would grab the first digit run, wrong for an org/repo with digits.
+    m = _re.search(r"/pull/(\d+)", s) or _re.search(r"^#?(\d+)$", s)
+    if not m:
+        return "Give me the PR number or its URL."
+    n = int(m.group(1))
+    data = _check_proposal_reviews(n)
+    summary, findings = data["summary"], data["findings"]
+    if not summary and not findings:
+        return (f"No code-review bot comments on PR #{n} yet. Bugbot runs a few "
+                f"minutes after a PR opens, and only reviews open PRs.")
+    lines = [f"Code review on PR #{n}:"]
+    if summary:
+        lines.append(summary)
+    for f in findings:
+        loc = f"{f['path']}:{f['line']}" if f.get("path") else "general"
+        lines.append(f"- [{loc}] {f['body']}")
+    return "\n".join(lines)
+
+
 _AUTHOR_SYSTEM = ("You are Argo, writing a minimal, correct fix for one of your own "
                   "recurring bugs. You draft a PR a human reviews; you never merge.")
-_AUTHOR_PROMPT = (
+_AUTHOR_EDITS_PROMPT = (
     "Diagnosis and suggested fix:\n{diagnosis}\n{suggestion}\n\n"
     "Current contents of the suspected files (may be truncated):\n{files}\n\n"
-    'Return ONLY a JSON object: {{"files": {{"<path>": "<full new file contents>"}}}}.\n'
+    'Return ONLY a JSON object: {{"edits": [ ... ]}} where each element is ONE of:\n'
+    '  {{"path": "<existing file>", "old": "<exact current text>", "new": "<replacement>"}}\n'
+    '  {{"path": "tests/test_x.py", "new": "<full new file contents>"}}   (omit "old" to '
+    "CREATE a new file)\n"
     "Requirements:\n"
-    "- Make the SMALLEST change that fixes the bug; return the FULL new contents of each "
-    "file you change.\n"
-    "- INCLUDE a test under tests/ named test_*.py that FAILS on the current code and "
-    "PASSES with your fix, and that imports/exercises the changed module.\n"
+    "- For a file that ALREADY EXISTS you MUST use an {{old, new}} edit. Copy 'old' EXACTLY "
+    "from the contents above; it must appear EXACTLY ONCE (add surrounding lines to make it "
+    "unique). This keeps the change surgical -- you cannot rewrite code you did not name.\n"
+    "- INCLUDE a reproduction test under tests/ named test_*.py that FAILS on the current "
+    "code and PASSES with your fix; create it with the no-'old' form and import/exercise "
+    "the changed module.\n"
     "- Any new function or class you add must actually be called (wired in), not just "
     "defined.\n"
+    "- Make the SMALLEST change that fixes the bug. If it cannot be expressed as a few "
+    "surgical edits, reply with an empty edits list rather than a sprawling rewrite.\n"
     "- Standard library only; no new dependencies. Plain ASCII, no em dashes.")
 
 
-def _author_fix_files(payload):
-    """Premium model call: given the diagnosis + the current contents of the suspected
-    files, draft {path: full_new_contents} INCLUDING a tests/test_*.py reproduction.
-    Returns the files dict or None. Guarded; never raises."""
+# Full file bodies + a repro test don't fit the 1024-token chat_with_mcp default --
+# the draft would truncate mid-JSON and parse to nothing. 16000 is the non-streaming
+# ceiling for these models (above it the SDK requires streaming).
+_AUTHOR_MAX_TOKENS = 16000
+_REPAIR_NOTE_EDITS = (
+    "That draft was rejected: {reason}. Reply again with ONLY a single JSON object of the "
+    'form {{"edits": [{{"path": "src/x.py", "old": "<exact current text>", "new": "..."}}, '
+    '{{"path": "tests/test_x.py", "new": "<full file>"}}]}} -- no prose, no markdown fences '
+    "-- and include the tests/test_*.py reproduction. Standard library only, plain ASCII, "
+    "no em dashes.")
+
+
+def _extract_fix_edits(raw):
+    """Pull the surgical-edits list out of a draft reply: {"edits": [{path, old?, new}, ...]}.
+    Returns (edits, None) on success or (None, reason) naming what was wrong, so the caller
+    can ask for a repair. Shape gate only -- _resolve_edits does the deep validation (old
+    matches once, create-vs-edit, size)."""
+    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if not m:
+        return None, "your reply contained no JSON object (it may have been truncated)"
+    try:
+        obj = json.loads(m.group(0))
+    except (ValueError, json.JSONDecodeError):
+        return None, "the JSON did not parse (likely truncated or malformed)"
+    edits = obj.get("edits") if isinstance(obj, dict) else None
+    if (isinstance(edits, list)
+            and all(isinstance(e, dict) and e.get("path")
+                    and isinstance(e.get("new"), str) for e in edits)):
+        # An EMPTY list is the model's intended decline ("no surgical fix exists" -- the
+        # prompt invites it), a valid terminal response, NOT a near-miss to repair. The
+        # caller (_author_fix_edits) returns it as-is and _run_propose_fix declines on it.
+        return edits, None
+    return None, ('there was no valid "edits" array of {path, old?, new} objects, each with '
+                  "a path and a string new")
+
+
+def _read_base_file(path):
+    """Read a file's contents from the PROPOSE_BASE branch -- the SAME base _resolve_edits
+    matches a drafted 'old' against -- so the author shows the model the exact bytes its edit
+    will apply to. Falls back to the local checkout if the GitHub read fails (offline /
+    PROPOSE_REPO unset); best-effort, since this is only prompt context. Returns text or None."""
+    import base64
+    ok, cur = _gh_write(
+        "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+    if ok and isinstance(cur, dict) and "content" in cur:
+        try:
+            return base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            pass
+    try:
+        return (ROOT / path).read_text()
+    except OSError:
+        return None
+
+
+def _author_fix_edits(payload):
+    """Premium model call: given the diagnosis + the current contents of the suspected files,
+    draft a list of {path, old?, new} SURGICAL edits INCLUDING a tests/test_*.py reproduction.
+    Existing files are changed by an exact-once {old->new} replacement; new files (the repro
+    test) are created in full. Authoring surgically -- instead of resubmitting whole files --
+    makes same-file collateral structurally impossible: the model can only change bytes inside
+    the snippets it names, so it cannot rewrite an unrelated function as a side effect (PR #30
+    / Finding_043). Returns the edits list (possibly empty = an intended decline) or None.
+    Drafts with a generous max_tokens (so the JSON isn't truncated) and grants ONE repair pass
+    on a recoverable near-miss. Guarded; never raises."""
     import argo_observe as observe
     suspected = [f for f in (payload.get("suspected_files") or [])
-                 if isinstance(f, str) and (ROOT / f).exists()][:MAX_PROPOSE_FILES - 1]
+                 if isinstance(f, str)][:MAX_PROPOSE_FILES - 1]
     current = {}
     for f in suspected:
-        try:
-            current[f] = (ROOT / f).read_text()[:MAX_PROPOSE_BYTES]
-        except OSError:
-            pass
+        # Source from PROPOSE_BASE, not the local checkout: _resolve_edits matches 'old'
+        # against PROPOSE_BASE, so on a stale deploy an 'old' copied from a divergent local
+        # file would never resolve. Show the model the bytes the edit will actually hit.
+        content = _read_base_file(f)
+        if content is not None:
+            current[f] = content[:MAX_PROPOSE_BYTES]
     model = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
     prov = observe.provider_for(model)
     if not prov or not os.environ.get(prov["key_env"]):
@@ -1435,47 +1821,65 @@ def _author_fix_files(payload):
         prov = observe.provider_for(model)
         if not prov or not os.environ.get(prov["key_env"]):
             return None
-    prompt = _AUTHOR_PROMPT.format(
+    prompt = _AUTHOR_EDITS_PROMPT.format(
         diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
         files=json.dumps(current, indent=2)[:30000] or "(no current files)")
-    try:
-        # Opus rejects the temperature param; pass None so observe omits it (the gotcha).
-        raw = observe.chat_with_mcp(
-            _AUTHOR_SYSTEM, [{"role": "user", "content": prompt}], model, temperature=None)
-    except Exception:
-        log.error("author_fix: model call failed", exc_info=True)
-        return None
-    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    files = obj.get("files") if isinstance(obj, dict) else None
-    if isinstance(files, dict) and files and all(isinstance(v, str) for v in files.values()):
-        return files
+    messages = [{"role": "user", "content": prompt}]
+    for attempt in range(2):
+        try:
+            # Opus rejects the temperature param; pass None so observe omits it (the gotcha).
+            raw = observe.chat_with_mcp(
+                _AUTHOR_SYSTEM, messages, model,
+                max_tokens=_AUTHOR_MAX_TOKENS, temperature=None)
+        except Exception:
+            log.error("author_fix: model call failed", exc_info=True)
+            return None  # infra failure (no credits, breaker open) -- a retry won't help
+        edits, reason = _extract_fix_edits(raw)
+        if edits is not None:
+            return edits
+        if attempt == 0:
+            # One repair pass: hand the model its own draft plus the exact reason it was
+            # rejected and ask again, rather than an instant give-up. A near-miss
+            # (truncated/malformed JSON) is recoverable, and this is what lets Argo
+            # actually land a PR for a tractable change instead of declining.
+            log.info("author_fix: draft rejected (%s); one repair pass", reason)
+            if (raw or "").strip():
+                # Echo the rejected draft back ONLY when non-empty -- an empty reply
+                # (refusal / max_tokens before any text) would become an empty assistant
+                # content block, which the API 400s on, losing the retry. When the draft
+                # is empty, just re-send the original prompt for the second attempt.
+                messages = messages + [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": _REPAIR_NOTE_EDITS.format(reason=reason)},
+                ]
     return None
 
 
 def _run_propose_fix(payload, return_info=False):
-    """FIX path: draft the fix files, run them through the propose gate + open the PR,
-    and record the PR in the proposal ledger so verify/confirm can follow it to
-    resolution. Honest acks only -- proposed and pending review, never 'fixed.'
-    With return_info=True, returns (text, info_or_None) so the caller learns the PR
-    number directly instead of re-joining through the proposals ledger."""
+    """FIX/EVOLVE path: draft the fix as SURGICAL edits, resolve them against the current
+    base, run them through the propose gate + open the PR, and record the PR in the proposal
+    ledger so verify/confirm can follow it to resolution. Authoring via {old->new} edits (not
+    whole-file replacement) means a change to an existing module can't rewrite code it didn't
+    name -- no same-file collateral (PR #30 / Finding_043). Honest acks only -- proposed and
+    pending review, never 'fixed.' With return_info=True, returns (text, info_or_None) so the
+    caller learns the PR number directly instead of re-joining through the proposals ledger."""
     def _done(text, info=None):
         return (text, info) if return_info else text
-    files = _author_fix_files(payload)
-    if not files:
+    edits = _author_fix_edits(payload)
+    if not edits:
         return _done("I couldn't draft a fix I trust for that one (no small, testable "
                      "change). I'll leave it for you rather than open a shaky PR.")
-    text, info = _propose_change_impl(
-        payload.get("title", "Argo self-fix"), payload.get("description", ""),
-        json.dumps(files))
-    if not info:
-        return _done(f"I drafted a fix but it didn't pass my own checks, so I didn't "
-                     f"open it: {text}")
+    files, err = _resolve_edits(edits)
+    if err:
+        return _done("I drafted edits but they didn't resolve cleanly against the current "
+                     f"code, so I didn't open a PR: {err}")
+    # Same gate -> open seam as _propose_edit_impl (the byte cap is on the edit, not the
+    # resolved file), so the self-fix path can never drift from the propose_edit tool's gate.
+    ok, info = _gate_and_open(payload.get("title", "Argo self-fix"),
+                              payload.get("description", ""), files)
+    if not ok:
+        return _done(f"I drafted a fix but couldn't open a clean PR for it (it failed a "
+                     f"safety check or the PR write): {info}")
     try:
         import argo_diagnose
         argo_diagnose.append_proposal(

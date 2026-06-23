@@ -82,6 +82,80 @@ class VerifyConfirmTest(unittest.TestCase):
         self.assertFalse(b["refutations"])                    # no fabricated verdict
         self.assertFalse(self._proposal()["ci_failed"])
 
+    # --- external review surfacing (Cursor Bugbot) -------------------------
+
+    _OPEN_CI = {"merged": False, "state": "open", "merged_at": None,
+                "head_sha": "sha1", "ci_conclusion": "pending"}
+
+    def test_new_bot_review_is_surfaced(self):
+        # Body carries raw markdown + an em dash; the surfaced text must be sanitized
+        # (Argo's plain-text output rule), and the comment id recorded as seen.
+        rev = {"summary": "found 1 potential issue", "findings": [
+            {"id": 11, "path": "src/x.py", "line": 5,
+             "body": "possible null deref — see **here**"}]}
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        msg = next(s for s in self.sent if "cursorbot" in s)
+        self.assertIn("PR #42", msg)
+        self.assertNotIn("—", msg)        # em dash stripped
+        self.assertNotIn("**", msg)       # markdown stripped
+        self.assertEqual(self._proposal()["seen_review_ids"], [11])
+
+    def test_seen_bot_finding_not_resurfaced(self):
+        # The stored seen set is threaded to _check_reviews; with no fresh findings
+        # back, no new Telegram message goes out (re-poll is silent).
+        self._set_proposal(seen_review_ids=[11])
+        captured = {}
+
+        def fake_reviews(n, seen):
+            captured["seen"] = seen
+            return {"summary": "no new issues", "findings": []}
+
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", side_effect=fake_reviews):
+            dg.verify_open_proposals()
+        self.assertEqual(captured["seen"], [11])               # baseline threaded through
+        self.assertFalse(any("cursorbot" in s for s in self.sent))
+
+    def test_ci_failed_pr_still_surfaces_new_review(self):
+        # A parked (ci_failed) but still-open PR must still get NEW bot findings
+        # surfaced, and its settled CI verdict must NOT be re-polled.
+        self._set_proposal(ci_failed=True)
+        rev = {"summary": "found 1", "findings": [
+            {"id": 21, "path": "src/y.py", "line": 1, "body": "resource leak"}]}
+        ci_mock = mock.Mock(side_effect=AssertionError("CI re-polled on a parked PR"))
+        with mock.patch.object(dg, "_check_ci", ci_mock), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        self.assertTrue(any("cursorbot" in s for s in self.sent))
+        self.assertEqual(self._proposal()["seen_review_ids"], [21])
+
+    def test_merged_pr_in_watch_still_surfaces_review(self):
+        # A merged PR in its post-deploy watch window must still retry undelivered
+        # findings: deploy_watch_until guards the CI state machine, not reviews.
+        self._set_proposal(merged=True, merged_at="2000-01-01T00:00:00Z",
+                           deploy_watch_until="2999-01-01T00:00:00Z")
+        rev = {"summary": "x", "findings": [
+            {"id": 41, "path": "src/q.py", "line": 1, "body": "a leak"}]}
+        ci_mock = mock.Mock(side_effect=AssertionError("CI re-polled on a watched PR"))
+        with mock.patch.object(dg, "_check_ci", ci_mock), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev):
+            dg.verify_open_proposals()
+        self.assertTrue(any("cursorbot" in s for s in self.sent))
+        self.assertEqual(self._proposal()["seen_review_ids"], [41])
+
+    def test_send_failure_does_not_mark_seen(self):
+        # If Telegram delivery fails, the finding must NOT be marked seen, so a
+        # later poll retries it (at-least-once) rather than dropping it forever.
+        rev = {"summary": "x", "findings": [
+            {"id": 31, "path": "src/z.py", "line": 2, "body": "a bug"}]}
+        with mock.patch.object(dg, "_check_ci", return_value=self._OPEN_CI), \
+             mock.patch.object(dg, "_check_reviews", return_value=rev), \
+             mock.patch.object(dg, "_send", return_value=False):
+            dg.verify_open_proposals()
+        self.assertEqual(self._proposal().get("seen_review_ids", []), [])
+
     # --- confirm_deployed ---------------------------------------------------
 
     def test_no_recurrence_resolves_belief(self):

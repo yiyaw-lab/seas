@@ -40,7 +40,6 @@ import os
 import re
 import threading
 import time
-from collections import namedtuple
 from pathlib import Path
 
 try:
@@ -51,10 +50,14 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
 
+import argo_bluff
+import argo_cmo
 import argo_http
+import argo_media
 import argo_memory
 import argo_observe as observe
 import argo_paths
+import argo_pushes
 import argo_rating
 import argo_reply_context
 import argo_store
@@ -151,7 +154,121 @@ def _self_capability_block():
     return ("\n".join(parts) + "\n\n") if parts else ""
 
 
-def build_system_prompt(p=None):
+# Stable header for the persistent-context block, so a test (and the model) can
+# find it deterministically and a prompt refactor can't silently drop it.
+PERSISTENT_CONTEXT_MARKER = "CURRENT CONTEXT (facts you carry between turns):"
+
+
+def _active_project_line():
+    """One factual line for the project the user is most recently looking at:
+    its bet name (or first real line) plus its energy rating if any. Returns ''
+    when no project was genuinely SHOWN (none has shown_at), when none is logged,
+    or the log is unreadable -- a "currently looking at" claim needs a real
+    visibility signal, never target_project's bare last-entry fallback. Reads the
+    module-level PROJECTS_LOG (the test patch point), so an override bites at call
+    time.
+
+    Source availability: the project log lives on the Railway volume
+    (ARGO_PROJECTS_PATH) -- the webhook that writes it is the same process that
+    reads it here, so this source is confirmed present on the live runtime."""
+    log = argo_store.load_json(PROJECTS_LOG, [])
+    if not isinstance(log, list) or not log:
+        return ""
+    p = argo_rating.target_project(log)
+    # Only a GENUINELY-shown project supports a "currently looking at" claim.
+    # target_project falls back to the last log entry when nothing has shown_at
+    # (that fallback is the bare-rating-attachment target, not a visibility
+    # signal), so gate on shown_at to avoid carrying a false "what they're
+    # viewing" fact across turns when nothing was actually shown.
+    if not p or not p.get("shown_at"):
+        return ""
+    text = p.get("text", "") or ""
+    line = ""
+    low = text.lower()
+    if "this week's bet:" in low:
+        after = text[low.find("this week's bet:") + len("this week's bet:"):]
+        line = next((l.strip() for l in after.splitlines() if l.strip()), "")
+    if not line:
+        line = next((l.strip() for l in text.splitlines()
+                     if l.strip() and not l.startswith("⚓")), "")
+    if not line:
+        return ""
+    line = line[:120]
+    energy = p.get("energy")
+    if energy is not None:
+        return f"{line} (builder's energy rating: {energy}/10)"
+    return line
+
+
+def _persistent_context_block():
+    """A conservative, FACTUAL context block for the system prompt, so Argo stays
+    continuous across turns instead of starting cold each time.
+
+    FACTS ONLY -- no personality, no tone: the prompt body above owns Argo's
+    voice, and this block must not shift it. Each fact is drawn ONLY from a source
+    confirmed present on the live Railway runtime:
+      - world_model.json: top frontier beliefs (highest-confidence first). Tracked
+        in the repo and env-overridable (ARGO_WORLD_MODEL_PATH) onto the volume, so
+        it ships and persists.
+      - the project log: the bet the user is currently looking at, with its energy
+        rating. On the Railway volume (ARGO_PROJECTS_PATH); the webhook reads/writes
+        it in-process.
+    DELIBERATELY OMITTED: private/decisions/*.md -- private/ is gitignored, so it is
+    NOT deployed to Railway. Depending on it would inject nothing live and risk an
+    empty/inconsistent block (the F1 placement lesson). Left out entirely.
+
+    Returns '' when every source is empty/unreadable, so the prompt degrades to its
+    prior form and never crashes a chat turn. Built at call time, so a fresh belief
+    or a newly shown project shows up with no second edit."""
+    facts = []
+
+    # Broad nets that LOG (per CLAUDE.md): this block only ENRICHES the prompt, so
+    # any source going bad -- unreadable, or valid-but-wrong shape (a dict where a
+    # list is expected, a hand-edited store) -- must degrade to omitting that fact,
+    # NEVER crash a chat turn. The specific I/O/parse errors are already swallowed
+    # in the loaders; this catches the structural surprises they don't.
+    try:
+        import world_model
+        beliefs = world_model.format_beliefs_for_prompt(limit=3)
+        if beliefs and beliefs != "(no beliefs yet)":
+            facts.append("Your top frontier beliefs right now (confidence is "
+                         "earned, not asserted):\n" + beliefs)
+    except Exception:
+        log.warning("persistent-context: world_model fact omitted", exc_info=True)
+
+    try:
+        proj = _active_project_line()
+        if proj:
+            facts.append("The project the user is currently looking at: " + proj)
+    except Exception:
+        log.warning("persistent-context: active project fact omitted", exc_info=True)
+
+    if not facts:
+        return ""
+    return PERSISTENT_CONTEXT_MARKER + "\n" + "\n\n".join(facts) + "\n\n"
+
+
+# CMO role-lens fragment (B-007 demand test). A named constant, not an inline
+# string, so a SECOND role is a small future add (a new constant + a new gate) --
+# but this stays CMO-only on purpose; we are NOT building a generic multi-role
+# command framework yet. Verbatim voice -- keep the house rules (plain text, no
+# markdown, no em dashes, sources cited like a person).
+CMO_LENS_FRAGMENT = (
+    "CMO lens is on. For this thread, reason as the builder's Chief Marketing "
+    "Officer -- lead with demand and distribution, not craft. For whatever they "
+    "raise, push on: who exactly this is for (the specific ICP, not \"developers\"), "
+    "the one-line positioning, the sharpest message and the story behind it, the "
+    "single channel that actually reaches that ICP, what would make them switch "
+    "from what they use today, and the cheapest test that proves demand before "
+    "more building. Be concrete and opinionated: name the channel, the message, "
+    "the experiment, and what you'd cut. You have no live marketing analytics, so "
+    "when an answer needs real numbers (open rates, CAC, conversion) say so plainly "
+    "and give judgment, not invented figures. Keep the house voice: plain text, no "
+    "markdown, no em dashes, sources cited like a person."
+)
+
+
+def build_system_prompt(p=None, cmo_mode=False):
     """Argo's full system prompt, with the USER IDENTITY span (name, one-liner,
     persona/register) drawn from the active profile and the rest (self-knowledge,
     tools, self-heal, attribution) unchanged.
@@ -160,14 +277,19 @@ def build_system_prompt(p=None):
     whole point: the long behavioral body below is verbatim from when this was a
     hardcoded constant, with only the identity tokens (name + pronouns) templated,
     so output is byte-identical for the existing user. `p` defaults to the loaded
-    profile; pass one to build for a specific user (per-user-ready)."""
+    profile; pass one to build for a specific user (per-user-ready).
+
+    `cmo_mode` (the B-007 demand-test lens) appends CMO_LENS_FRAGMENT to the end of
+    the prompt when True, so for a CMO-mode thread Argo reasons as the builder's
+    Chief Marketing Officer. Default False, so non-CMO chats and the
+    proactive/scheduled senders (which never set it) are byte-identical to before."""
     p = p or profile.load()
     name = p["name"]
     subj = p.get("subject", "she")        # she / he / they
     obj = p.get("object", "her")          # her / him / them
     poss = p.get("possessive", "her")     # her / his / their
     Subj = subj[:1].upper() + subj[1:]    # sentence-initial form
-    return (
+    prompt = (
     f"You are Argo. {name} is your person — the one human you work hardest for. "
     f"You've been talking with {name} over Telegram about what's worth building and "
     "what's actually happening at the frontier. You're not a general assistant; "
@@ -362,6 +484,7 @@ def build_system_prompt(p=None):
     "from memory rather than guessing at 'latest'.\n"
     "\n"
     + _self_capability_block()
+    + _persistent_context_block()
     + "ATTRIBUTION: when something you say came from what you read, name the source "
     "in passing the way a person would ('their changelog says...', 'saw it on "
     "HN', 'the readme shows...'), and drop the link if it's worth checking. NEVER "
@@ -370,6 +493,9 @@ def build_system_prompt(p=None):
     "link are the trust signal, not a description of your process. This should "
     "usually make replies shorter, not longer."
     )
+    if cmo_mode:
+        prompt = prompt + "\n\n" + CMO_LENS_FRAGMENT
+    return prompt
 
 # The append-only chat log -- both the LLM's short-term memory AND durable data --
 # now lives in argo_memory, shared with the proactive senders (argo_watch /
@@ -487,6 +613,10 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
 
     hist = _recent_turns(chat_id)
 
+    # NOTE: acted-on-push linkage now happens once at the top of handle_update
+    # (the single chokepoint covering deterministic + image + file + LLM replies),
+    # so it is intentionally NOT done here -- linking again would double-count.
+
     last_error = None
     tooled_failed = False  # an MCP-capable model errored earlier this turn
     for model in runnable:
@@ -508,7 +638,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # labeled "Argo"; anything else (the user's name, or a legacy "Yiya"
                 # label) maps to the user role. The final turn carries `final_content`
                 # (string or image-block list).
-                system = build_system_prompt()
+                system = build_system_prompt(cmo_mode=argo_cmo.is_active(chat_id))
                 messages = [
                     {
                         "role": "assistant" if t["role"] == "Argo" else "user",
@@ -549,7 +679,8 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # can't take (the "says things it won't do" bug).
                 convo = "\n".join(f"{t['role']}: {t['text']}" for t in hist)
                 prompt = (
-                    f"{build_system_prompt()}\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
+                    f"{build_system_prompt(cmo_mode=argo_cmo.is_active(chat_id))}"
+                    f"\n\n{_NO_TOOLS_CONSTRAINT}\n\n"
                     f"Conversation so far:\n{convo}\n\n"
                     f"{profile.name()}: {final_content}\n\nArgo:"
                 )
@@ -586,165 +717,57 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
         except observe.argo_guard.DailyBudget.BudgetExceeded:
             # Hard daily cap hit: stop immediately, don't try other models.
             _note_incident("budget_exceeded", "daily call budget reached")
-            return ("Argo's hit its daily call budget, taking a breather. "
-                    "Back tomorrow (or raise the cap).")
+            budget_text = ("Argo's hit its daily call budget, taking a breather. "
+                           "Back tomorrow (or raise the cap).")
+            # Persist this turn too (same reason as the error path below): else the
+            # next message has no memory Argo said it was taking a breather.
+            argo_memory.record_many(chat_id, [
+                (profile.name(), log_user_text),
+                ("Argo", budget_text),
+            ])
+            return budget_text
         except Exception as exc:
             last_error = exc
             if tool_capable:
                 tooled_failed = True
     _note_incident("model_failure", f"reaching the model: {last_error}", str(last_error))
-    return f"(Argo hit an error reaching the model: {last_error})"
+    error_text = f"(Argo hit an error reaching the model: {last_error})"
+    # Persist the failed turn too. Otherwise the next message ("why this error?")
+    # loads a history with neither the user's question nor this error reply, and Argo
+    # answers "what error?" -- amnesia about something it sent one turn ago. Mirrors
+    # the success-path record_many above so an errored turn survives like any other.
+    argo_memory.record_many(chat_id, [
+        (profile.name(), log_user_text),
+        ("Argo", error_text),
+    ])
+    return error_text
 
 
 # --- Claim<->receipt gate -------------------------------------------------
-# A reply can CLAIM an action the model never took: "opening a PR" with no
-# propose_change, "I read the link" with no fetch, "reply CONFIRM" with nothing
-# staged. tool_events is the receipt -- the tools that actually fired this turn
-# (argo_observe.chat_with_mcp). A claim with no backing tool in the receipt is a
-# phantom and must never reach the user. _classify_claim does the detection;
-# _generate_reply re-prompts the model once for the doable-in-turn classes
-# (PR/CONFIRM) before falling back to _guard_phantom_send's honest suppression.
-
-# Project tools that produce a real artifact (legacy class, kept verbatim).
-_PROJECT_TOOLS = frozenset({
-    "new_project", "add_project", "project_too_complex", "recommend_project",
-    "get_latest_project", "scaffold_project", "rehearse_project",
-})
-# Tools that back a PR claim, a read/link claim, and a CONFIRM prompt.
-_PR_TOOLS = frozenset({"propose_change"})
-_LINK_READ_TOOLS = frozenset({
-    "web_fetch", "study_url", "github_read_file", "github_list",
-    "verify_feed", "read_findings", "read_self", "read_taste",
-})
-_HEAL_TOOLS = frozenset({"reregister_webhook", "refetch_signals"})
-
-_PHANTOM_CLAIM_RE = re.compile(
-    r"captured your idea"
-    r"|putting (a|the|your) project together"
-    r"|(sending|sent|drafting|building|shaping)\b[^.!?\n]{0,40}\b(proposal|project)\b",
-    re.IGNORECASE)
-# "I'm opening a PR", "I'll open the PR", "I put up a PR", "the PR is up". The
-# first-person lead (I/we/let me) is what separates an action CLAIM from PR
-# workflow ADVICE ("opening a PR for review involves..."), which must NOT trip.
-_PR_CLAIM_RE = re.compile(
-    r"\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,18}"
-    r"\b(?:open(?:ed|ing)?|draft(?:ed|ing)?|submit(?:ted|ting)?|rais(?:e|ed|ing)"
-    r"|creat(?:e|ed|ing)|put(?:ting)? up)\b[^.!?\n]{0,30}\b(?:PR|pull request)\b"
-    r"|\b(?:PR|pull request)\b[^.!?\n]{0,15}\b(?:is now|is|has been)\s+"
-    r"(?:open|opened|ready|drafted|submitted|up|live)\b"
-    # PR used as a verb on a specific object: "I'll PR it", "I'm gonna PR this".
-    # Object is a pronoun (it/this/that/them/those) -- NOT bare "a"/"the"/"in",
-    # which over-match prose like "we PR the changes via the dashboard".
-    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,20}"
-    r"\bPR(?:'?d|ing)?\b\s+(?:it|this|that|them|those)\b"
-    # Writing a repo file is a propose_change action: "I'll add the feed to
-    # feeds.json", "I'm editing feeds.json". (feeds live in the repo.)
-    r"|\b(?:I'?m|I'?ve|I'?ll|I|we|let me|lemme)\b[^.!?\n]{0,35}"
-    r"\b(?:add(?:ed|ing)?|edit(?:ed|ing)?|updat(?:e|ed|ing)?|commit(?:ted|ting)?"
-    r"|writ(?:e|ing)|stag(?:e|ed|ing)|push(?:ed|ing)?|put(?:ting)?)\b"
-    r"[^.!?\n]{0,40}\bfeeds\.json\b",
-    re.IGNORECASE)
-# "I read/checked/fetched the link", "I looked it up", "the page says", "per URL".
-_LINK_READ_CLAIM_RE = re.compile(
-    r"\bI(?:'ve| have)?\s+(?:just\s+)?(?:read|checked|looked at|reviewed|fetched"
-    r"|pulled|opened|visited|skimmed)\b[^.!?\n]{0,40}\b(?:link|page|article|url"
-    r"|site|repo|file|docs?|post|paper|release)\b"
-    r"|\bI(?:'ve| have)?\s+(?:just\s+)?(?:looked it up|looked up|checked the latest"
-    r"|did some digging|dug into it|searched (?:for|online))\b"
-    r"|\bthe (?:page|article|link|docs?|file|repo|post|paper|release)\b"
-    r"[^.!?\n]{0,20}\b(?:says?|shows?|states?|reads?|confirms?|mentions?)\b"
-    r"|\b(?:per|according to)\s+(?:https?://|the\s)",
-    re.IGNORECASE)
-# Model typing the CONFIRM ritual itself ("reply CONFIRM").
-_CONFIRM_PROMPT_RE = re.compile(
-    r"\b(?:reply|say|send|type|respond(?: with)?|hit)\b[^.!?\n]{0,15}\bCONFIRM\b",
-    re.IGNORECASE)
-# An action mentioned AFTER one of these is being OFFERED, not claimed ("I can
-# open a PR if you want"), or honestly declined ("I can't open a PR").
-_NONCOMMITTAL_RE = re.compile(
-    r"\b(?:can|can't|cannot|could|would|should|may|might|able to|happy to"
-    r"|want me to|do you want|shall i|if you)\b",
-    re.IGNORECASE)
-
-# What _classify_claim hands back about an unbacked claim. reattemptable=True means
-# the action is doable in one turn (PR/CONFIRM), so _generate_reply re-prompts the
-# model with gap_note before suppressing; else replacement is sent as-is.
-_Violation = namedtuple(
-    "_Violation", "reattemptable replacement gap_note incident_kind incident_sig")
-
-_PROJECT_NUDGE = ("hang on, I didn't actually build anything yet. say 'give me a "
-                  "proposal' and I'll ship one for real.")
-_PR_NUDGE = ("correction: I haven't actually opened a PR -- no propose_change ran. "
-             "Say 'propose it' and I'll open a real one for you to merge.")
-_READ_NUDGE = ("correction: I didn't actually fetch that -- no read tool ran, so I "
-               "won't pretend I saw it. Want me to pull it up for real?")
-_CONFIRM_NUDGE = ("correction: there's nothing staged behind a CONFIRM. Tell me "
-                  "what to do (e.g. 'reregister webhook') and I'll stage it for real.")
-
-_PR_GAP = ("\n\n[system note: you said you'd open a PR but no propose_change fired "
-           "this turn. Call propose_change now, or state the EXACT blocker (e.g. a "
-           "missing ARGO_PROPOSE_TOKEN, via check_config). Do NOT repeat the claim "
-           "without calling the tool.]")
-_CONFIRM_GAP = ("\n\n[system note: you told the user to reply CONFIRM but you "
-                "staged nothing (no reregister_webhook/refetch_signals call). Call "
-                "the heal tool now so there's something behind CONFIRM, or don't "
-                "ask for CONFIRM.]")
+# The anti-bluff / phantom-send gate (classify, suppress, name the PR blocker,
+# the regexes/constants) lives in argo_bluff now -- one cohesive seam out of this
+# server, with no Telegram or model dependency. These thin wrappers keep the exact
+# names _generate_reply and the tests (test_anti_bluff_pr / test_webhook_confirm_gate)
+# use, and forward this module's MCP_SERVERS global (the patch point tests override),
+# _note_incident (also patched), and the module logger -- so argo_bluff needs no
+# knowledge of the override and there's no circular import. Re-export the regex and
+# the nudge text the tests reference directly.
+_PR_CLAIM_RE = argo_bluff._PR_CLAIM_RE
+_PR_NUDGE = argo_bluff._PR_NUDGE
+_claim_unbacked = argo_bluff.claim_unbacked
 
 
-def _claim_unbacked(claim_re, reply):
-    """True if claim_re matches reply somewhere the match span carries NO
-    non-committal marker, so an offer/decline ('I can open a PR if you want',
-    'I can't open a PR') doesn't count. The window spans the match itself (the
-    claim is first-person-anchored, so 'can'/'could'/etc. sit inside it) plus a
-    few leading chars for a marker that immediately precedes the subject."""
-    for m in claim_re.finditer(reply):
-        window = reply[max(0, m.start() - 4):m.end()]
-        if not _NONCOMMITTAL_RE.search(window):
-            return True
-    return False
+def _pr_blocker():
+    return argo_bluff.pr_blocker(MCP_SERVERS)
 
 
 def _classify_claim(reply, tool_events):
-    """Return a _Violation if the reply makes an action-claim no tool in tool_events
-    backs, else None. Ordered: project -> PR -> link/read -> CONFIRM."""
-    fired = set(tool_events)
-    if not (fired & _PROJECT_TOOLS) and _PHANTOM_CLAIM_RE.search(reply):
-        return _Violation(False, _PROJECT_NUDGE, None, "phantom_send",
-                          "reply claimed a proposal but no project tool fired")
-    if not (fired & _PR_TOOLS) and _claim_unbacked(_PR_CLAIM_RE, reply):
-        return _Violation(True, _PR_NUDGE, _PR_GAP, "phantom_claim",
-                          "reply narrated a PR but propose_change never fired")
-    if not (fired & _LINK_READ_TOOLS) and _claim_unbacked(_LINK_READ_CLAIM_RE, reply):
-        return _Violation(False, _READ_NUDGE, None, "phantom_claim",
-                          "reply claimed it read a source but no read tool fired")
-    if _CONFIRM_PROMPT_RE.search(reply) and not (fired & _HEAL_TOOLS):
-        staged = None
-        try:  # late import + swallow: observability never breaks a chat turn
-            import argo_mcp_server
-            staged = argo_mcp_server.pending_heal_action()
-        except Exception:
-            staged = None
-        if staged is None:
-            return _Violation(True, _CONFIRM_NUDGE, _CONFIRM_GAP, "phantom_claim",
-                              "reply asked the user to reply CONFIRM with nothing staged")
-    return None
+    return argo_bluff.classify_claim(reply, tool_events, MCP_SERVERS)
 
 
 def _guard_phantom_send(reply, tool_events):
-    """Terminal claim<->receipt backstop: if the reply makes an action-claim no tool
-    backs (opened a PR / read a link / asked for CONFIRM with nothing staged),
-    replace the false claim with an honest correction and log it. _generate_reply
-    re-prompts the doable classes (PR/CONFIRM) once before this fires; the
-    deterministic routes (FIX/EVOLVE/CONFIRM gates) open real PRs and never pass
-    through here."""
-    v = _classify_claim(reply, tool_events)
-    if v is None:
-        return reply
-    log.warning("phantom claim suppressed: %s (events=%s)",
-                v.incident_sig, tool_events or "none")
-    _note_incident(v.incident_kind, v.incident_sig,
-                   f"events={tool_events or 'none'}; reply={reply[:120]}")
-    return v.replacement
+    return argo_bluff.guard_phantom_send(
+        reply, tool_events, MCP_SERVERS, _note_incident, log)
 
 
 def _llm_reply(chat_id, user_text):
@@ -930,205 +953,56 @@ def _select_latest_project(project_id=None):
     return argo_rating.select_latest_project(PROJECTS_LOG, project_id)
 
 
-def _download_telegram_file(file_id):
-    """Download any Telegram file by file_id. Returns (bytes, file_path) or
-    (None, None). Two steps: getFile to resolve a CDN file_path, then download
-    from the file CDN — both need the token."""
-    import urllib.request
-
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not file_id or not token:
-        return None, None
-    ctx = argo_http.tls_context()
-    try:
-        api = f"https://api.telegram.org/bot{token.strip()}/getFile?file_id={file_id}"
-        with urllib.request.urlopen(api, timeout=15, context=ctx) as r:
-            path = json.loads(r.read().decode()).get("result", {}).get("file_path")
-        if not path:
-            return None, None
-        dl = f"https://api.telegram.org/file/bot{token.strip()}/{path}"
-        with urllib.request.urlopen(dl, timeout=30, context=ctx) as r:
-            return r.read(), path
-    except Exception as exc:
-        log.warning("telegram file download failed: %s", exc)
-        return None, None
+def _set_project_outcome(shipped, project_id=None):
+    return argo_rating.set_project_outcome(PROJECTS_LOG, shipped, project_id)
 
 
-def _download_telegram_photo(msg):
-    """Download the largest photo in a Telegram message. Returns (bytes,
-    media_type) or (None, None)."""
-    # Telegram delivers an image two ways:
-    #   - "photo" (compressed, via the image picker): msg['photo'] = [sizes...]
-    #   - "document" (sent as a FILE, common on desktop / to keep quality):
-    #     msg['document'] = {file_id, mime_type: 'image/...'}
-    # We must handle BOTH, or a screenshot sent as a file is silently dropped.
-    file_id = None
-    media = None
-    photos = msg.get("photo") or []
-    doc = msg.get("document") or {}
-    if photos:
-        file_id = photos[-1].get("file_id")  # array of sizes; last is largest
-    elif doc and str(doc.get("mime_type", "")).startswith("image/"):
-        file_id = doc.get("file_id")
-        media = doc.get("mime_type")
-    data, path = _download_telegram_file(file_id)
-    if data is None:
-        return None, None
-    # Prefer the document's declared mime_type; else infer from the path.
-    if not media:
-        media = "image/png" if path.lower().endswith(".png") else "image/jpeg"
-    return data, media
+# The Telegram media pipeline (download a file/photo, save it, run a photo or
+# document turn through the brain) lives in argo_media now -- one cohesive seam
+# out of this server, pure of the chat routing. These thin wrappers keep the exact
+# names handle_update and the tests (test_files / test_image_routing) use, and
+# forward this module's own functions/globals resolved at call time -- the patch
+# points tests override (_download_telegram_file, _download_telegram_photo,
+# _generate_reply, FILES_DIR) -- so argo_media never imports argo_webhook and there
+# is no circular import.
 
-
-def _handle_photo(chat_id, msg):
-    """A screenshot/image: SEE it inside the conversation and respond to what the
-    user actually wants. The image goes through Argo's normal tool-enabled brain
-    (history + MCP tools), so it can react, identify, brainstorm, look things up --
-    and, when it JUDGES the image is genuinely design/product inspiration, call
-    save_taste_signal itself. No longer force-converted into a 'taste lesson'; no
-    longer silently dropped."""
-    import base64
-
-    caption = msg.get("caption", "") or ""
-    img, media = _download_telegram_photo(msg)
-    if img is None:
-        send_telegram.send_message(
-            "got an image but couldn't pull it down, mind resending?")
-        return
-
-    # Anthropic image block + a text block carrying the caption (or a neutral note
-    # so the model knows there was none). Mirrors observe.describe_image's shape.
-    content = [
-        {"type": "image", "source": {
-            "type": "base64", "media_type": media,
-            "data": base64.b64encode(img).decode(),
-        }},
-        {"type": "text",
-         "text": caption or "[the user sent this image with no caption]"},
-    ]
-    log_user_text = f"[image]{(' ' + caption) if caption else ''}"
-    try:
-        reply = _generate_reply(chat_id, content, log_user_text,
-                                route_text=caption, anthropic_only=True)
-    except Exception as exc:
-        send_telegram.send_message(f"saw the image but couldn't process it: {exc}")
-        return
-    if reply is None:
-        # No vision-capable (Anthropic) model configured this turn. Still record
-        # the user's image turn so the gap shows up in history.
-        _append_turn(chat_id, profile.name(), log_user_text)
-        no_vision_msg = ("got an image but can't see it right now "
-                         "(no vision model configured). mind describing it, "
-                         "or resending in a bit?")
-        _append_turn(chat_id, "Argo", no_vision_msg)
-        send_telegram.send_message(no_vision_msg)
-        return
-    send_telegram.send_message(reply)
-
-
-# Files Argo reads inline as text, by extension (Telegram clients' mime types
-# are unreliable for these). Anything else non-PDF is saved but not parsed.
-_TEXT_EXTS = frozenset({
-    ".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".toml", ".xml",
-    ".py", ".js", ".ts", ".html", ".css", ".sh", ".log",
-})
-_MAX_FILE_CHARS = 12000  # keep a huge file from blowing the prompt/budget
-_MAX_FILE_BYTES = 19 * 1024 * 1024  # Telegram's bot-API download cap is 20MB
-
-# Re-exported so tests can patch wh.FILES_DIR; helpers read it at call time.
+# Re-exported so tests can patch wh.FILES_DIR; the wrapper reads it at call time.
 FILES_DIR = argo_paths.FILES_DIR
 
 
+def _download_telegram_file(file_id):
+    return argo_media.download_telegram_file(file_id)
+
+
+def _download_telegram_photo(msg):
+    return argo_media.download_telegram_photo(msg, download_file=_download_telegram_file)
+
+
 def _save_incoming_file(name, data):
-    """Persist a user-sent file into FILES_DIR (point ARGO_FILES_DIR at the
-    Railway volume so it survives redeploys). Returns the saved Path. The name
-    is sanitized to a safe basename and uniquified, never overwritten."""
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "file").name) or "file"
-    files_dir = Path(FILES_DIR)
-    files_dir.mkdir(parents=True, exist_ok=True)
-    dest = files_dir / safe
-    n = 1
-    while dest.exists():
-        dest = files_dir / f"{Path(safe).stem}-{n}{Path(safe).suffix}"
-        n += 1
-    dest.write_bytes(data)
-    return dest
+    return argo_media.save_incoming_file(name, data, FILES_DIR)
+
+
+def _handle_photo(chat_id, msg):
+    argo_media.handle_photo(
+        chat_id, msg,
+        send_message=send_telegram.send_message,
+        download_photo=_download_telegram_photo,
+        generate_reply=_generate_reply,
+        append_turn=_append_turn,
+        user_name=profile.name(),
+    )
 
 
 def _handle_document(chat_id, msg):
-    """A non-image file (PDF, notes, csv, code...): download it, SAVE it to
-    FILES_DIR, and read it through the normal history-aware brain. Previously
-    these fell through the text guard and were silently dropped — the user
-    sent Argo a file and got nothing back."""
-    import base64
-
-    doc = msg.get("document") or {}
-    caption = msg.get("caption", "") or ""
-    name = doc.get("file_name") or "file"
-    if (doc.get("file_size") or 0) > _MAX_FILE_BYTES:
-        send_telegram.send_message(
-            f"{name} is over Telegram's 20MB bot limit so I can't pull it "
-            "down. mind sending a smaller version or a link?")
-        return
-    data, _ = _download_telegram_file(doc.get("file_id"))
-    if data is None:
-        send_telegram.send_message(
-            f"got {name} but couldn't pull it down, mind resending?")
-        return
-    try:
-        saved_note = f"saved to {_save_incoming_file(name, data)}"
-    except OSError as exc:
-        log.warning("could not save incoming file %s: %s", name, exc)
-        saved_note = "could not be saved to disk"
-
-    mime = str(doc.get("mime_type") or "")
-    suffix = Path(name).suffix.lower()
-    caption_note = caption or "[no caption -- react to the file]"
-    anthropic_only = False
-    if mime == "application/pdf" or suffix == ".pdf":
-        # Claude reads PDFs natively via a document block (vision models only).
-        anthropic_only = True
-        content = [
-            {"type": "document", "source": {
-                "type": "base64", "media_type": "application/pdf",
-                "data": base64.b64encode(data).decode(),
-            }},
-            {"type": "text",
-             "text": f"[the user sent this PDF: {name}, {saved_note}] "
-                     f"{caption_note}"},
-        ]
-    elif mime.startswith("text/") or suffix in _TEXT_EXTS:
-        body = data.decode("utf-8", errors="replace")
-        clipped = ""
-        if len(body) > _MAX_FILE_CHARS:
-            body = body[:_MAX_FILE_CHARS]
-            clipped = ", clipped here because it's long"
-        content = (f"[the user sent a file: {name}, {saved_note}{clipped}]\n"
-                   f"---\n{body}\n---\n{caption_note}")
-    else:
-        content = (f"[the user sent a file you can't read inline: {name} "
-                   f"({mime or 'unknown type'}), {saved_note}. acknowledge it "
-                   f"honestly and ask what they want done with it] {caption_note}")
-
-    log_user_text = f"[file: {name}]{(' ' + caption) if caption else ''}"
-    try:
-        reply = _generate_reply(chat_id, content, log_user_text,
-                                route_text=caption,
-                                anthropic_only=anthropic_only)
-    except Exception as exc:
-        send_telegram.send_message(f"saved {name} but couldn't read it: {exc}")
-        return
-    if reply is None:
-        # PDFs need a Claude model; or no model is configured at all. Still
-        # record the turn so the gap shows up in history.
-        _append_turn(chat_id, profile.name(), log_user_text)
-        no_model_msg = (f"saved {name}, but I can't read it right now (no "
-                        "usable model configured). mind telling me what's in "
-                        "it, or resending in a bit?")
-        _append_turn(chat_id, "Argo", no_model_msg)
-        send_telegram.send_message(no_model_msg)
-        return
-    send_telegram.send_message(reply)
+    argo_media.handle_document(
+        chat_id, msg,
+        send_message=send_telegram.send_message,
+        download_file=_download_telegram_file,
+        save_file=_save_incoming_file,
+        generate_reply=_generate_reply,
+        append_turn=_append_turn,
+        user_name=profile.name(),
+    )
 
 
 def handle_update(update):
@@ -1144,6 +1018,25 @@ def handle_update(update):
     # latter way never reaches vision.
     doc = msg.get("document") or {}
     is_image = bool(msg.get("photo")) or str(doc.get("mime_type", "")).startswith("image/")
+
+    # Single chokepoint for acted-on-push linkage: a genuine user turn of ANY form
+    # (image, file, or text -- including the deterministic 1-10 / SELECT / REHEARSE
+    # replies that return before _generate_reply) links to the most recent open
+    # push here, BEFORE the deterministic-vs-LLM fork, so act_on_rate counts every
+    # reply, not just the LLM-handled ones. Best-effort -- never block the reply.
+    # Link on the Telegram message's SEND time ('date', unix seconds), not this
+    # webhook's PROCESSING time: a turn the user sent BEFORE a push was recorded
+    # must not link it just because processing landed after. Fall back to now only
+    # if 'date' is absent.
+    if chat_id is not None and (is_image or doc or text):
+        reply_ts = msg.get("date")
+        if not isinstance(reply_ts, (int, float)):
+            reply_ts = time.time()
+        try:
+            argo_pushes.link_reply(chat_id, reply_ts)
+        except Exception:
+            log.warning("could not link reply to push", exc_info=True)
+
     if chat_id is not None and is_image:
         _handle_photo(chat_id, msg)
         return
@@ -1170,6 +1063,27 @@ def handle_update(update):
     # Kept upstream of the model so a confirmation never reaches the LLM and a
     # heal only runs on an explicit human okay.
     word = text.strip().upper()
+
+    # /cmo gate (B-007 demand test): toggle the per-chat CMO role lens. Deterministic
+    # and upstream of the model like the other gates, so the toggle is exact and the
+    # confirmation never reaches the LLM. Only the LEADING /cmo token fires it (a
+    # message that merely CONTAINS "cmo" falls through to the model); a Telegram
+    # group sends "/cmo@botname", so strip an @suffix off the first token. Bare /cmo
+    # or "/cmo on" activates; "/cmo off" (also stop/exit/normal) deactivates.
+    parts = text.strip().split()
+    if parts and parts[0].split("@", 1)[0].lower() == "/cmo":
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg in ("off", "stop", "exit", "normal"):
+            argo_cmo.set_active(chat_id, False)
+            send_telegram.send_message(_clean_reply("CMO lens off, back to normal."))
+        else:
+            # bare /cmo or "/cmo on" (and any other arg) activates.
+            argo_cmo.set_active(chat_id, True)
+            send_telegram.send_message(_clean_reply(
+                "CMO lens on. I'll reason as your CMO until you send /cmo off. "
+                "Heads up: this is judgment, not live marketing data."))
+        return
+
     if word in ("CONFIRM", "CANCEL"):
         import argo_mcp_server
         if word == "CANCEL":
@@ -1233,6 +1147,48 @@ def handle_update(update):
             send_telegram.send_message(argo_evolve.accept_pending())
         return
 
+    # STATUS gate (H3.3 ambient status): a read-only "what's in flight / needs
+    # attention" view over the stores Argo already keeps (predictions, the
+    # evolution ledger, the diagnostic fix-proposal ledger, staged gates, open
+    # decisions) with a who-acts-next classifier (needs-you / agent-can-act /
+    # blocked). Deterministic and upstream of the model like the other gates, so
+    # the answer never depends on the LLM choosing a tool, and plain text via the
+    # argo_status renderer. Read-only: it reports state, never mutates a store.
+    if word == "STATUS":
+        import argo_status
+        send_telegram.send_message(_clean_reply(argo_status.render()))
+        return
+
+    # PROACTIVE gate (F6): the user tunes how rarely Argo pushes unprompted. Bare
+    # "PROACTIVE" reports the current base threshold + the effective one (auto-
+    # dialed-up when the recent act-on-rate is low) + that rate; "PROACTIVE <n>"
+    # (0..1) sets the base. Deterministic and upstream of the model, like the other
+    # gates, so tuning is exact and never depends on the LLM. Plain text only.
+    if word == "PROACTIVE" or word.startswith("PROACTIVE "):
+        arg = text.strip().split(maxsplit=1)
+        if len(arg) == 1:
+            base = argo_pushes.get_threshold()
+            eff = argo_pushes.effective_threshold()
+            rate = argo_pushes.act_on_rate()
+            send_telegram.send_message(
+                f"Proactiveness threshold is {base:.2f} (effective {eff:.2f} after "
+                f"your recent act-on-rate of {int(round(rate * 100))}%). Higher means "
+                "I push less, only the higher-stakes things. Send PROACTIVE 0.5 to "
+                "raise the bar, PROACTIVE 0.1 to hear more.")
+            return
+        try:
+            stored = argo_pushes.set_threshold(arg[1])
+        except (ValueError, TypeError):
+            send_telegram.send_message(
+                "Give me a number between 0 and 1, like PROACTIVE 0.4. Higher means "
+                "I push less.")
+            return
+        send_telegram.send_message(
+            f"Done. Proactiveness threshold is now {stored:.2f}. "
+            + ("I'll only push higher-stakes things." if stored >= 0.5
+               else "I'll push a bit more freely."))
+        return
+
     # SELECT gate: the user commits to a project. Bare "SELECT" locks in the
     # latest; "SELECT P-00x" locks in a specific candidate (e.g. the one
     # recommend_project named). Then Rehearse stress-tests the bet BEFORE handing
@@ -1293,6 +1249,67 @@ def handle_update(update):
         except Exception as exc:
             send_telegram.send_message(
                 f"Couldn't rehearse that ({type(exc).__name__}). Try again in a sec.")
+        return
+
+    # SHIPPED / DROPPED gate: the human grades the outcome of a committed bet,
+    # closing the judgment loop. The dated prediction recorded when this bet was
+    # rehearsed is scored against this on the daily score_due run -- a shipped bet
+    # moves its SHIP/REVISE verdict-class belief up, a dropped one moves it down.
+    # Deterministic and upstream of the model, like SELECT/REHEARSE/CONFIRM. Matched
+    # strictly (exact word or "<WORD> P-NNN") so casual prose like "shipped it"
+    # falls through to the model instead of hijacking a natural sentence.
+    if word == "SHIPPED" or re.fullmatch(r"SHIPPED P-\d+", word):
+        requested = word.split(maxsplit=1)[1] if " " in word else None
+        pid, state = _set_project_outcome(True, requested)
+        if pid and state == "pending":
+            msg = f"Love it. Logged {pid} as shipped, and that grades my own call on it."
+        elif pid and state == "scored":
+            msg = (f"Logged {pid} as shipped. I'd already graded my call on this "
+                   "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first, then tell me SHIPPED.")
+        elif pid:
+            msg = (f"Logged {pid} as shipped. I don't have a live call of my own "
+                   "to grade on this one.")
+        elif requested:
+            msg = f"Couldn't find {requested} to mark shipped."
+        else:
+            msg = "Nothing selected to mark shipped yet. Pick one with SELECT first."
+        send_telegram.send_message(msg)
+        return
+    if word == "DROPPED" or re.fullmatch(r"DROPPED P-\d+", word):
+        requested = word.split(maxsplit=1)[1] if " " in word else None
+        pid, state = _set_project_outcome(False, requested)
+        if pid and state == "pending":
+            msg = (f"Okay, logged {pid} as dropped. That grades my call on it too, "
+                   "no hard feelings.")
+        elif pid and state == "scored":
+            msg = (f"Logged {pid} as dropped. I'd already graded my call on this "
+                   "one, so that grade stands.")
+        elif pid and state == "uncommitted":
+            msg = (f"{pid} isn't a committed bet yet, so there's nothing of mine to "
+                   "grade. SELECT it first if you want me to track it.")
+        elif pid:
+            msg = (f"Logged {pid} as dropped. I don't have a live call of my own "
+                   "to grade on this one.")
+        elif requested:
+            msg = f"Couldn't find {requested} to drop."
+        else:
+            msg = "Nothing selected to drop yet."
+        send_telegram.send_message(msg)
+        return
+
+    # RECEIPTS gate (F5): surface Argo's graded track record -- recent calls and how
+    # reality graded them, plus the build-call calibration number(s) that clear the
+    # n-floor. Deterministic and upstream of the model, like the other gates, so the
+    # receipt is read straight from the stores (argo_predictions + argo_calibration)
+    # and never a number the LLM narrates. Renders HONESTLY when sparse: "no graded
+    # calls yet" / "insufficient data (n<4)" rather than a fabricated record. Plain
+    # text via _clean_reply, like every surface.
+    if word in ("RECEIPTS", "TRACK RECORD"):
+        import argo_receipts
+        send_telegram.send_message(_clean_reply(argo_receipts.track_record()))
         return
 
     # Pasted-an-existing-project gate: if she pastes back a project Argo already
@@ -1416,7 +1433,7 @@ def _health_payload():
         payload["performance"] = {
             k: perf.get(k) for k in (
                 "projects_total", "projects_rated", "mean_energy",
-                "energy_trend", "tripwire_seen", "tripwire_settled")
+                "energy_trend", "tripwire_seen", "tripwire_settled", "calibration")
         }
     except Exception:
         payload["performance"] = None
@@ -1444,6 +1461,55 @@ def create_app():
     @app.get("/")
     def health():
         return jsonify(_health_payload()), 200
+
+    @app.post("/push")
+    def push():
+        """Gate, then record, a proactive push onto THIS process's volume, bearer-gated.
+
+        Placement triad: trigger = the proactive send (argo_project/argo_watch) on
+        GitHub Actions, which has no access to the Railway volume; filesystem = the
+        Railway volume's argo_pushes.PUSHES_PATH + PROACTIVE_PATH, read/written HERE
+        (the gate reads the act-on-rate + the user's threshold, both on the volume;
+        record writes the row); consumer = the SEND DECISION -- this handler returns
+        suppressed=True so the Actions caller (post_to_webhook) skips the Telegram
+        send, and the webhook reader (link_reply, then act_on_rate). All three are
+        this one in-process spot on the volume, the only place act_on_rate and the
+        threshold are both readable; the Actions side has neither, which is exactly
+        why the gate lives here and the verdict is bridged back over this POST.
+
+        F6 gate: a push whose stakes*confidence is below the effective threshold
+        (base, auto-dialed-up on a low act-on-rate) is SUPPRESSED -- NOT recorded
+        (a suppressed push was never sent, so it must not enter act_on_rate's
+        denominator) -- and the caller is told not to send. The gate is evaluated
+        BEFORE record so the suppression decision sees the act-on-rate as it stood
+        for prior pushes, not skewed by this one.
+
+        Auth: the same bearer token as /mcp (ARGO_MCP_TOKEN). Only this write route
+        is gated; the health route '/' stays open. Returns {id, suppressed}.
+        """
+        if not ARGO_MCP_TOKEN:
+            return "push disabled", 503
+        header = request.headers.get("Authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if token != ARGO_MCP_TOKEN:
+            return "forbidden", 403
+        payload = request.get_json(force=True, silent=True) or {}
+        kind = payload.get("kind")
+        content = payload.get("content")
+        stakes = payload.get("stakes")
+        confidence = payload.get("confidence")
+        if not kind:
+            return "missing kind", 400
+        allowed, reason = argo_pushes.should_send(kind, stakes, confidence)
+        if not allowed:
+            log.info("push suppressed (kind=%s): %s", kind, reason)
+            return jsonify({"id": None, "suppressed": True}), 200
+        try:
+            pid = argo_pushes.record(kind, content or "")
+        except (OSError, ValueError) as exc:
+            log.warning("push record failed: %s", exc, exc_info=True)
+            return "record failed", 500
+        return jsonify({"id": pid, "suppressed": False}), 200
 
     @app.post("/webhook")
     def webhook():

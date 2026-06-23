@@ -24,7 +24,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
-PROJECTS_LOG = DATA / "argo_projects.json"
+# Env-overridable like the chat/self/taste stores: the live bot appends a new
+# project here every time it proposes one, so point ARGO_PROJECTS_PATH at the
+# Railway volume or each redeploy wipes the log and the project counter resets to
+# P-001 (the "every project is 001" bug). The webhook (interactive proposer) is the
+# volume reader/writer; the scheduled "project" job runs on Actions with its own
+# separate gitignored copy, so this override only persists the webhook's log (the two
+# logs were never shared -- different machines). Home modules re-export this as a
+# module-level constant (the test patch point), so their helpers read the override at
+# call time -- never read argo_paths.PROJECTS_LOG directly inside a helper.
+PROJECTS_LOG = Path(os.environ.get("ARGO_PROJECTS_PATH", str(DATA / "argo_projects.json")))
 SIGNALS_PATH = DATA / "signals.json"
 SCHEDULE_PATH = DATA / "schedule.json"
 STATE_PATH = DATA / "schedule_state.json"
@@ -63,6 +72,16 @@ SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
 # (the test patch points), so their helpers read the override at call time.
 INCIDENTS_PATH = Path(os.environ.get("ARGO_INCIDENTS_PATH", str(DATA / "argo_incidents.json")))
 PROPOSALS_PATH = Path(os.environ.get("ARGO_PROPOSALS_PATH", str(DATA / "argo_proposals.json")))
+# High-watermark for the chat-log weakness miner (argo_chatmine): the count of
+# chat-log turns already mined, so each daily run only scans turns appended SINCE
+# the last run and re-running over the same log records zero new incidents.
+# Volume-overridable for the same reason as the chat log itself -- the miner runs in
+# the webhook's in-process local_loop on the Railway volume, so its watermark must
+# live on the SAME volume the chat log does or every redeploy would re-mine from
+# zero and re-inflate counts. Gitignored. argo_chatmine re-exports this as a
+# module-level constant (the test patch point).
+CHATMINE_WATERMARK_PATH = Path(os.environ.get("ARGO_CHATMINE_WATERMARK_PATH",
+                                              str(DATA / "argo_chatmine_watermark.json")))
 # Frontier-evolution stores (argo_evolve / argo_predictions): the release-watch
 # seen-store, the lever ledger, the single-slot EVOLVE staging file, and the dated
 # prediction store. All written at webhook/scheduler time on the live bot, so point
@@ -83,6 +102,46 @@ PENDING_HEAL_PATH = Path(os.environ.get("ARGO_PENDING_HEAL_PATH",
                                         str(DATA / "argo_pending_heal.json")))
 PREDICTIONS_PATH = Path(os.environ.get("ARGO_PREDICTIONS_PATH",
                                        str(DATA / "argo_predictions.json")))
+# Escalation-broker store (F7): pending owner-decisions a credential-less cloud
+# caller (e.g. a scheduled /vacation run) brokers through Argo's /mcp. ask_owner
+# records one here and Telegrams the question; get_owner_answers matches the
+# owner's chat reply back. Written at /mcp-tool time on the live bot, so point
+# ARGO_PENDING_DECISIONS_PATH at the Railway volume or each redeploy wipes the
+# open decisions (same reason as PENDING_HEAL_PATH). argo_mcp_server re-exports
+# this as a module-level constant (the test patch point).
+PENDING_DECISIONS_PATH = Path(os.environ.get("ARGO_PENDING_DECISIONS_PATH",
+                                             str(DATA / "argo_pending_decisions.json")))
+# Acted-on-push instrumentation (argo_pushes): one row per scheduled/unprompted
+# "push" Argo sends, marked linked when a user reply lands within the window. The
+# proactive senders (project/watch) write it and the webhook links it at chat
+# time on the live bot, so point ARGO_PUSHES_PATH at the Railway volume or each
+# redeploy wipes the act-on-rate history. Gitignored.
+PUSHES_PATH = Path(os.environ.get("ARGO_PUSHES_PATH", str(DATA / "argo_pushes.json")))
+# Usage/cost telemetry (argo_cost): one row per LLM call recording model +
+# provider + normalized token counts, so cost claims (the prompt-caching / Batch
+# wins) become measured, not asserted. Every model call in argo_observe writes a
+# row at chat/scheduler time on the live bot, so point ARGO_COST_LEDGER_PATH at
+# the Railway volume or each redeploy wipes the spend history. Gitignored.
+COST_LEDGER_PATH = Path(os.environ.get("ARGO_COST_LEDGER_PATH",
+                                       str(DATA / "argo_cost_ledger.json")))
+# Steerable-proactiveness setting (argo_pushes.should_send, F6): the single
+# user-tunable base threshold a push's stakes*confidence must clear to send. The
+# webhook writes it when the user runs the PROACTIVE command and the push gate
+# reads it on every send, both in-process on the live bot, so point
+# ARGO_PROACTIVE_PATH at the Railway volume (mirrors ARGO_PUSHES_PATH) or each
+# redeploy resets the user's chosen level. Gitignored. argo_pushes re-exports this
+# as a module-level constant (the test patch point), so its helpers read the
+# override at call time.
+PROACTIVE_PATH = Path(os.environ.get("ARGO_PROACTIVE_PATH", str(DATA / "argo_proactive.json")))
+# CMO role-lens state (argo_cmo, B-007 demand test): per-chat on/off plus a
+# timestamped switch log, so a later manual grade can see whether the builder
+# returns to CMO mode unprompted on a real decision. The webhook writes it when
+# the user runs /cmo and reads it on every reply, both in-process on the live bot,
+# so point ARGO_CMO_MODES_PATH at the Railway volume (mirrors ARGO_PROACTIVE_PATH)
+# or each redeploy resets the lens. Gitignored. argo_cmo re-exports this as a
+# module-level constant (the test patch point), so its helpers read the override
+# at call time.
+CMO_MODES_PATH = Path(os.environ.get("ARGO_CMO_MODES_PATH", str(DATA / "argo_cmo_modes.json")))
 # Files the user sends Argo over Telegram (PDFs, notes, csv, ...). The webhook
 # saves each one here at chat time, so point ARGO_FILES_DIR at the Railway
 # volume or a redeploy wipes them. Gitignored.

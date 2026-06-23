@@ -146,6 +146,12 @@ class PhantomClaimGateTest(unittest.TestCase):
         fake_mcp = types.ModuleType("argo_mcp_server")
         fake_mcp.pending_heal_action = lambda: self.pending
         self.enterContext(mock.patch.dict(sys.modules, {"argo_mcp_server": fake_mcp}))
+        # propose_change IS configured here -- these tests verify the config-OK gate
+        # behavior (suppress the bluff with _PR_NUDGE). The config-BLOCKED path (name
+        # the real blocker, skip the retry) is covered in test_anti_bluff_pr.py.
+        self.enterContext(mock.patch.object(wh, "MCP_SERVERS", [{"name": "argo"}]))
+        self.enterContext(mock.patch.dict(
+            os.environ, {"ARGO_PROPOSE_TOKEN": "t", "ARGO_PROPOSE_REPO": "me/repo"}))
 
     def test_pr_claim_without_propose_change_blocked(self):
         msg = "I'm opening a PR for that now."
@@ -264,13 +270,18 @@ class AntiBluffReattemptTest(unittest.TestCase):
         self.enterContext(mock.patch.dict(sys.modules, {"argo_mcp_server": fake_mcp}))
         # Force exactly one runnable anthropic model, and a pure brain.
         self.enterContext(mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}))
+        # propose_change configured -> _pr_blocker() is clear, so a PR bluff is
+        # reattemptable (the path these tests exercise), not a config dead-end.
+        self.enterContext(mock.patch.object(wh, "MCP_SERVERS", [{"name": "argo"}]))
+        self.enterContext(mock.patch.dict(
+            os.environ, {"ARGO_PROPOSE_TOKEN": "t", "ARGO_PROPOSE_REPO": "me/repo"}))
         self.enterContext(mock.patch.object(wh, "_route_model", lambda t: "claude-x"))
         self.enterContext(mock.patch.object(observe, "resolve_models", lambda: ["claude-x"]))
         self.enterContext(mock.patch.object(
             observe, "provider_for",
             lambda m: {"name": "anthropic", "key_env": "ANTHROPIC_API_KEY",
                        "supports_mcp": True}))
-        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda *a, **kw: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
@@ -330,7 +341,7 @@ class FallbackDegradeNoticeTest(unittest.TestCase):
         # is genuinely tool-less (a test overrides MCP_SERVERS to verify tools-kept).
         self.enterContext(mock.patch.object(observe, "supports_mcp", lambda m: True))
         self.enterContext(mock.patch.object(wh, "MCP_SERVERS", None))
-        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda: "SYS"))
+        self.enterContext(mock.patch.object(wh, "build_system_prompt", lambda *a, **kw: "SYS"))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh, "_clean_reply", lambda s: s))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))

@@ -17,11 +17,12 @@ server can verify inbound requests.
 
 import json
 import os
-import ssl
 import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import argo_http
 
 ROOT = Path(__file__).resolve().parent.parent
 try:
@@ -32,20 +33,11 @@ except ImportError:
     pass
 
 
-def _ctx():
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
-
-
 def _api(token, method, params=None):
     url = f"https://api.telegram.org/bot{token}/{method}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=20, context=_ctx()) as r:
+    with urllib.request.urlopen(url, timeout=20, context=argo_http.tls_context()) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
