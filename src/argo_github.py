@@ -13,9 +13,13 @@ means. Stdlib + argo_http for TLS.
 """
 
 import os
+import shutil
+import subprocess
 import urllib.request
+from pathlib import Path
 
 import argo_http
+import argo_paths
 
 # Repos Argo may read. Comma-separated owner/repo in GITHUB_REPO_ALLOWLIST; "*"
 # (the default) allows ANY repo so Argo can read trending/other repos it surfaces.
@@ -142,3 +146,130 @@ def gh_list(repo, path=""):
     if isinstance(entries, dict):  # a file path, not a dir
         return f"{entries.get('name')} (file, {entries.get('size')} bytes)"
     return "\n".join(f"{e['type']:4s}  {e['name']}" for e in entries) or "(empty)"
+
+
+# --- Local self-comprehension reads -----------------------------------------
+# search_self and the diagnose code-context read the LOCAL checkout (the bytes Argo
+# is actually running), unlike the GitHub-API tools above which read merged main. A
+# local-filesystem read is a new, broader surface, so it is confined SERVER-SIDE --
+# the model is never trusted to "only read the repo". Reads are restricted to source/
+# test/doc files UNDER the repo root; secrets and the data volume (chat logs, the
+# incident ledger with raw exception bodies, tokens) are hard-excluded. A path is the
+# only model-supplied input and it goes through _confined_path before any read.
+MAX_LOCAL_READ_BYTES = 40_000          # a window/snippet, not a whole 90KB module
+_SELFREAD_ROOT = argo_paths.ROOT.resolve()
+_SELFREAD_EXTS = (".py", ".md", ".toml", ".cfg", ".yml", ".yaml")  # NOT .json/.env/logs
+_SELFREAD_DENY_DIRS = ("data", ".git", ".github")  # data volume, git internals, CI secrets
+_SELFREAD_DENY_NAMES = (".env",)       # belt-and-suspenders (also fails the ext allowlist)
+_SEARCH_DIRS = ("src", "tests", "docs")  # where Argo's code/tests/build-log live
+
+
+def _confined_path(path):
+    """Resolve `path` against the repo root and return the safe absolute Path, or None
+    if it escapes the root (../, absolute, symlink-out), hits a denied dir/name, or is
+    not an allowed source extension. The SINGLE chokepoint for every local self-read --
+    read_local_source and code_search's per-hit reads both go through here."""
+    try:
+        candidate = (_SELFREAD_ROOT / str(path)).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # .resolve() collapses ../ and follows symlinks, so a symlink pointing outside the
+    # repo resolves to an outside path and fails this containment check.
+    if not candidate.is_relative_to(_SELFREAD_ROOT):
+        return None
+    parts = candidate.relative_to(_SELFREAD_ROOT).parts
+    if not parts:
+        return None
+    if parts[0] in _SELFREAD_DENY_DIRS or parts[0] in _SELFREAD_DENY_NAMES:
+        return None
+    if candidate.suffix not in _SELFREAD_EXTS:
+        return None
+    return candidate
+
+
+def read_local_source(path, offset=0, limit=0, max_bytes=MAX_LOCAL_READ_BYTES):
+    """Read a source/test/doc file from the LOCAL checkout, confined to the repo's
+    source tree (never .env, data/, .git, or CI). Optional 1-based line window via
+    offset/limit. Capped at max_bytes; returns the text or a refusal string. The one
+    safe local reader -- callers must route every local read through this."""
+    safe = _confined_path(path)
+    if safe is None:
+        return f"Refused: '{path}' is not a readable repo source path."
+    try:
+        text = safe.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        return f"Could not read '{path}': {type(exc).__name__}"
+    if offset or limit:
+        lines = text.splitlines()
+        start = max(0, (offset or 1) - 1)
+        window = lines[start:start + limit] if limit > 0 else lines[start:]
+        if not window:
+            return f"(no lines in that range; file has {len(lines)} lines)"
+        text = "\n".join(window)
+    return _cap_bytes(text, max_bytes) or "(empty file)"
+
+
+def _search_roots():
+    """The existing source dirs to search (never data/.git/.github). Bounds the walk."""
+    return [d for d in _SEARCH_DIRS if (_SELFREAD_ROOT / d).is_dir()]
+
+
+def _code_search_fallback(pattern, max_results):
+    """Stdlib substring search (literal, == ripgrep -F) for hosts without rg -- the
+    likely live case (a minimal Railway image). Walks only the source dirs."""
+    hits = []
+    for root in _search_roots():
+        for p in sorted((_SELFREAD_ROOT / root).rglob("*")):
+            if len(hits) >= max_results:
+                return hits
+            if not p.is_file() or p.suffix not in (".py", ".md"):
+                continue
+            rel = p.relative_to(_SELFREAD_ROOT)
+            try:
+                for i, line in enumerate(
+                        p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                    if pattern in line:
+                        hits.append(f"{rel}:{i}:{line.strip()[:300]}")
+                        if len(hits) >= max_results:
+                            return hits
+            except (OSError, ValueError):
+                continue
+    return hits
+
+
+def code_search(pattern, max_results=40):
+    """Search Argo's OWN source tree for a literal `pattern`, returning up to
+    max_results 'path:line:text' matches. Lets Argo enumerate its own code (every
+    @with_deadline, where opened_at is read, how many tools exist) instead of guessing
+    from a partial read. Fixed-strings over a FIXED root (the repo's src/tests/docs),
+    secrets/data excluded -- the pattern is the only model input and is never a shell
+    arg or a regex. ripgrep if present, else a bounded stdlib walk."""
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return "Refused: empty search pattern."
+    try:
+        max_results = max(1, min(int(max_results), 200))
+    except (TypeError, ValueError):
+        max_results = 40
+    roots = _search_roots()
+    if not roots:
+        return "(no searchable source dirs)"
+    rg = shutil.which("rg")
+    if rg:
+        # No per-file --max-count: enumeration (every @with_deadline) is the point, so
+        # bound the TOTAL by max_results below, not per file. --max-columns guards a
+        # single pathological long line; --max-filesize guards a huge blob.
+        cmd = [rg, "--no-heading", "--line-number", "--color", "never",
+               "--fixed-strings", "--max-filesize", "1M",
+               "--max-columns", "300", "--", pattern, *roots]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                                  cwd=str(_SELFREAD_ROOT))  # never shell=True
+            hits = [ln for ln in proc.stdout.splitlines() if ln.strip()][:max_results]
+        except (subprocess.SubprocessError, OSError):
+            hits = _code_search_fallback(pattern, max_results)
+    else:
+        hits = _code_search_fallback(pattern, max_results)
+    if not hits:
+        return f"No matches for {pattern!r} in {', '.join(roots)}."
+    return "\n".join(hits)

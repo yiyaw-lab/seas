@@ -55,6 +55,8 @@ _DIAGNOSE_PROMPT = (
     "A failure has recurred inside your own code. Here is the incident cluster:\n"
     "kind: {kind}\ncount: {count}\nfingerprint: {fingerprint}\n"
     "recent samples:\n{samples}\n\n"
+    "relevant code pulled from the failing path (best effort; may be empty -- do not "
+    "assume the cause is here, but use it if it helps):\n{code}\n\n"
     "Your source files (you may only name files from this list as suspects):\n{files}\n\n"
     "Reply with ONLY a JSON object, no prose, no markdown, with these keys:\n"
     '  "diagnosis": one plain sentence naming the most likely cause.\n'
@@ -193,6 +195,44 @@ def _parse_json(raw):
         return None
 
 
+def _extract_source_ref(text):
+    """Best effort: pull a repo-relative .py path (+ optional line) from a sample or
+    traceback. Returns (path, line) or (None, None). The path is NEVER trusted -- the
+    caller routes it through the confined reader, which rejects anything outside the
+    source tree -- so a crafted sample can only ever fail to read, not escape."""
+    s = str(text or "")
+    m = re.search(r"((?:src|tests)/[\w./-]+\.py)", s)
+    if m:
+        path = m.group(1)
+    else:
+        b = re.search(r"\b([a-zA-Z_]\w*\.py)\b", s)  # bare basename -> assume src/
+        path = "src/" + b.group(1) if b else None
+    lm = re.search(r"(?:line\s+|:)(\d{1,6})\b", s)
+    return path, (int(lm.group(1)) if lm else None)
+
+
+def _code_context(cluster, window=30):
+    """Best-effort snippet of the failing code from the LOCAL checkout, via the confined
+    reader. Degrades to '' (today's filename-only prompt) on any miss and NEVER raises --
+    a comprehension aid must not crash diagnose(). Grounds the diagnosis in real bytes
+    instead of reasoning from a stripped log line alone."""
+    try:
+        import argo_github
+        for s in cluster.get("samples", []):
+            path, line = _extract_source_ref(s)
+            if not path:
+                continue
+            offset = max(1, line - window // 2) if line else 1
+            snippet = argo_github.read_local_source(path, offset=offset, limit=window)
+            if snippet and not snippet.startswith(("Refused", "Could not", "(no lines")):
+                where = f" around line {line}" if line else ""
+                return f"{path}{where}:\n{snippet}"
+        return ""
+    except Exception:
+        log.warning("diagnose: code-context lookup failed", exc_info=True)
+        return ""
+
+
 def _diagnose_cluster(cluster):
     """One guarded model call: cluster -> {diagnosis, suspected_files, suggestion,
     confident_enough_to_propose} or None. Routes through argo_observe so the daily
@@ -206,6 +246,7 @@ def _diagnose_cluster(cluster):
         kind=cluster.get("kind"), count=cluster.get("count"),
         fingerprint=cluster.get("fingerprint"),
         samples="\n".join(f"- {s}" for s in cluster.get("samples", [])) or "(none)",
+        code=_code_context(cluster) or "(none found)",
         files="\n".join(_repo_files()) or "(unavailable)")
     try:
         if observe.provider_for(model)["name"] == "anthropic":

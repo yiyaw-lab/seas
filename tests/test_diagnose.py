@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import argo_diagnose as dg
+import argo_github
 import argo_incidents as inc
 import argo_observe as observe
 import argo_self
@@ -225,6 +226,39 @@ class DiagnoseClusterTest(unittest.TestCase):
         with mock.patch.object(observe, "chat_with_mcp", lambda *a, **k: ""):
             self.assertIsNone(dg._diagnose_cluster(self.cluster))
         self.assertEqual(inc.open_clusters(min_count=1, window_hours=999), [])
+
+    def test_code_context_is_added_to_prompt_when_sample_names_a_file(self):
+        # A sample with a source path/line -> the failing code (via the CONFINED reader)
+        # lands in the diagnose prompt, so the model reasons from real bytes not just a log.
+        cluster = {"kind": "tool_error", "count": 4, "fingerprint": "fp",
+                   "samples": ['File "src/argo_observe.py", line 5, in chat']}
+        seen = {}
+
+        def fake_chat(system, messages, model, **kw):
+            seen["prompt"] = messages[0]["content"]
+            return self._GOOD
+        with mock.patch.object(argo_github, "read_local_source",
+                               return_value="FIXTURE_SNIPPET_42"), \
+             mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            dg._diagnose_cluster(cluster)
+        self.assertIn("FIXTURE_SNIPPET_42", seen["prompt"])
+        self.assertIn("src/argo_observe.py", seen["prompt"])
+
+    def test_code_context_degrades_without_crashing_on_read_error(self):
+        # A read failure must NOT crash diagnose(); the prompt falls back to filename-only.
+        cluster = {"kind": "tool_error", "count": 4, "fingerprint": "fp",
+                   "samples": ['File "src/argo_observe.py", line 5']}
+        seen = {}
+
+        def fake_chat(system, messages, model, **kw):
+            seen["prompt"] = messages[0]["content"]
+            return self._GOOD
+        with mock.patch.object(argo_github, "read_local_source",
+                               side_effect=OSError("disk gone")), \
+             mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            out = dg._diagnose_cluster(cluster)
+        self.assertEqual(out["diagnosis"], "d")        # no crash
+        self.assertIn("(none found)", seen["prompt"])  # degraded section
 
 
 if __name__ == "__main__":

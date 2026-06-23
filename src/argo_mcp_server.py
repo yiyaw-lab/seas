@@ -394,6 +394,30 @@ def github_list(repo: str, path: str = "") -> str:
     return argo_github.gh_list(repo, path)
 
 
+@mcp.tool()
+@with_deadline(10)  # pure local read
+def search_self(pattern: str, max_results: int = 40) -> str:
+    """Search YOUR OWN source code for a literal string and get back 'path:line:text'
+    matches. Use this to ground a claim about your own wiring instead of guessing from
+    one partial file read: count something (how many '@with_deadline' decorators, how
+    many '@mcp.tool'), locate where a name is used ('opened_at', 'PROPOSE_BASE'), or
+    find which file defines a function before you github_read_file it in full. Searches
+    your src/tests/docs only; secrets and data are excluded."""
+    return argo_github.code_search(pattern, max_results)
+
+
+@mcp.tool()
+@with_deadline(10)  # pure local read
+def read_incidents() -> str:
+    """Report YOUR OWN recurring operational failures from the incident ledger: each
+    open cluster's kind, count, status, fingerprint, and a sample. Use when asked
+    'what's been breaking / what errors are recurring / what incidents do you have' --
+    so you cite a REAL logged failure, never an invented one. Distinct from read_self
+    (that's your lessons/beliefs). Read-only; samples are redacted of any secrets."""
+    import argo_incidents
+    return argo_incidents.format_for_prompt(limit=12)
+
+
 # --- Phase D: self-status (read-only, autonomy L0) --------------------------
 # Tools that let Argo report its OWN health. Read-only: they observe, never act
 # (self-heal actions are Phase E). Argo can diagnose and tell you what to do.
@@ -1232,10 +1256,14 @@ MAX_PROPOSE_BYTES = 40_000  # per file; keep proposals small + reviewable
 # read what it's allowed to rewrite. Enforce the lockstep the constants' comments claim.
 assert MAX_REPO_READ_BYTES >= MAX_PROPOSE_BYTES
 # The self-modification loops (diagnose fixes, frontier evolution) must never be
-# able to touch their own safety rails: CI (which proves fail->pass), and the
-# budget/breaker guards. A proposal naming one of these is refused before any
-# GitHub write. Prefix match, so the whole .github/ tree is covered.
-PROTECTED_PATHS = (".github/", "src/argo_guard.py")
+# able to touch their own safety rails: CI (which proves fail->pass), the budget/breaker
+# guards, and now argo_github.py -- which holds the ONLY local-filesystem reader
+# (read_local_source/_confined_path) and its containment check. A self-edit that
+# weakened that confinement could make read_local_source/search_self read .env or escape
+# the repo and exfiltrate the propose token, so it is a safety rail like the others. A
+# proposal naming one of these is refused before any GitHub write. Prefix match, so the
+# whole .github/ tree is covered.
+PROTECTED_PATHS = (".github/", "src/argo_guard.py", "src/argo_github.py")
 
 
 def _gh_write(method, path, body):
