@@ -1,5 +1,5 @@
 {
-  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour; the webhook's in-process local scheduler fires the volume-dependent commands (diagnose, frontier, reflect, gaps) the same way. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect' | 'diagnose' | 'frontier' | 'gaps'. frontier (external releases) and gaps (the inward capability-gap proposer) share one evolution ledger, EVOLVE/SKIP gate, and daily nudge budget, so they never nudge more than once a day combined; gaps runs weekly an hour before frontier so its inward proposal gets that day's slot.",
+  "_comment": "Argo delivery schedules as DATA (not workflow code). The hourly schedule-runner workflow calls src/argo_scheduled.py, which fires any entry whose window matches the current UTC hour; the webhook's in-process local scheduler fires the volume-dependent commands (diagnose, frontier, reflect, gaps, pulse) the same way. Add a delivery by adding an entry here (Argo can propose this via a Contents-only PR) -- no workflow edit needed. days: list of 0-6 (Mon=0) or 'daily'. hour: 0-23 UTC. command: 'project' | 'watch' | 'reflect' | 'diagnose' | 'frontier' | 'gaps' | 'pulse'. frontier (external releases) and gaps (the inward capability-gap proposer) share one evolution ledger, EVOLVE/SKIP gate, and daily nudge budget, so they never nudge more than once a day combined; gaps runs weekly an hour before frontier so its inward proposal gets that day's slot. pulse resurfaces a forgotten high-energy project at most once a week (its own internal cooldown + dedup are the real cap; the weekly window here just bounds how often it even looks).",
   "schedules": [
     {
       "name": "Weekly project (Fri)",
@@ -41,6 +41,13 @@
       "days": [2],
       "hour": 16,
       "command": "gaps",
+      "enabled": true
+    },
+    {
+      "name": "Proactive pulse (stale projects, Tue)",
+      "days": [1],
+      "hour": 18,
+      "command": "pulse",
       "enabled": true
     }
   ]
