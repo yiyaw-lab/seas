@@ -46,9 +46,12 @@ log = get_logger(__name__)
 MAX_FETCH_CHARS = 6000  # keep tool results small; this is a scout, not a scraper
 # Repo source reads get a bigger cap than web fetches: Argo must read a whole module
 # to rewrite it with propose_change, so a full read has to cover any proposable file.
-# A BYTE cap (like MAX_PROPOSE_BYTES, defined later) so a full read can never exceed the
-# byte size the propose path will accept -- the two are asserted in lockstep below.
-MAX_REPO_READ_BYTES = 40_000
+# A BYTE cap (like MAX_PROPOSE_BYTES, defined later). Intentionally LARGER than the
+# propose cap: reading is for comprehension (Argo must see a whole big module to reason
+# about it -- the silent 40K cut made it misread its own largest files), while the propose
+# cap stays small to keep PRs reviewable. The assert below keeps read >= propose so a full
+# read still covers any proposable file; raise read, never lower propose.
+MAX_REPO_READ_BYTES = 200_000
 
 # Every tool runs behind a wall-clock DEADLINE well under the MCP client's fixed
 # 300s CallToolRequest budget. The failure we're guarding against: the Anthropic

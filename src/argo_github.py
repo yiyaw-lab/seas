@@ -84,11 +84,25 @@ def gh_api(path, raw=False):
 def _cap_bytes(text, max_bytes):
     """Truncate to at most max_bytes of UTF-8 (not characters), dropping a partial
     trailing multibyte char. Byte-based so the cap matches MAX_PROPOSE_BYTES, which is
-    also a byte limit -- otherwise a non-ASCII full read could exceed the propose cap."""
+    also a byte limit -- otherwise a non-ASCII full read could exceed the propose cap.
+
+    When the text is cut, append a VISIBLE marker so the reader knows it saw only a
+    prefix. Silent truncation was a real misread source: the model reads the head of a
+    big file and reasons as if it saw all of it (e.g. asserting a function does X at
+    import when X actually lives in the unread half). The marker's own bytes are
+    reserved from the budget so the notice is never itself re-truncated and the whole
+    return still fits in max_bytes. For a pathologically small cap that can't hold the
+    marker (test/degenerate only -- real caps are 40K+), fall back to a silent cut."""
     data = text.encode("utf-8")
-    if len(data) <= max_bytes:
+    total = len(data)
+    if total <= max_bytes:
         return text
-    return data[:max_bytes].decode("utf-8", errors="ignore")
+    marker = "\n\n[truncated: showing {kept} of %d bytes -- read with offset to continue]" % total
+    reserve = len(marker.format(kept=total).encode("utf-8"))  # upper bound; kept <= total
+    if max_bytes <= reserve:
+        return data[:max_bytes].decode("utf-8", errors="ignore")
+    head = data[:max_bytes - reserve].decode("utf-8", errors="ignore")
+    return head + marker.format(kept=len(head.encode("utf-8")))
 
 
 def gh_read_file(repo, path, max_bytes, offset=0, limit=0, ref=None):
