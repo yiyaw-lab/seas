@@ -512,6 +512,16 @@ def _recent_turns(chat_id, n=HISTORY_TURNS):
     return argo_memory.recent(chat_id, n)
 
 
+def _earlier_context_block(turns):
+    """Format recalled older turns as a clearly-labeled prefix to the user's current
+    message, so the model can use them but knows they are recalled context, not the
+    live question. Plain text (Argo's output rules: no markdown, no em dashes)."""
+    lines = "\n".join(f"- {t.get('role')}: {(t.get('text') or '').strip()}"
+                      for t in turns)
+    return ("[Possibly relevant things from earlier in our chat (recalled, may not "
+            "apply to what they just said):\n" + lines + "]\n\n")
+
+
 # Words after a period that mean it's a filename/domain, NOT a sentence boundary,
 # so _clean_reply leaves "file.py", "docs.x.ai", "example.com" etc. unspaced.
 _NOT_SENTENCE_AFTER = frozenset((
@@ -616,6 +626,18 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
     # NOTE: acted-on-push linkage now happens once at the top of handle_update
     # (the single chokepoint covering deterministic + image + file + LLM replies),
     # so it is intentionally NOT done here -- linking again would double-count.
+
+    # Long-term recall: surface older turns (outside the recency window) whose words
+    # overlap this message, so a fact from turn 3 isn't lost by turn 15. Query on
+    # log_user_text -- the user's ACTUAL words -- not route_text, which can be a
+    # synthetic routing/recovery note (e.g. the CONFIRM-dead-end system note) that would
+    # recall irrelevant context. Augments only the MODEL-facing content; log_user_text
+    # (what we persist) stays clean, and the system prompt + history are untouched so
+    # prompt-cache prefixes hold.
+    if isinstance(final_content, str) and isinstance(log_user_text, str) and log_user_text.strip():
+        earlier = argo_memory.relevant(chat_id, log_user_text)
+        if earlier:
+            final_content = _earlier_context_block(earlier) + final_content
 
     last_error = None
     tooled_failed = False  # an MCP-capable model errored earlier this turn
