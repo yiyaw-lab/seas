@@ -149,6 +149,60 @@ class IncidentLedgerTest(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(inc.get_meta("_diagnose_meta")["last_nudge_date"], "2026-06-10")
 
+    # --- detail_report: the operator-facing samples behind each count ------
+
+    def test_detail_report_empty_store(self):
+        self.assertEqual(inc.detail_report(), "No open incident clusters.")
+
+    def test_detail_report_surfaces_failing_tool_name_from_signature(self):
+        # Record the way production does (_record_tool_error, argo_observe.py): the tool
+        # NAME lives in the SIGNATURE (-> fingerprint), and the SAMPLE is the bare
+        # message with NO name. detail_report must still surface which tool failed --
+        # so it prints the fingerprint. (This FAILS before the fingerprint fix: the
+        # header would be a nameless "tool_error".)
+        name, detail = "web_fetch", "Error while communicating with MCP server"
+        inc.record_incident("tool_error", f"{name}: {detail}", str(detail)[:200])
+        report = inc.detail_report()
+        self.assertIn("web_fetch", report)              # the failing tool, from the fingerprint
+        self.assertIn("communicating with mcp server", report.lower())  # and the message
+
+    def test_detail_report_disambiguates_two_tools_with_same_message(self):
+        # The core value: two DIFFERENT tools failing with the SAME generic connector
+        # message must not render as byte-identical lines -- the bug the naive
+        # (header = bare kind) version had.
+        msg = "Error while communicating with MCP server"
+        inc.record_incident("tool_error", f"web_fetch: {msg}", msg)
+        inc.record_incident("tool_error", f"github_read_file: {msg}", msg)
+        report = inc.detail_report()
+        self.assertIn("web_fetch", report)
+        self.assertIn("github_read_file", report)
+
+    def test_detail_report_shows_low_rate_cluster_the_funnel_skips(self):
+        # Default min_count=1 surfaces a single occurrence (below the diagnose funnel's
+        # min_count=3), matching what the operator sees on /health -- closing the
+        # see-a-count-but-not-the-cause gap for exactly the low-rate clusters that
+        # never auto-triage. Recorded production-faithfully (name in the signature).
+        inc.record_incident("tool_error", "github_read_file: 502 Bad Gateway", "502 Bad Gateway")
+        self.assertEqual(inc.open_clusters(min_count=3), [])      # funnel would skip
+        self.assertIn("github_read_file", inc.detail_report())   # detail still shows the tool
+
+    def test_detail_report_respects_limit(self):
+        for sig in ("alpha", "bravo", "charlie", "delta"):  # distinct fingerprints
+            inc.record_incident("tool_error", sig, f"sample {sig}")
+        # each cluster header starts "tool_error [<fingerprint>] x<count>"
+        self.assertEqual(inc.detail_report(limit=2).count("tool_error ["), 2)
+
+    def test_detail_report_shows_triage_belief_and_pr(self):
+        key = inc.record_incident("tool_error", "triaged one", "propose_change: 422")
+        inc.mark(key, belief_id="SB-007", pr_number=42)
+        report = inc.detail_report()
+        self.assertIn("belief SB-007", report)
+        self.assertIn("PR #42", report)
+
+    def test_detail_report_never_raises_on_store_error(self):
+        with mock.patch.object(inc, "_load", side_effect=OSError("disk gone")):
+            self.assertEqual(inc.detail_report(), "No open incident clusters.")
+
 
 if __name__ == "__main__":
     unittest.main()
