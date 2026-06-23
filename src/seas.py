@@ -15,6 +15,8 @@ quote-fidelity gate) or honest probes — the model proposes, the gate disposes.
 
 Run:  PYTHONPATH=src python src/seas.py
       PYTHONPATH=src python src/seas.py --dry-run
+      PYTHONPATH=src python src/seas.py --batch            # opt-in: score via Batches API (50% off)
+      PYTHONPATH=src python src/seas.py --batch --dry-run  # assemble + report only, no spend
 """
 import sys
 from pathlib import Path
@@ -32,10 +34,12 @@ import argo_store
 import fetch_signals
 import opportunities
 import seas_finding
+import seas_scoring
 
 
 def main():
     dry = "--dry-run" in sys.argv
+    batch = "--batch" in sys.argv  # opt-in: bulk-score via the Batches API (50% off)
 
     print("\n🌊 SEAS V3 Pipeline\n")
 
@@ -48,8 +52,9 @@ def main():
     unscored = [s for s in signals
                 if all(v == 0 for v in s.get("scores", {}).values())]
     if unscored:
-        print(f"\n── Step 2: scoring {len(unscored)} unscored signal(s) ──")
-        signals = seas_finding.auto_score_signals(signals, dry_run=dry)
+        how = "batch (Batches API, 50% off)" if batch else "per-signal"
+        print(f"\n── Step 2: scoring {len(unscored)} unscored signal(s) [{how}] ──")
+        signals = seas_scoring.auto_score_signals(signals, dry_run=dry, batch=batch)
         if not dry:
             argo_store.save_json(argo_paths.SIGNALS_PATH, signals)
     else:

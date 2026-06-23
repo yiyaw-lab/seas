@@ -27,6 +27,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
+import argo_chatmine
 import argo_incidents
 import argo_paths
 import argo_self
@@ -64,6 +65,21 @@ _DIAGNOSE_PROMPT = (
     "No em dashes. If you cannot point at a real cause, set confident_enough_to_propose "
     "to false and suspected_files to []."
 )
+# Structured-output schema mirroring the prompt's four keys. Enforced on the Anthropic
+# path via output_config so a malformed reply can't silently drop a diagnosis.
+# additionalProperties:false + no numeric/length constraints, to satisfy the API.
+_DIAGNOSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "diagnosis": {"type": "string"},
+        "suspected_files": {"type": "array", "items": {"type": "string"}},
+        "suggestion": {"type": "string"},
+        "confident_enough_to_propose": {"type": "boolean"},
+    },
+    "required": ["diagnosis", "suspected_files", "suggestion",
+                 "confident_enough_to_propose"],
+    "additionalProperties": False,
+}
 
 
 # --- small seams (patched in tests) -----------------------------------------
@@ -108,6 +124,14 @@ def _check_ci(pr_number):
     return argo_mcp_server._check_proposal_ci(pr_number)
 
 
+def _check_reviews(pr_number, seen_ids):
+    """Read external review-bot findings on a PR via the MCP server helper, skipping
+    comment ids already surfaced. Returns {summary, findings}. Lazy import keeps the
+    no-proposals path light."""
+    import argo_mcp_server
+    return argo_mcp_server._check_proposal_reviews(pr_number, seen_ids)
+
+
 # --- proposal ledger --------------------------------------------------------
 
 def _load_proposals():
@@ -130,6 +154,7 @@ def append_proposal(pr_number, url, belief_id, incident_key, head_sha=None):
         "ci_conclusion": None, "merged": False, "state": "open", "head_sha": head_sha,
         "merged_at": None, "deploy_watch_until": None, "notified": False,
         "ci_failed": False, "resolved": False, "last_checked": None,
+        "seen_review_ids": [],
     })
     _save_proposals(items)
     return items[-1]
@@ -184,15 +209,32 @@ def _diagnose_cluster(cluster):
         files="\n".join(_repo_files()) or "(unavailable)")
     try:
         if observe.provider_for(model)["name"] == "anthropic":
-            raw = observe.chat_with_mcp(
-                _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
-                temperature=0.2)
+            try:
+                raw = observe.chat_with_mcp(
+                    _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
+                    temperature=0.2, output_schema=_DIAGNOSE_SCHEMA)
+            except Exception:
+                # Structured-output enforcement is best-effort: if the API rejects the
+                # schema (unsupported model / shape mismatch), fall back to a plain call
+                # so the loop degrades to the tolerant parser instead of going dark.
+                log.warning("diagnose: structured-output call failed; plain retry",
+                            exc_info=True)
+                raw = observe.chat_with_mcp(
+                    _DIAGNOSE_SYSTEM, [{"role": "user", "content": prompt}], model,
+                    temperature=0.2)
         else:
             raw = observe.generate_observations(prompt, model, temperature=0.2)
     except Exception:
         log.error("diagnose: model call failed", exc_info=True)
         return None
-    return _parse_json(raw)
+    parsed = _parse_json(raw)
+    if parsed is None and (raw or "").strip():
+        # A non-empty but unparseable reply means the diagnosis is being dropped on the
+        # floor. Record it so this silent parse-failure class becomes measurable -- the
+        # hook the structured-output prediction is graded against.
+        argo_incidents.record_incident(
+            "model_failure", "diagnose json parse failed", sample=(raw or "")[:240])
+    return parsed
 
 
 def _nudge_budget_left():
@@ -327,12 +369,39 @@ def _fix_text(cluster, diagnosis, suggestion):
             f"can't merge it myself.")
 
 
+def _sanitize(text):
+    """Run external (bot-authored) text through the webhook's canonical plain-text
+    sanitizer so a surfaced finding honors Argo's no-markdown / no-em-dash output
+    rule. Lazy import avoids a module-load cycle with argo_webhook."""
+    import argo_webhook
+    return argo_webhook._clean_reply(text or "")
+
+
+def _first_line(text):
+    """First non-empty line of a finding body."""
+    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+
+
+def _review_text(pr_number, findings):
+    """One plain-text Telegram line summarizing new code-review bot findings. Each
+    finding head is sanitized + trimmed since it carries raw bot markdown."""
+    count = len(findings)
+    heads = "; ".join(_sanitize(_first_line(f.get("body")))[:140] for f in findings[:3])
+    more = f" (and {count - 3} more)" if count > 3 else ""
+    plural = "s" if count != 1 else ""
+    return (f"cursorbot reviewed PR #{pr_number} and flagged {count} thing{plural}: "
+            f"{heads}{more}. reply and i'll take a pass at addressing them, or tell "
+            f"me to leave them.")
+
+
 # --- verify + confirm (closing the loop on proposed fixes) ------------------
 
 def verify_open_proposals():
     """Poll CI for each open fix PR. Red CI -> refute the belief and reopen the cluster
     (the fix didn't pass). Green + merged -> start the post-deploy watch (do NOT resolve
-    yet). Green, not merged -> one 'ready for your merge' nudge. Unreadable -> leave it."""
+    yet). Green, not merged -> one 'ready for your merge' nudge. Unreadable -> leave it.
+    Then surface any new external code-review findings (a separate pass, since reviews
+    follow the PR's OPEN-ness, not the CI/merge state machine)."""
     items = _load_proposals()
     changed = False
     for p in items:
@@ -370,8 +439,36 @@ def verify_open_proposals():
             p["notified"] = True
             _send(f"CI is green on the fix (PR #{n}). it's ready for your merge whenever "
                   f"you want; i can't merge it myself.")
+    if _surface_new_reviews(items):
+        changed = True
     if changed:
         _save_proposals(items)
+
+
+def _surface_new_reviews(items):
+    """Surface NEW external code-review (Cursor Bugbot) findings for every still-tracked
+    PR, deduped by comment id. Deliberately decoupled from the CI/merge state machine:
+    it runs for any proposal that is not yet `resolved` -- a PR keeps gathering findings
+    while open (even after its CI failed), and a finding whose delivery failed must be
+    retried until it lands, regardless of ci_failed/merged/deploy_watch. The seen mark
+    is set only AFTER _send succeeds (at-least-once: a rare re-send beats a lost
+    finding). Returns True if the ledger changed. Best-effort per PR; never raises."""
+    changed = False
+    for p in items:
+        if p.get("resolved"):
+            continue
+        n = p.get("pr_number")
+        try:
+            seen = p.get("seen_review_ids") or []
+            rev = _check_reviews(n, seen)
+            fresh = (rev or {}).get("findings") or []
+            if fresh and _send(_review_text(n, fresh)):
+                ids = [f["id"] for f in fresh if f.get("id") is not None]
+                p["seen_review_ids"] = sorted(set(seen) | set(ids))
+                changed = True
+        except Exception:
+            log.error("verify: review surfacing failed for PR #%s", n, exc_info=True)
+    return changed
 
 
 def confirm_deployed():
@@ -427,6 +524,12 @@ def run_cli():
     """Scheduler entrypoint ('diagnose' command): prune, close the loop on prior fixes,
     then run one diagnose funnel. Each stage is independently guarded."""
     argo_incidents.prune(max_age_days=PRUNE_DAYS)
+    try:
+        # Mine the chat log for user-voiced weakness signals BEFORE diagnose() so any
+        # fresh chat_weakness incidents flow through the same funnel as logged failures.
+        argo_chatmine.mine_chat_log()
+    except Exception:
+        log.error("diagnose: chat-log mining failed", exc_info=True)
     try:
         verify_open_proposals()
     except Exception:

@@ -41,9 +41,11 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import argo_cost
 import argo_guard
 import argo_paths
 from argo_log import get_logger
+from argo_observe_cache_patch import system_with_cache
 
 log = get_logger(__name__)
 
@@ -259,6 +261,7 @@ def _call_openai(job, model, temperature=1.0):
         return client.chat.completions.create(**kwargs)
 
     response = _guarded("openai", do_call, f"openai/{model}")
+    argo_cost.record_usage(response, model, "openai", f"openai/{model}")
     return response.choices[0].message.content
 
 
@@ -287,6 +290,7 @@ def _call_xai(job, model, temperature=1.0):
         return client.chat.completions.create(**kwargs)
 
     response = _guarded("xai", do_call, f"xai/{model}")
+    argo_cost.record_usage(response, model, "xai", f"xai/{model}")
     return response.choices[0].message.content
 
 
@@ -301,7 +305,10 @@ def _call_anthropic(job, model, temperature=1.0):
         kwargs = {
             "model": model,
             "max_tokens": 1024,
-            "system": SYSTEM_PROMPT,
+            # Mark the stable system prompt with a cache breakpoint (EV-002): on
+            # repeated turns the cached prefix is billed at ~10 percent. SYSTEM_PROMPT
+            # here is fully stable (no timestamps), so the whole thing caches.
+            "system": system_with_cache(SYSTEM_PROMPT),
             "messages": [{"role": "user", "content": job}],
         }
         # Omit temperature for models that reject a custom value (e.g. opus-4-8).
@@ -310,6 +317,7 @@ def _call_anthropic(job, model, temperature=1.0):
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"anthropic/{model}")
     return "".join(
         block.text for block in response.content if block.type == "text"
     )
@@ -345,6 +353,7 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"vision/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"vision/{model}")
     return "".join(b.text for b in response.content if b.type == "text")
 
 
@@ -382,7 +391,7 @@ def _record_tool_error(name, detail):
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
-                  temperature=1.0, return_tool_events=False):
+                  temperature=1.0, return_tool_events=False, output_schema=None):
     """Claude chat call with structured messages and optional MCP tool servers.
 
     Separate from generate_observations (the string-in/string-out helper the
@@ -423,7 +432,12 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     kwargs = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
+        # Mark the big stable system prompt (capabilities + self beliefs + profile)
+        # with a cache breakpoint (EV-002). On repeated webhook turns the cached
+        # prefix is billed at ~10 percent instead of re-billed in full. The caller
+        # must keep volatile context (timestamps, reordered sections) OUT of this
+        # stable string -- a churning prefix silently misses the cache.
+        "system": system_with_cache(system),
         "messages": messages,
     }
     # Some newer models reject `temperature` outright (the API 400s). Omit it for
@@ -432,6 +446,14 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     # just the ones that remember to pass None.
     if temperature is not None and not _rejects_temperature(model):
         kwargs["temperature"] = temperature
+    if output_schema is not None:
+        # Structured outputs (GA on Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5): force a
+        # schema-valid JSON reply so a malformed body can't silently drop a result. The
+        # caller passes a JSON Schema; it must use additionalProperties:false and no
+        # numeric/length constraints or the API 400s. Anthropic-only -- the OpenAI branch
+        # returned above and would need response_format instead.
+        kwargs["output_config"] = {
+            "format": {"type": "json_schema", "schema": output_schema}}
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
         # Each server must be referenced by exactly one mcp_toolset (2025-11-20).
@@ -447,6 +469,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
 
     # Same guardrails as the other model calls: daily budget + breaker + retry.
     response = _guarded("anthropic", do_call, f"chat/{model}")
+    argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
 
     # Telemetry: log every tool the connector fired (name on use, ok/error on
     # result) and collect the fired names. A bare error-only log hid the most
@@ -523,6 +546,7 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
         return client.responses.create(**kwargs)
 
     response = _guarded("openai", do_call, f"responses/{model}")
+    argo_cost.record_usage(response, model, "openai", f"responses/{model}")
 
     # Receipt: each tool the connector fired is an `mcp_call` output item. Only a
     # SUCCEEDED call counts toward the receipt -- a failed propose_change must not
@@ -686,7 +710,7 @@ def main():
                   + " (in .env or the environment).")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
         print("See docs/ARGO_LLM_SETUP.md.")
-        print("\n✅ Observation job ready (no observations generated).\n")
+        print("\n⚠️  No observations generated (no model is configured to run).\n")
         return
 
     # ---- Key present: call the LLM, try runnable models in order. ----
@@ -702,25 +726,22 @@ def main():
             errors.append(f"{model}: {exc}")
 
     if observations_text is None:
-        # Could not generate — fall back to placeholder rather than crash.
         latest_path.write_text(build_latest(job))
         print()
-        print("A key was available, but no model call succeeded:")
-        for err in errors:
-            print(f"  - {err}")
+        print("All model calls failed:")
+        for e in errors:
+            print(f"  - {e}")
         print(f"Left {latest_path.relative_to(ROOT)} as a placeholder.")
-        print("\n⚠️  No observations generated (see errors above).\n")
+        print("\n⚠️  No observations generated (all model calls failed).\n")
         return
 
     results = build_results(observations_text, used_model)
     latest_path.write_text(results)
     dated_path.write_text(results)
-
-    print(f"Generated observations with: {used_model}")
-    print(f"Wrote: {latest_path.relative_to(ROOT)}")
-    print(f"Wrote: {dated_path.relative_to(ROOT)}")
-    print("\n--- Observations ---\n")
-    print(observations_text.strip())
+    print()
+    print(f"Generated observations via {used_model}.")
+    print(f"Wrote {latest_path.relative_to(ROOT)} and "
+          f"{dated_path.relative_to(ROOT)}.")
     print("\n✅ Observations generated.\n")
 
 

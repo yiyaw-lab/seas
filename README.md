@@ -1,19 +1,47 @@
-# SEAS + Argo
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="SEAS + Argo — a frontier research engine and a self-improving agentic scout. Generation is free. Judgment isn't." width="100%" />
+
+**A frontier research engine + a self-improving agentic scout — judgment as the spine.**
 
 [![Tests](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml/badge.svg)](https://github.com/yiyaw-lab/seas/actions/workflows/tests.yml)
+&nbsp;[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](https://www.python.org/)
+&nbsp;[![License](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
+&nbsp;[![Argo](https://img.shields.io/badge/Argo-live%20on%20Railway%20%2B%20Telegram-7d4fff.svg)](#argo--frontier-scout-live-on-railway--telegram)
+
+[![Modules](https://img.shields.io/badge/modules-42-8b5cf6.svg)](src/)
+&nbsp;[![Lines](https://img.shields.io/badge/lines-~13k-8b5cf6.svg)](src/)
+&nbsp;[![Tests](https://img.shields.io/badge/tests-594_passing-3fb950.svg)](tests/)
+&nbsp;[![Deps](https://img.shields.io/badge/deps-10_stdlib_core-3fb950.svg)](requirements.txt)
+&nbsp;[![Loops](https://img.shields.io/badge/self--improvement_loops-3-7d4fff.svg)](#how-argo-improves-itself)
+
+</div>
+
+## At a glance
+
+| Stat | Value |
+|---|---|
+| **Code** | 42 modules · ~13,000 lines of Python 3.11 |
+| **Tests** | 594 · zero network · zero LLM · no real data files |
+| **Dependencies** | 10 pinned, at the I/O edge — a **pure-stdlib core** (gate, world model, probes) |
+| **Self-improvement loops** | 3 — self-diagnosis · frontier-evolution · capability-gap (all human-gated) |
+| **Live** | Argo on Railway + Telegram, behind a human merge gate |
 
 > Source-available (see [LICENSE](LICENSE)). Stdlib-first Python 3.11 — the core
 > (gate, world model, probes) is pure standard library; thin pinned deps live only
 > at the I/O edge (`requirements.txt`).
 
-Two complementary systems for working at the frontier of AI:
+Two complementary systems for working at the frontier of AI — and a third thing
+they add up to: a machine that improves its own judgment under a human gate.
 
-- **SEAS** — a **research engine**. Turns frontier signals into knowledge.
-  Asks: *"What is true?"*
-- **Argo** — a **decision + insight engine**. Turns knowledge into action.
-  Asks: *"What should I do next?"* and *"What is everyone missing?"*
+- **SEAS** — a **research engine**. Turns frontier signals into evidence-grounded
+  knowledge. Asks: *"What is true?"*
+- **Argo** — a **decision + insight engine** and live agentic scout. Turns
+  knowledge into action, and drafts upgrades to itself. Asks: *"What should I do
+  next?"*, *"What is everyone missing?"*, and *"How should I get better?"*
 
-SEAS generates understanding. Argo generates motion.
+SEAS generates understanding. Argo generates motion — and, increasingly, its own
+next capability.
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
@@ -21,6 +49,59 @@ SEAS generates understanding. Argo generates motion.
 │  "What is true?"             │ ─────► │  "What should I do next?"    │
 │  → findings & theories       │        │  → one project worth building │
 └──────────────────────────────┘        └──────────────────────────────┘
+```
+
+## How it works
+
+SEAS is a pipeline that earns knowledge: a curated signal is scored and ranked,
+fetched against topical sources, and a model proposes a finding — but a
+deterministic **emission gate** disposes of it, rejecting anything that lacks
+cross-source convergence, a dated prediction, or quotes that are real substrings
+of the fetched pages. What passes seeds a *belief* in the world model whose
+confidence then moves only by evidence or by a scored prediction. Argo is the
+live agentic scout that turns that knowledge into motion: it chats on Telegram,
+reads the live web through an allowlisted MCP server, reads SEAS findings, scouts
+the frontier, and stress-tests one project bet through adversarial rehearsal
+before recommending it. Layered on top, three self-improvement loops let Argo
+draft upgrades to *itself* — each routed through a PR that **only a human merges**.
+
+```mermaid
+flowchart TB
+    subgraph SEAS["SEAS — research engine: 'what is true?'"]
+        direction LR
+        SIG[Signals<br/>curated feeds] --> SCORE[Score + rank<br/>opportunities]
+        SCORE --> SYN[Synthesis<br/>fetch topical sources]
+        SYN --> GATE{Emission gate<br/>convergence · dated prediction<br/>quotes are real substrings}
+        GATE -->|pass| FIND[Finding]
+        GATE -->|fail| PROBE[Probe<br/>honest dead end]
+        FIND --> WM[(World model<br/>beliefs + theories)]
+        FIND --> PRED[Dated prediction]
+        PRED -->|reality scores it| WM
+    end
+
+    subgraph ARGO["Argo — frontier scout: 'what should I do next?'"]
+        direction TB
+        TG([Telegram chat]) <--> WH[argo_webhook]
+        WH --> OBS[argo_observe<br/>model-routed LLM]
+        OBS <--> MCP[argo_mcp_server<br/>allowlisted web · GitHub · feeds]
+        MCP --> WATCH[argo_watch<br/>tripwire alerts]
+        OBS --> PROJ[argo_project<br/>weekly bet]
+        PROJ --> REH{argo_rehearse<br/>3 critics + judge<br/>SHIP / REVISE / KILL}
+        REH --> BET[One project bet + energy score]
+    end
+
+    subgraph LOOPS["Self-improvement loops — each ends at a human merge gate"]
+        direction LR
+        SPOT[Spot<br/>failure · frontier release · own gap] --> DIAG[diagnose / rehearse<br/>incidents · evolve · capability-gap]
+        DIAG --> PROP[propose_change<br/>opens a PR]
+        PROP --> REVIEW{Human review + merge}
+        REVIEW --> DEPLOY[Railway redeploy]
+        DEPLOY --> SCORE2[Prediction scored by reality]
+    end
+
+    FIND -.read_findings.-> OBS
+    BET -.recurring failures + own gaps.-> SPOT
+    DEPLOY -.improves.-> ARGO
 ```
 
 ---
@@ -130,16 +211,39 @@ deliberate human gate.
   capability (feed, tool, schedule) for your review. It never self-merges.
   New feeds and schedules are data Argo can propose; workflows require a human.
 
-### The closed loop
+### How Argo improves itself
+
+Argo is not generated once and left alone — it runs three self-improvement loops,
+each ending at a **human merge gate** (Argo can open a PR, never merge one).
+Confidence is *earned*: evidence moves a belief ±0.05, a scored prediction ±0.20,
+assertion never.
+
+- **Self-diagnosis** (`argo_incidents` + `argo_diagnose`) — Argo logs its own
+  operational failures, clusters them by signature, and when one recurs it
+  diagnoses the likely cause, stages a fix behind a Telegram **FIX** gate, opens a
+  PR, polls CI, and confirms only after a quiet post-deploy window — then moves the
+  self-belief the fix was meant to settle.
+- **Frontier-evolution** (`argo_evolve` + `argo_predictions`) — on a schedule Argo
+  watches release feeds for its own stack (models, SDKs, MCP), maps anything new
+  against an honest self-description, and at most once a day texts **one** upgrade
+  lever: *"X shipped — I could adopt it in Y. EVOLVE or SKIP."* EVOLVE stress-tests
+  a major lever through Argo's own adversaries (a KILL is final), drafts a real PR,
+  and records a **dated prediction** that reality scores later — so an adopted
+  upgrade has to prove itself, not just sound good.
+- **Capability-gap proposer** (the inward twin) — same lever ledger, same
+  EVOLVE/SKIP gate, but the signal is Argo's *own* gaps: the honest "not used" list
+  in its stack manifest plus its unresolved self-beliefs. It proposes the upgrades
+  that close what Argo is missing, not only what the frontier just shipped.
 
 ```
-Argo spots a gap → verify_feed / read repo → propose_change → PR → you review
-→ you merge → Railway redeploys → Argo gains the capability
+spot (failure | frontier | own gap) → rehearse / diagnose → propose_change → PR
+   → you review → you merge → Railway redeploys → prediction scored by reality
 ```
 
-Generator (Argo) / reviewer / merger (you) are three separate roles, with the
-merge as the safety gate. Proven in practice: Argo drafted **PR #1** (Add arXiv
-cs.SE feed), we reviewed and merged it.
+Generator (Argo) / reviewer / merger (you) stay three separate roles, with the
+merge as the safety gate. Proven in practice: Argo drafted **PR #1** (add an arXiv
+cs.SE feed); we reviewed and merged it. The same spine now drafts upgrades to
+Argo's own stack.
 
 ### Design docs
 
@@ -194,6 +298,12 @@ src/
   argo.py                    ← V1 weekly bet + energy (interactive)
   send_telegram.py, set_webhook.py, seas_demo.py  ← delivery + utilities
 
+  self-improvement loops (Argo drafts upgrades to itself; you merge):
+  argo_diagnose.py           ← self-diagnosis: cluster failures → stage fix → PR → verify → confirm
+  argo_incidents.py          ← operational-failure ledger (what Argo reads back about itself)
+  argo_evolve.py             ← frontier-evolution + capability-gap proposer: watch/scan → EVOLVE → PR → score
+  argo_predictions.py        ← dated, machine-scored predictions (reality grades the judgment)
+
   SEAS V3 pipeline:
   seas.py                    ← orchestrator: fetch → score → rank → synthesize
   seas_finding.py            ← Stage 1 synthesis (model proposes, gate disposes)
@@ -245,7 +355,12 @@ experiments/  SEAS-00x experiment cards
 | `seas-findings.yml` | Manual (`workflow_dispatch`) | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. |
 
 > Schedules are data, not code — add or change a delivery by editing `data/schedule.json`.
-> No workflow file needs to change. Argo can propose schedule edits via its Contents-only PR token.
+> No workflow file needs to change. Argo can propose schedule edits via its propose-only token (Contents + Pull-requests).
+>
+> The volume-bound commands (self-diagnosis, weekly reflection, frontier-evolution,
+> and the capability-gap proposer) run in the webhook's **in-process scheduler**
+> against the Railway volume — not on Actions, whose fresh checkout lacks the
+> ledgers and the staging file their human gates read.
 
 ## Testing
 
@@ -267,7 +382,12 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (87 tests total):
+passes after. New coverage (594 tests total):
+
+- **self-improvement loops** — self-diagnosis gates + proposal lifecycle
+  (`test_diagnose.py`, `test_incidents.py`), the frontier-evolution funnel +
+  EVOLVE/SKIP gate + the capability-gap proposer (`test_evolve.py`), and dated
+  prediction scoring (`test_predictions.py`)
 
 - **chat memory** — roundtrip, per-chat filtering, int/str chat_id unification,
   corrupt-file recovery (`test_memory.py`)
@@ -292,7 +412,7 @@ passes after. New coverage (87 tests total):
 ## Quickstart (what works at each key tier)
 
 ```
-PYTHONPATH=src python3 -m unittest discover -s tests   # 87 tests, no keys needed
+PYTHONPATH=src python3 -m unittest discover -s tests   # 594 tests, no keys needed
 ```
 
 | You have… | What runs |
@@ -320,6 +440,20 @@ Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
 | `ARGO_HEAL_LEVEL` | `L1` for confirm-in-chat self-heal (default `L0` = report-only) |
 | `ARGO_SELF_PATH` | `/data/argo_self.json` (Railway volume; self-belief store) |
 | `ARGO_TASTE_PATH` | `/data/taste_signals.json` (Railway volume; taste signals) |
+| `ARGO_PUSHES_PATH` | `/data/argo_pushes.json` (Railway volume; acted-on-push instrumentation store; wiped each redeploy and `act_on_rate` pinned at `0.0` if left on the default) |
+| `ARGO_CHATMINE_WATERMARK_PATH` | `/data/argo_chatmine_watermark.json` (Railway volume; chat-log weakness-miner high-watermark; without it on the volume, re-mining re-inflates incident counts after a redeploy) |
+| `ARGO_COST_LEDGER_PATH` | `/data/argo_cost_ledger.json` (Railway volume; per-call token/cost telemetry; left on the default it is wiped each redeploy, so the spend history and any cost-based prediction grade reset) |
+| `ARGO_PROACTIVE_PATH` | `/data/argo_proactive.json` (Railway volume; F6 steerable-proactiveness threshold set via the `PROACTIVE` command; resets to the default level each redeploy if left off the volume) |
+| `ARGO_PENDING_DECISIONS_PATH` | `/data/argo_pending_decisions.json` (Railway volume; F7 escalation-broker open decisions from `ask_owner`; an in-flight question is lost on redeploy if left on the default) |
+| `ARGO_CMO_MODES_PATH` | `/data/argo_cmo_modes.json` (Railway volume; CMO-lens per-chat state + timestamped switch log; without it on the volume the lens resets AND the B-007 demand-test return-cadence data is wiped each redeploy) |
+| `ARGO_*_PATH` (self-improvement) | point the incident/proposal ledgers, evolution + prediction stores, and the pending-heal/evolve slots at the `/data` volume so they survive redeploys (`ARGO_INCIDENTS_PATH`, `ARGO_PROPOSALS_PATH`, `ARGO_EVOLUTION_PATH`, `ARGO_PREDICTIONS_PATH`, `ARGO_FRONTIER_SEEN_PATH`, `ARGO_PENDING_EVOLVE_PATH`, `ARGO_PENDING_HEAL_PATH`, `ARGO_WORLD_MODEL_PATH`, `ARGO_LOCAL_SCHED_STATE` — all default to `data/`; see `argo_paths.py`) |
+
+For the acted-on-push instrumentation (F1), `WEBHOOK_URL` and `ARGO_MCP_TOKEN`
+must also be set as **GitHub Actions secrets**. The scheduled senders
+(`argo_project.py` / `argo_watch.py`) run on GitHub Actions and POST each push to
+the Railway webhook via `${{ secrets.* }}`. If they are missing as Actions
+secrets, Actions injects an empty string and `post_to_webhook` skips silently,
+leaving the push store empty.
 
 Python 3.11+. Dependencies in `requirements.txt`.
 

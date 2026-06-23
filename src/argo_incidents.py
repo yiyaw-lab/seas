@@ -43,12 +43,21 @@ INCIDENTS_PATH = argo_paths.INCIDENTS_PATH
 INCIDENT_KINDS = frozenset({
     "phantom_send", "phantom_claim", "budget_exceeded", "model_failure",
     "tool_error", "circuit_open", "scheduler_task_error", "delivery_failure",
-    "other",
+    "chat_weakness", "other",
 })
 
 MAX_SAMPLES = 3        # keep the few most recent example messages per cluster
 SAMPLE_CHARS = 240     # cap each sample so the ledger stays small
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+# Severe kinds worth a same-day proactive heads-up (not just the daily diagnose):
+# the breaker tripping or the budget capping means Argo is partly down NOW. Recording
+# one of these queues a _critical_alert flag that the local_loop tick delivers; the
+# send NEVER happens here (record_incident must never send -- send_telegram records
+# incidents on delivery failure, so sending from here risks re-entrancy/storm).
+CRITICAL_ALERT_KINDS = frozenset({"circuit_open", "budget_exceeded"})
+MAX_CRITICAL_ALERTS_PER_DAY = 3   # spam guard on a flapping severe failure
+_CRITICAL_ALERT_KEY = "_critical_alert"
 
 
 def _now_iso():
@@ -120,6 +129,15 @@ def record_incident(kind, signature, sample=""):
             mu = c.get("muted_until")
             if mu and mu < now:
                 c["status"] = "open"
+        if kind in CRITICAL_ALERT_KINDS:
+            # Queue a same-day heads-up for the local_loop tick (delivery, capping, and
+            # clearing all live in drain_critical_alert -- NOT here). Latest wins; the
+            # daily attempt cap bounds how many actually send.
+            alert = store.get(_CRITICAL_ALERT_KEY)
+            if not isinstance(alert, dict):
+                alert = {}
+            alert["pending"] = {"kind": kind, "signature": str(signature)[:200], "ts": now}
+            store[_CRITICAL_ALERT_KEY] = alert
         _save(store)
         return key
     except Exception:
@@ -212,6 +230,77 @@ def set_meta(meta_key, value):
         _save(store)
     except Exception:
         log.warning("set_meta failed (%s)", meta_key, exc_info=True)
+
+
+def _critical_alert_text(pending):
+    """Argo's voice for a proactive failure heads-up: plain text, lowercase, honest,
+    no markdown/em dashes. Tells the owner what just broke and that it's pre-emptive."""
+    kind = pending.get("kind")
+    sig = (pending.get("signature") or "").strip()
+    lead = {
+        "circuit_open": "heads up: my circuit breaker just tripped",
+        "budget_exceeded": "heads up: i just hit my daily call budget",
+    }.get(kind, "heads up: something of mine just failed")
+    tail = f" ({sig})" if sig else ""
+    return (lead + tail + ". flagging it now instead of waiting for the daily check. "
+            "nothing for you to do unless it keeps happening.")
+
+
+def drain_critical_alert(send):
+    """Deliver one queued critical-failure heads-up. Called from the local_loop tick so
+    failure-to-human latency drops from ~daily to one cycle.
+
+    NOT called from record_incident: that must never send (send_telegram records
+    incidents on delivery failure, so sending from inside record_incident risks
+    re-entrancy). `send` is an injected callable(text)->bool seam (the tick passes
+    send_telegram.try_send_message), which also keeps this module free of a send-layer
+    import cycle. Never raises; returns the text on a delivered send, else None.
+
+    Delivery discipline (each clause fixes a real failure mode):
+      - SEND, then RELOAD before the bookkeeping save. `send` may itself write the
+        ledger (try_send_message logs a delivery_failure on failure); reloading after
+        the send means our save can't clobber that nested write with a stale snapshot.
+      - Clear `pending` ONLY on a delivered send. A failed send keeps the alert so the
+        next tick retries it -- a critical heads-up shouldn't vanish on one Telegram
+        hiccup.
+      - Count every ATTEMPT (success or failure) toward the daily cap. That bounds a
+        permanently-failing send to MAX attempts/day instead of retrying forever, and
+        still caps a flapping failure's successful pings. Past the cap the pending is
+        dropped (the incident still rides the daily diagnose funnel)."""
+    try:
+        store = _load()
+        alert = store.get(_CRITICAL_ALERT_KEY)
+        if not isinstance(alert, dict) or not alert.get("pending"):
+            return None
+        today = _now_iso()[:10]
+        attempts = 0 if alert.get("date") != today else int(alert.get("attempts_today", 0))
+        if attempts >= MAX_CRITICAL_ALERTS_PER_DAY:
+            alert["pending"] = None  # exhausted today's attempts; drop so it can't pile up
+            alert["date"] = today
+            store[_CRITICAL_ALERT_KEY] = alert
+            _save(store)
+            return None
+        sent_pending = alert["pending"]
+        text = _critical_alert_text(sent_pending)
+        ok = bool(send(text))  # may record a delivery_failure incident on failure
+        # Reload AFTER the send so a delivery_failure (or concurrent) write isn't clobbered.
+        store = _load()
+        alert = store.get(_CRITICAL_ALERT_KEY)
+        if not isinstance(alert, dict):
+            alert = {"pending": None}
+        alert["date"] = today
+        alert["attempts_today"] = attempts + 1
+        # Clear ONLY if the same alert is still pending. A newer severe incident queued
+        # during the send I/O must not be dropped just because the older one delivered;
+        # leave it so the next tick delivers it. A failed send also keeps pending (retry).
+        if ok and alert.get("pending") == sent_pending:
+            alert["pending"] = None
+        store[_CRITICAL_ALERT_KEY] = alert
+        _save(store)
+        return text if ok else None
+    except Exception:
+        log.warning("drain_critical_alert failed", exc_info=True)
+        return None
 
 
 def prune(max_age_days=14):

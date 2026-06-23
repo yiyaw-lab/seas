@@ -96,9 +96,15 @@ crash a thread or a chat turn, and make that net log. Target under 500 lines per
 module. `argo_mcp_server.py`, `argo_webhook.py`, `argo_evolve.py`, and
 `argo_observe.py` exceed that today — don't split them speculatively, but when one
 next needs a substantive change, extract one cohesive seam as part of that work.
-The rating helpers already came out as `argo_rating.py`; the project-state helpers
-`_target_project`/`_match_existing_project` are the next cohesive seam in
-`argo_webhook`.
+The rating + project-state helpers already came out as `argo_rating.py` (incl.
+`_target_project`/`_match_existing_project`, moved in 9ecd38f) — `argo_webhook`
+only keeps thin delegating wrappers now, so that is no longer the seam to chase.
+The next real cohesive seam in `argo_webhook` is the anti-bluff / phantom-send
+gate (`_classify_claim`, `_guard_phantom_send`, `_claim_unbacked`, `_pr_blocker`
+plus their regexes — ~190 lines, no external callers, already covered by
+`test_anti_bluff_pr.py`) → extract as `argo_bluff.py`; the Telegram media pipeline
+(`_download_telegram_*`, `_handle_photo`, `_handle_document` — ~200 lines) →
+`argo_media.py` is the one after.
 
 **Argo output rules** (already enforced in code via `_clean_reply`, keep them):
 plain text only — no markdown, no em dashes; sources cited like a human, never
@@ -124,7 +130,15 @@ are gitignored — don't commit them. Before opening any PR, run an adversarial
 review of the branch diff (`/code-review` at high effort) and fix or explicitly
 defer what it finds — an external review bot found 7 real state-machine/
 failure-path issues on a PR this suite had passed (see memory:
-pr11-bugbot-lessons-state-machines). When committing from a tree that peers are
+pr11-bugbot-lessons-state-machines). For a safety-critical read-modify-write or
+record/state-machine path, also audit the (state × operation) matrix on your OWN
+design BEFORE opening the PR — Findings 039/041 paid that audit back one review
+round at a time when skipped. When a finding names a source-of-truth
+MISMATCH (e.g. a local checkout vs a remote base branch), grep EVERY
+component that reads either source — gate, author, validator, display — and
+fix each before declaring the class fixed: one home patched is not the bug
+fixed, and self-review and the bot each tend to catch only the home nearest
+their angle (Finding 052). When committing from a tree that peers are
 also editing, follow the /commit-mine procedure: positive hunk selection,
 staged-snapshot test via `checkout-index`, foreign-symbol review.
 

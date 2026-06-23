@@ -50,8 +50,9 @@ class SelfHealEndToEndTest(unittest.TestCase):
         self.assertEqual(self._belief_status(bid), "unverified")
         self.assertTrue((srv.PENDING_HEAL_PATH).exists())     # a fix is staged
 
-        # 3. PROPOSE (user replies FIX): run the REAL propose path -- author (faked),
-        #    the repro+wire gate (real), open PR (faked), record in the ledger (real).
+        # 3. PROPOSE (user replies FIX): run the REAL propose path -- author + resolve
+        #    (faked: the model now drafts surgical edits, _resolve_edits applies them), the
+        #    repro+wire gate (real), open PR (faked), record in the ledger (real).
         authored = {
             "src/argo_webhook.py": "# fixed: record the incident first\n",
             "tests/test_phantom_repro.py": (
@@ -60,7 +61,10 @@ class SelfHealEndToEndTest(unittest.TestCase):
                 "    assert hasattr(argo_webhook, 'handle_update')\n")}
         fake_pr = (True, {"pr_number": 42, "url": "http://pr/42",
                           "head_sha": "sha1", "branch": "argo/fix"})
-        with mock.patch.object(srv, "_author_fix_files", return_value=authored), \
+        with mock.patch.object(
+                srv, "_author_fix_edits",
+                return_value=[{"path": "src/argo_webhook.py", "old": "a", "new": "b"}]), \
+             mock.patch.object(srv, "_resolve_edits", return_value=(authored, None)), \
              mock.patch.object(srv, "_open_pr", return_value=fake_pr):
             msg = srv.run_pending_heal()
         self.assertIn("http://pr/42", msg)

@@ -30,6 +30,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+import argo_calibration
 import argo_paths
 import argo_store
 from argo_log import get_logger
@@ -300,6 +301,11 @@ def gather_performance(recent_n=RECENT_N):
                     "date": p.get("date")} for p in rated[-recent_n:]],
         "tripwire_seen": seen_total,
         "tripwire_settled": settled,
+        # How Argo's own SHIP/REVISE rehearsal verdicts have actually panned out, per
+        # verdict class -- the build-decision calibration number. n-floor gated in code
+        # (argo_calibration): a class with too few graded bets is simply absent here, so
+        # this is {} until the loop has data. Computed from the same project list.
+        "calibration": argo_calibration.compute_calibration(projects),
     }
 
 
@@ -323,7 +329,11 @@ _REFLECT_PROMPT = (
     "yourself.\n\n"
     "PERFORMANCE (energy is the user's 1-10 rating of how much they wanted to build "
     "each project; the tripwire counts are coarse -- the seen-store cannot cleanly "
-    "separate alerted items from skipped ones):\n{stats}\n\n"
+    "separate alerted items from skipped ones; calibration is how your own SHIP/REVISE "
+    "rehearsal verdicts have actually panned out -- 'shipped' of 'n' committed bets "
+    "with a partial-credit 'score' that half-weights a shipped-but-low-energy bet, and "
+    "an empty calibration just means too few graded bets to read yet, not a bad "
+    "score):\n{stats}\n\n"
     "WHAT YOU ALREADY BELIEVE ABOUT YOURSELF:\n{beliefs}\n\n"
     "Write AT MOST two honest, specific lessons about how YOU are doing, and only if "
     "the data actually supports them (a real downward energy trend, not noise). Each "

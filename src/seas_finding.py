@@ -42,6 +42,8 @@ from pathlib import Path
 
 import argo_observe as observe
 import argo_paths
+import argo_predictions
+import argo_store
 import fetch_signals
 import firecrawl_client
 import probes
@@ -354,9 +356,39 @@ def _route_judgment(signal, sig_ref, sources, judgment, dry_run):
         status="unverified",
         source_finding=fid,
     )
+    # Arm the finding's dated prediction so reality can grade it and move the belief
+    # by the +-0.20 prediction step (ROADMAP Stage 2: every finding carries a dated
+    # prediction that gets scored). Best-effort: a recording hiccup must never sink an
+    # already-emitted finding -- the belief is seeded and the finding is on disk.
+    _arm_finding_prediction(fid, draft, bid)
     return (f"FINDING {fid} emitted (gate passed) -> belief {bid} "
             f"@ {draft['confidence']:.2f} unverified. Prediction resolves "
             f"{draft['prediction'].get('resolves')}.")
+
+
+def _arm_finding_prediction(fid, finding, belief_id):
+    """Record + arm the finding's dated prediction against its belief. The finding's
+    own `resolves` date is the due date (the clock starts now, at emission -- unlike a
+    lever's, whose clock starts at PR merge), so days = resolves - today (>=1). The
+    metric grades against an external human verdict stamped on the finding later
+    (prediction_outcome), so it stays unscored until then -- never a guessed pass.
+    Best-effort: logs and returns None on any failure; the finding is already emitted."""
+    try:
+        pred = finding.get("prediction") or {}
+        resolves = pred.get("resolves")
+        due = datetime.strptime(resolves, "%Y-%m-%d")
+        days = max(1, (due.date() - datetime.now().date()).days)
+        pid = argo_predictions.record(
+            belief_id,
+            f"{fid}: {pred.get('claim', finding.get('claim', ''))} "
+            f"(refuted if: {finding.get('refutation_condition', '')})",
+            {"kind": "finding_prediction", "finding_id": fid},
+            days, source="seas_finding")
+        argo_predictions.arm(pid)  # clock starts now (emission); due = now + days
+        return pid
+    except (ValueError, TypeError, OSError, KeyError):
+        print(f"  ! could not arm prediction for {fid} (left ungraded)")
+        return None
 
 
 def _next_finding_id():
@@ -364,6 +396,23 @@ def _next_finding_id():
     n = 1 + max((int(p.stem.split("-")[1]) for p in existing
                  if p.stem.split("-")[1].isdigit()), default=0)
     return f"F-{n:03d}"
+
+
+def record_outcome(finding_id, held):
+    """Stamp the human's verdict on a finding's dated prediction so the daily
+    score_due run can grade it (the finding_prediction metric reads this field).
+    `held` True -> 'held', False -> 'refuted'. This is the EXTERNAL label the metric
+    grades against -- the same posture as project_mattered's energy rating: the
+    machine never judges its own research claim, a person does. Idempotent (re-stamping
+    the same verdict is a no-op write). Returns the updated finding, or None if it is
+    missing/unreadable. Only JSON-schema findings carry a structured prediction."""
+    path = FINDINGS_DIR / f"{finding_id}.json"
+    finding = argo_store.load_json(path, None)
+    if not isinstance(finding, dict):
+        return None
+    finding["prediction_outcome"] = "held" if held else "refuted"
+    argo_store.save_json(path, finding)
+    return finding
 
 
 def _write_finding(fid, finding, sources):
@@ -387,60 +436,11 @@ def _maybe_escalate(urls):
             print(f"  [self-heal] {url}: {action} — {reason}")
 
 
-def auto_score_signals(signals, dry_run=False):
-    """LLM-score any unscored signals using prompts/score_signal.md (5 dimensions).
-    Returns the updated list. Best-effort: silently skips on any model/parse failure
-    so a scoring hiccup never blocks the investigation step."""
-    if not SCORE_PROMPT_PATH.exists():
-        return signals
-    prompt_template = SCORE_PROMPT_PATH.read_text()
-
-    import os
-    # SEAS research can run a different (e.g. stronger) model than Argo's ARGO_MODEL
-    # fallback: ARGO_SEAS_MODEL wins when set, else resolve_models() (ARGO_MODEL).
-    # Falsy-guard so an unset/empty env never injects None/"" as a model.
-    preferred = os.environ.get("ARGO_SEAS_MODEL")
-    models = [m for m in (([preferred] if preferred else []) + observe.resolve_models())
-              if (p := observe.provider_for(m)) and os.environ.get(p["key_env"])]
-    if not models:
-        print("  (no model available for scoring — skipping)")
-        return signals
-    model = models[0]  # cheapest available (Sonnet by default)
-
-    updated = []
-    for sig in signals:
-        if not all(v == 0 for v in sig.get("scores", {}).values()):
-            updated.append(sig)
-            continue
-        if dry_run:
-            print(f"  [dry-run] would score: {sig['title'][:60]}")
-            updated.append(sig)
-            continue
-        prompt = (f"{prompt_template}\n\nSignal to score:\n"
-                  f"Title: {sig['title']}\n"
-                  f"Summary: {sig.get('summary', '')}")
-        try:
-            reply = observe.generate_observations(f"{SYSTEM}\n\n{prompt}", model)
-            scored = _extract_json(reply)
-            if (scored
-                    and isinstance(scored.get("durability"), int)
-                    and isinstance(scored.get("leverage"), int)):
-                sig = dict(sig)
-                sig["scores"] = {
-                    "durability":    int(scored.get("durability", 0)),
-                    "leverage":      int(scored.get("leverage", 0)),
-                    "alignment":     int(scored.get("alignment", 0)),
-                    "accessibility": int(scored.get("accessibility", 0)),
-                    "novelty":       int(scored.get("novelty", 0)),
-                }
-                print(f"  scored: {sig['title'][:55]} "
-                      f"(d={sig['scores']['durability']} "
-                      f"l={sig['scores']['leverage']} "
-                      f"a={sig['scores']['alignment']})")
-        except Exception as exc:
-            print(f"  ! scoring failed for '{sig['title'][:40]}': {exc}")
-        updated.append(sig)
-    return updated
+# Signal scoring (the 5-dimension scorer + opt-in batch path) lives in
+# seas_scoring, which imports the shared primitives SYSTEM, _extract_json, and
+# SCORE_PROMPT_PATH from this module (synthesis + benchmark use them too). The
+# dependency is one-directional (seas_scoring -> seas_finding) to avoid a cycle;
+# callers import seas_scoring.auto_score_signals directly.
 
 
 def main():
