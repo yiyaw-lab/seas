@@ -208,7 +208,10 @@ def format_for_prompt(limit=12):
                 f"[{c.get('kind')}] count={c.get('count')} status={c.get('status')} "
                 f"first={str(c.get('first_seen', '?'))[:10]} "
                 f"last={str(c.get('last_seen', '?'))[:10]}\n"
-                f"  fingerprint: {c.get('fingerprint', '')}\n"
+                # The fingerprint is derived from the raw signature and strips only
+                # digits/UUIDs/hex/URLs -- NOT emails or token-shaped strings -- so it
+                # too must be redacted before it reaches the chat model and the user.
+                f"  fingerprint: {_redact(str(c.get('fingerprint', '')))}\n"
                 f"  sample: {sample}")
         return "\n".join(out)
     except Exception:

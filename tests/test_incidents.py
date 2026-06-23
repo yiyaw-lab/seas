@@ -175,6 +175,16 @@ class FormatForPromptTest(unittest.TestCase):
     def test_empty_ledger_is_safe_note(self):
         self.assertIn("No open incidents", inc.format_for_prompt())
 
+    def test_fingerprint_is_redacted_too(self):
+        # Bugbot: the fingerprint is derived from the raw SIGNATURE and strips only
+        # digits/UUIDs/hex/URLs -- an email/token in the signature survives into the
+        # fingerprint, so it must be redacted before reaching the chat model.
+        for _ in range(3):
+            inc.record_incident("tool_error", "auth failed for ops@secret.com")
+        out = inc.format_for_prompt()
+        self.assertNotIn("ops@secret.com", out)  # scrubbed from the fingerprint line
+        self.assertIn("<redacted>", out)
+
 
 if __name__ == "__main__":
     unittest.main()

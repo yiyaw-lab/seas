@@ -216,15 +216,19 @@ def _search_roots():
 
 def _code_search_fallback(pattern, max_results):
     """Stdlib substring search (literal, == ripgrep -F) for hosts without rg -- the
-    likely live case (a minimal Railway image). Walks only the source dirs."""
+    likely live case (a minimal Railway image). Walks only the source dirs, and routes
+    every candidate through _confined_path so a symlink pointing out of the tree (or a
+    non-source file) is NEVER read -- identical confinement to read_local_source."""
     hits = []
     for root in _search_roots():
         for p in sorted((_SELFREAD_ROOT / root).rglob("*")):
             if len(hits) >= max_results:
                 return hits
-            if not p.is_file() or p.suffix not in (".py", ".md"):
+            if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(_SELFREAD_ROOT)
+            if _confined_path(str(rel)) is None:  # extension allowlist + containment
+                continue
             try:
                 for i, line in enumerate(
                         p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
@@ -258,14 +262,23 @@ def code_search(pattern, max_results=40):
     if rg:
         # No per-file --max-count: enumeration (every @with_deadline) is the point, so
         # bound the TOTAL by max_results below, not per file. --max-columns guards a
-        # single pathological long line; --max-filesize guards a huge blob.
+        # single pathological long line; --max-filesize guards a huge blob. Restrict to
+        # the SAME extension allowlist the fallback enforces via _confined_path, so the
+        # two paths return identical results regardless of whether rg is installed.
+        ext_globs = []
+        for ext in _SELFREAD_EXTS:
+            ext_globs += ["-g", "*" + ext]
         cmd = [rg, "--no-heading", "--line-number", "--color", "never",
-               "--fixed-strings", "--max-filesize", "1M",
-               "--max-columns", "300", "--", pattern, *roots]
+               "--fixed-strings", "--max-filesize", "1M", "--max-columns", "300",
+               *ext_globs, "--", pattern, *roots]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
-                                  cwd=str(_SELFREAD_ROOT))  # never shell=True
-            hits = [ln for ln in proc.stdout.splitlines() if ln.strip()][:max_results]
+                                  cwd=str(_SELFREAD_ROOT))  # never shell=True; no -L so no symlink follow
+            raw = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+            # Confine rg results too (defense in depth): drop any hit whose path is not a
+            # confined source file, so a symlink-out can't leak even if rg surfaced it.
+            hits = [h for h in raw
+                    if _confined_path(h.split(":", 1)[0]) is not None][:max_results]
         except (subprocess.SubprocessError, OSError):
             hits = _code_search_fallback(pattern, max_results)
     else:

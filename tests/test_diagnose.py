@@ -261,5 +261,33 @@ class DiagnoseClusterTest(unittest.TestCase):
         self.assertIn("(none found)", seen["prompt"])  # degraded section
 
 
+class ExtractSourceRefTest(unittest.TestCase):
+    """_extract_source_ref must read a line number ONLY when adjacent to the path, and
+    _code_context must treat read_local_source's sentinels (incl. '(empty file)') as misses."""
+
+    def test_line_taken_only_when_adjacent_to_path(self):
+        # Real traceback forms -> path + line.
+        self.assertEqual(dg._extract_source_ref('File "src/argo_x.py", line 42, in f'),
+                         ("src/argo_x.py", 42))
+        self.assertEqual(dg._extract_source_ref("boom at src/argo_x.py:7"),
+                         ("src/argo_x.py", 7))
+
+    def test_timestamp_colon_digits_not_read_as_line(self):
+        # Bugbot: a 14:03 timestamp before the path must NOT become line 3/14.
+        path, line = dg._extract_source_ref("sendMessage failed 14:03 in argo_webhook.py")
+        self.assertEqual(path, "src/argo_webhook.py")
+        self.assertIsNone(line)
+
+    def test_no_path_returns_none(self):
+        self.assertEqual(dg._extract_source_ref("too many values to unpack"), (None, None))
+
+    def test_code_context_skips_empty_file_sentinel(self):
+        # Bugbot: read_local_source returns "(empty file)" for an empty match -- that is a
+        # miss, not source; _code_context must not inject it as code.
+        cluster = {"samples": ['File "src/argo_x.py", line 2']}
+        with mock.patch.object(argo_github, "read_local_source", return_value="(empty file)"):
+            self.assertEqual(dg._code_context(cluster), "")
+
+
 if __name__ == "__main__":
     unittest.main()

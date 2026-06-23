@@ -92,6 +92,31 @@ class CodeSearchTest(_TmpRootMixin, unittest.TestCase):
             out = g.code_search("needle", max_results=5)
         self.assertLessEqual(len(out.splitlines()), 5)
 
+    def test_symlink_out_of_tree_is_never_searched(self):
+        # HIGH (Bugbot): a src/*.py symlink pointing OUTSIDE the tree must not be read by
+        # the fallback walk -- its content must never reach search_self. Confinement on
+        # the search path must match read_local_source.
+        outside = self.root.parent / "outside_secret.py"
+        outside.write_text("SECRET_NEEDLE = 'leak'\n")
+        try:
+            (self.root / "src" / "evil.py").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unsupported here")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("SECRET_NEEDLE")
+        self.assertNotIn("evil.py", out)
+        self.assertTrue(out.startswith("No matches"))
+        # and read_local_source refuses it directly too
+        self.assertTrue(g.read_local_source("src/evil.py").startswith("Refused"))
+
+    def test_fallback_scans_full_extension_allowlist(self):
+        # Bugbot: rg and the fallback must agree. The fallback now scans every allowed
+        # source extension (e.g. .toml), not just .py/.md, so results don't change by env.
+        (self.root / "src" / "conf.toml").write_text("key = 'NEEDLE_TOML'\n")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("NEEDLE_TOML")
+        self.assertIn("src/conf.toml", out)
+
 
 if __name__ == "__main__":
     unittest.main()

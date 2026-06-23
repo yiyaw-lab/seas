@@ -201,13 +201,15 @@ def _extract_source_ref(text):
     caller routes it through the confined reader, which rejects anything outside the
     source tree -- so a crafted sample can only ever fail to read, not escape."""
     s = str(text or "")
-    m = re.search(r"((?:src|tests)/[\w./-]+\.py)", s)
-    if m:
-        path = m.group(1)
-    else:
-        b = re.search(r"\b([a-zA-Z_]\w*\.py)\b", s)  # bare basename -> assume src/
-        path = "src/" + b.group(1) if b else None
-    lm = re.search(r"(?:line\s+|:)(\d{1,6})\b", s)
+    m = re.search(r"((?:src|tests)/[\w./-]+\.py)", s) or re.search(r"\b([a-zA-Z_]\w*\.py)\b", s)
+    if not m:
+        return None, None
+    path = m.group(1) if m.group(1).startswith(("src/", "tests/")) else "src/" + m.group(1)
+    # Line number ONLY if adjacent to the path (file.py:42  or  file.py", line 42). A
+    # bare ":NN" elsewhere in the sample (a 14:03 timestamp, a :8080 port) must NOT be
+    # read as a line number -- that fetched an irrelevant snippet.
+    tail = s[m.end():m.end() + 24]
+    lm = re.match(r"""['"]?[,:]?\s*(?:line\s+)?(\d{1,6})\b""", tail)
     return path, (int(lm.group(1)) if lm else None)
 
 
@@ -224,7 +226,8 @@ def _code_context(cluster, window=30):
                 continue
             offset = max(1, line - window // 2) if line else 1
             snippet = argo_github.read_local_source(path, offset=offset, limit=window)
-            if snippet and not snippet.startswith(("Refused", "Could not", "(no lines")):
+            if snippet and not snippet.startswith(
+                    ("Refused", "Could not", "(no lines", "(empty file)")):
                 where = f" around line {line}" if line else ""
                 return f"{path}{where}:\n{snippet}"
         return ""
