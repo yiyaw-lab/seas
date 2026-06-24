@@ -350,8 +350,14 @@ def _map_levers(items):
     if (raw or "").strip().upper() == "NONE":
         return {}
     # A reply that is neither NONE nor parseable JSON is a model failure, not a
-    # verdict: return None so the caller doesn't burn the items' attempt counts.
-    return _parse_json(raw)
+    # verdict: return None so the caller doesn't burn the items' attempt counts,
+    # and record it so the silent-drop stops disappearing (it feeds the diagnose
+    # loop and the structured-outputs prediction).
+    lever = _parse_json(raw)
+    if lever is None:
+        import argo_incidents
+        argo_incidents.record_model_failure("evolve mapper: unparseable JSON reply", raw)
+    return lever
 
 
 def _slug(s):
@@ -620,7 +626,13 @@ def _map_gap(gaps):
     if (raw or "").strip().upper() == "NONE":
         return {}
     # Neither NONE nor parseable JSON is a model failure, not a verdict: None.
-    return _parse_json(raw)
+    # Record it (distinct signature from the lever mapper) so the inward twin's
+    # silent drops are visible too -- same volume, same diagnose-loop consumer.
+    gap = _parse_json(raw)
+    if gap is None:
+        import argo_incidents
+        argo_incidents.record_model_failure("evolve gap mapper: unparseable JSON reply", raw)
+    return gap
 
 
 def scan_gaps():

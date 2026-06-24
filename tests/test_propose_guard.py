@@ -132,6 +132,16 @@ class ProposalGateTest(unittest.TestCase):
             "src/argo_paths.py": "X = 1\n",
             "tests/test_paths_patch.py": test_src}))
 
+    def test_read_cap_larger_than_propose_cap_but_propose_cap_unwidened(self):
+        # Reads are now generous (so Argo can see a whole big module) while the propose
+        # SAFETY cap stays small. Guards against a future change that lifts the propose cap
+        # to match the read cap: a file between the two must still be refused for size.
+        self.assertGreater(srv.MAX_REPO_READ_BYTES, srv.MAX_PROPOSE_BYTES)
+        mid = "y" * ((srv.MAX_PROPOSE_BYTES + srv.MAX_REPO_READ_BYTES) // 2)
+        err = srv._validate_files({"src/x.py": mid})
+        self.assertIsNotNone(err)
+        self.assertIn("exceeds", err.lower())
+
     def test_refuses_protected_safety_paths(self):
         # The self-modification loops must never touch their own rails: CI under
         # .github/, the budget/breaker guards, and argo_github.py (the only confined

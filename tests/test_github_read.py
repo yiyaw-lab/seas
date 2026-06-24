@@ -45,6 +45,28 @@ class GhReadFileTest(unittest.TestCase):
         self.assertEqual(out, "é" * 5)
         self.assertLessEqual(len(out.encode("utf-8")), 10)
 
+    def test_truncation_appends_visible_marker(self):
+        # A real-sized cap that is cut appends a marker so the reader KNOWS it saw only a
+        # prefix (the silent-truncation misread fix). The marker reports the true total,
+        # the whole return still fits the cap, and the body prefix is preserved.
+        out = argo_github._cap_bytes("y" * 2000, 400)
+        self.assertIn("[truncated:", out)
+        self.assertIn("of 2000 bytes", out)
+        self.assertLessEqual(len(out.encode("utf-8")), 400)
+        self.assertTrue(out.startswith("y"))
+
+    def test_under_cap_returns_verbatim_no_marker(self):
+        # Under the cap -> exact text, no marker. (Most reads; must not gain a marker.)
+        out = argo_github._cap_bytes("short file", 40_000)
+        self.assertEqual(out, "short file")
+        self.assertNotIn("[truncated", out)
+
+    def test_tiny_cap_below_marker_falls_back_to_silent_cut(self):
+        # A cap too small to hold the marker keeps the old silent byte-cut (degenerate
+        # case only; real caps are 40K+). Guards the existing byte-cap tests above.
+        out = argo_github._cap_bytes("x" * 100, 10)
+        self.assertEqual(out, "x" * 10)
+
     def test_out_of_range_window_distinct_from_empty(self):
         out = self._read(offset=99, limit=5)
         self.assertIn("no lines in that range", out)

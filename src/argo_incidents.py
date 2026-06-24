@@ -145,6 +145,20 @@ def record_incident(kind, signature, sample=""):
         return None
 
 
+def record_model_failure(signature, raw):
+    """Surface a SILENT model failure: a non-empty reply that should have parsed as
+    JSON but did not. The JSON-mapper swallow sites (argo_evolve, argo_diagnose) used
+    to drop these and return None, so they 'disappeared'; recording a model_failure
+    incident makes them visible to the diagnose loop and measurable for the
+    structured-outputs prediction. No-op for an empty/whitespace reply -- that is an
+    infra/outage failure, surfaced on its own call path -- and never raises (delegates
+    to record_incident, which caps the sample and swallows store errors)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    return record_incident("model_failure", signature, sample=text)
+
+
 def open_clusters(min_count=3, window_hours=24):
     """Eligible clusters for diagnosis: status 'open', count >= min_count, last seen
     within window_hours. Ranked worst-first by count, then recency. Free, read-only,
@@ -217,6 +231,39 @@ def format_for_prompt(limit=12):
     except Exception:
         log.warning("format_for_prompt failed", exc_info=True)
         return "Could not read the incident ledger."
+
+
+def detail_report(limit=10, min_count=1, window_hours=24 * 14):
+    """Operator-facing DETAIL for the open incident clusters: the recent sample error
+    text behind each count -- the `<tool>: <message>` strings that carry which tool
+    failed and why. The /health rollup and open_clusters' projection drop `samples`,
+    so a count is all you see there; this surfaces them so a transient upstream blip
+    can be told from a stuck tool. Read-only, never raises. Same broad bar /health
+    uses by default (any cluster seen at least once in the last 14 days), worst-first,
+    capped at `limit` clusters. The get_incidents MCP tool is a thin wrapper over this."""
+    clusters = open_clusters(min_count=min_count, window_hours=window_hours)
+    if not clusters:
+        return "No open incident clusters."
+    lines = []
+    for c in clusters[: max(1, limit)]:  # floor at 1 so a stray limit<=0 still shows the worst
+        triaged = []
+        if c.get("belief_id"):
+            triaged.append(f"belief {c['belief_id']}")
+        if c.get("pr_number"):
+            triaged.append(f"PR #{c['pr_number']}")
+        triage = (" [" + ", ".join(triaged) + "]") if triaged else ""
+        # The fingerprint is the normalized signature, NOT a hash -- for a tool_error
+        # it is "<tool>: <message>", so it carries the failing TOOL NAME. The samples
+        # below are bare error text (e.g. _record_tool_error stores str(detail), no
+        # name), so without the fingerprint two different failing tools with the same
+        # generic message would render identically and you couldn't tell them apart.
+        sig = c.get("fingerprint")
+        sig = f" [{sig}]" if sig else ""
+        lines.append(f"{c.get('kind')}{sig} x{c.get('count', 0)} "
+                     f"({c.get('status')}{triage}) last {c.get('last_seen')}")
+        for s in (c.get("samples") or []):
+            lines.append(f"    - {s}")
+    return "\n".join(lines)
 
 
 def get_cluster(key):

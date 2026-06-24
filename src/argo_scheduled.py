@@ -48,6 +48,7 @@ COMMANDS = {
     "diagnose": ("argo_diagnose", "run_cli"),
     "frontier": ("argo_evolve", "run_cli"),
     "gaps": ("argo_evolve", "run_gaps_cli"),
+    "pulse": ("argo_pulse", "run_cli"),
 }
 
 # Commands that need the WEBHOOK's filesystem: their ledgers/inputs live on the
@@ -61,7 +62,7 @@ COMMANDS = {
 # wouldn't be committed back anyway). gaps is the inward twin of frontier (the
 # proactive capability-gap proposer), sharing frontier's evolution ledger + EVOLVE
 # gate, so it belongs in the same place for the same reason.
-LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps")
+LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps", "pulse")
 LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
 LOCAL_INTERVAL_SECONDS = 15 * 60
 

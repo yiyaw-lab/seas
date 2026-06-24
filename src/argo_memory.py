@@ -21,6 +21,7 @@ Backed by the volume-capable ARGO_CHAT_LOG path (see argo_paths); stdlib + the
 shared argo_store I/O only.
 """
 
+import re
 from datetime import datetime, timezone
 
 import argo_paths
@@ -32,6 +33,16 @@ CHAT_LOG_PATH = argo_paths.CHAT_LOG_PATH
 
 # How many recent turns to feed the model as short-term memory.
 HISTORY_TURNS = 12
+
+# Common function words dropped before keyword overlap so "the/and/is" don't make
+# unrelated turns look relevant. Deliberately small -- this is recall, not search.
+_STOPWORDS = frozenset((
+    "the and that have for not with you this but his from they say her she will one all "
+    "would there their what out about who get which when make can like time just him know "
+    "take person into year your good some could them than then now look only come its over "
+    "think also back after use two how our work first well way even new want because any "
+    "these give day most are was were has had did does done your you're i'm it's that's"
+).split())
 
 
 def record(chat_id, role, text):
@@ -72,3 +83,40 @@ def recent(chat_id, n=HISTORY_TURNS):
         return []
     turns = [t for t in log if str(t.get("chat_id")) == str(chat_id)]
     return turns[-n:]
+
+
+def _content_tokens(text):
+    """Lowercase word tokens, minus stopwords and 1-2 char noise, for overlap scoring."""
+    return {w for w in re.findall(r"[a-z0-9']+", (text or "").lower())
+            if len(w) > 2 and w not in _STOPWORDS}
+
+
+def relevant(chat_id, query, k=3, exclude_recent=HISTORY_TURNS):
+    """Recall up to k OLDER turns (those BEFORE the recent() window) whose words
+    overlap `query`, so a fact from turn 3 survives past turn 15. Pure keyword +
+    recency scoring -- no embeddings, no model call, no network -- which is plenty
+    for a small per-chat log and swappable for embeddings later behind this same
+    signature if a corpus ever outgrows a keyword scan.
+
+    Only turns outside the recency window are searched: the last `exclude_recent`
+    turns are already in the prompt, so re-surfacing them would just duplicate
+    context. Ranked by overlap count, ties broken toward the more recent turn.
+    Returns [] when the query is all-stopwords or nothing overlaps. Never raises."""
+    try:
+        q = _content_tokens(query)
+        if not q:
+            return []
+        log = argo_store.load_json(CHAT_LOG_PATH, [])
+        if not isinstance(log, list):
+            return []
+        turns = [t for t in log if str(t.get("chat_id")) == str(chat_id)]
+        older = turns[:-exclude_recent] if exclude_recent else turns
+        scored = []
+        for i, t in enumerate(older):
+            overlap = len(q & _content_tokens(t.get("text", "")))
+            if overlap:
+                scored.append((overlap, i, t))  # i as recency tiebreak (later = larger)
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        return [t for _, _, t in scored[:k]]
+    except Exception:
+        return []  # recall is best-effort; never break a chat turn over it
