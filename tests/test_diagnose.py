@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import argo_diagnose as dg
+import argo_github
 import argo_incidents as inc
 import argo_observe as observe
 import argo_self
@@ -225,6 +226,67 @@ class DiagnoseClusterTest(unittest.TestCase):
         with mock.patch.object(observe, "chat_with_mcp", lambda *a, **k: ""):
             self.assertIsNone(dg._diagnose_cluster(self.cluster))
         self.assertEqual(inc.open_clusters(min_count=1, window_hours=999), [])
+
+    def test_code_context_is_added_to_prompt_when_sample_names_a_file(self):
+        # A sample with a source path/line -> the failing code (via the CONFINED reader)
+        # lands in the diagnose prompt, so the model reasons from real bytes not just a log.
+        cluster = {"kind": "tool_error", "count": 4, "fingerprint": "fp",
+                   "samples": ['File "src/argo_observe.py", line 5, in chat']}
+        seen = {}
+
+        def fake_chat(system, messages, model, **kw):
+            seen["prompt"] = messages[0]["content"]
+            return self._GOOD
+        with mock.patch.object(argo_github, "read_local_source",
+                               return_value="FIXTURE_SNIPPET_42"), \
+             mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            dg._diagnose_cluster(cluster)
+        self.assertIn("FIXTURE_SNIPPET_42", seen["prompt"])
+        self.assertIn("src/argo_observe.py", seen["prompt"])
+
+    def test_code_context_degrades_without_crashing_on_read_error(self):
+        # A read failure must NOT crash diagnose(); the prompt falls back to filename-only.
+        cluster = {"kind": "tool_error", "count": 4, "fingerprint": "fp",
+                   "samples": ['File "src/argo_observe.py", line 5']}
+        seen = {}
+
+        def fake_chat(system, messages, model, **kw):
+            seen["prompt"] = messages[0]["content"]
+            return self._GOOD
+        with mock.patch.object(argo_github, "read_local_source",
+                               side_effect=OSError("disk gone")), \
+             mock.patch.object(observe, "chat_with_mcp", fake_chat):
+            out = dg._diagnose_cluster(cluster)
+        self.assertEqual(out["diagnosis"], "d")        # no crash
+        self.assertIn("(none found)", seen["prompt"])  # degraded section
+
+
+class ExtractSourceRefTest(unittest.TestCase):
+    """_extract_source_ref must read a line number ONLY when adjacent to the path, and
+    _code_context must treat read_local_source's sentinels (incl. '(empty file)') as misses."""
+
+    def test_line_taken_only_when_adjacent_to_path(self):
+        # Real traceback forms -> path + line.
+        self.assertEqual(dg._extract_source_ref('File "src/argo_x.py", line 42, in f'),
+                         ("src/argo_x.py", 42))
+        self.assertEqual(dg._extract_source_ref("boom at src/argo_x.py:7"),
+                         ("src/argo_x.py", 7))
+
+    def test_timestamp_colon_digits_not_read_as_line(self):
+        # Bugbot: a 14:03 timestamp before the path must NOT become line 3/14.
+        path, line = dg._extract_source_ref("sendMessage failed 14:03 in argo_webhook.py")
+        self.assertEqual(path, "src/argo_webhook.py")
+        self.assertIsNone(line)
+
+    def test_no_path_returns_none(self):
+        self.assertEqual(dg._extract_source_ref("too many values to unpack"), (None, None))
+
+    def test_code_context_skips_empty_file_sentinel(self):
+        # Bugbot: read_local_source returns "(empty file)" for an empty match -- that is a
+        # miss, not source; _code_context must not inject it as code.
+        cluster = {"samples": ['File "src/argo_x.py", line 2']}
+        with mock.patch.object(argo_github, "read_local_source", return_value="(empty file)"):
+            self.assertEqual(dg._code_context(cluster), "")
 
 
 if __name__ == "__main__":

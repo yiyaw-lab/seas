@@ -183,6 +183,56 @@ def open_clusters(min_count=3, window_hours=24):
         return []
 
 
+# Secret scrubbers for the chat-facing read_incidents projection. The ledger's raw
+# `samples` are exception bodies and CAN embed a bearer header, an API-key prefix, an
+# email, or a token -- and read_incidents relays to the chat model (and onward to the
+# user), unlike the internal diagnose path. So a chat-facing sample is ALWAYS scrubbed.
+_REDACT_PATTERNS = (
+    re.compile(r"(?i)\b(?:bearer|token|api[_-]?key|secret|password|authorization)\b"
+               r"\s*[:=]?\s*\S+"),
+    re.compile(r"\b(?:sk|pk|gh[posru]|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{6,}"),
+    re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),  # email
+    re.compile(r"\b[0-9a-fA-F]{24,}\b"),                                  # long hex
+)
+
+
+def _redact(text):
+    """Scrub likely secrets/PII from a string before it can reach the chat model."""
+    s = str(text)
+    for pat in _REDACT_PATTERNS:
+        s = pat.sub("<redacted>", s)
+    return s
+
+
+def format_for_prompt(limit=12):
+    """REDACTED, chat-safe projection of the incident ledger for the read_incidents
+    tool: per open cluster, kind/count/status/fingerprint/first+last-seen and ONE
+    secret-scrubbed sample -- never the raw samples array. Lets Argo ground a claim
+    about its own operational failures instead of confabulating one. Read-only; never
+    raises (returns a plain note on any error)."""
+    try:
+        clusters = open_clusters(min_count=1, window_hours=24 * 365)
+        if not clusters:
+            return "No open incidents in the ledger."
+        out = []
+        for c in clusters[:max(1, int(limit))]:
+            samples = c.get("samples") or []
+            sample = _redact(str(samples[0]))[:200] if samples else "(none)"
+            out.append(
+                f"[{c.get('kind')}] count={c.get('count')} status={c.get('status')} "
+                f"first={str(c.get('first_seen', '?'))[:10]} "
+                f"last={str(c.get('last_seen', '?'))[:10]}\n"
+                # The fingerprint is derived from the raw signature and strips only
+                # digits/UUIDs/hex/URLs -- NOT emails or token-shaped strings -- so it
+                # too must be redacted before it reaches the chat model and the user.
+                f"  fingerprint: {_redact(str(c.get('fingerprint', '')))}\n"
+                f"  sample: {sample}")
+        return "\n".join(out)
+    except Exception:
+        log.warning("format_for_prompt failed", exc_info=True)
+        return "Could not read the incident ledger."
+
+
 def detail_report(limit=10, min_count=1, window_hours=24 * 14):
     """Operator-facing DETAIL for the open incident clusters: the recent sample error
     text behind each count -- the `<tool>: <message>` strings that carry which tool

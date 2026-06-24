@@ -144,8 +144,10 @@ class ProposalGateTest(unittest.TestCase):
 
     def test_refuses_protected_safety_paths(self):
         # The self-modification loops must never touch their own rails: CI under
-        # .github/ and the budget/breaker guards. Refused before any GitHub write.
-        for path in (".github/workflows/tests.yml", "src/argo_guard.py"):
+        # .github/, the budget/breaker guards, and argo_github.py (the only confined
+        # local reader -- weakening it could exfiltrate .env). Refused before any write.
+        for path in (".github/workflows/tests.yml", "src/argo_guard.py",
+                     "src/argo_github.py"):
             with mock.patch.object(srv, "_gh_write",
                                    side_effect=AssertionError("must not reach GitHub")):
                 text, info = self._impl({

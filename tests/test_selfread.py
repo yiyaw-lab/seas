@@ -1,0 +1,142 @@
+"""Confined self-read tests (argo_github.read_local_source / code_search).
+
+search_self and the diagnose code-context read the LOCAL checkout -- a broader surface
+than the GitHub-API tools -- so the containment is the security-load-bearing piece: a
+read must stay inside the repo's source tree and NEVER reach .env, data/, or outside the
+root, regardless of what path the model supplies. These tests seed a tmp ROOT and prove
+the allow/deny matrix and that code_search works with AND without ripgrep (the live
+Railway image likely has no rg, so the stdlib fallback is the production path).
+
+Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
+"""
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import argo_github as g
+
+
+class _TmpRootMixin:
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        (self.root / "src").mkdir()
+        (self.root / "data").mkdir()
+        (self.root / "src" / "mod.py").write_text(
+            "import os\n@with_deadline\ndef f():\n    return 1\n")
+        (self.root / "src" / "two.py").write_text("@with_deadline\nx = 1\n")
+        (self.root / "data" / "secret.json").write_text('{"token": "sk-XYZ"}\n')
+        (self.root / ".env").write_text("ARGO_PROPOSE_TOKEN=abc\n")
+        self._patch = mock.patch.object(g, "_SELFREAD_ROOT", self.root)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmp.cleanup()
+
+
+class ConfinedReadTest(_TmpRootMixin, unittest.TestCase):
+    def test_reads_allowed_source(self):
+        self.assertIn("with_deadline", g.read_local_source("src/mod.py"))
+
+    def test_refuses_parent_traversal(self):
+        self.assertTrue(g.read_local_source("../../../etc/passwd").startswith("Refused"))
+
+    def test_refuses_absolute_path(self):
+        self.assertTrue(g.read_local_source("/etc/passwd").startswith("Refused"))
+
+    def test_refuses_dotenv(self):
+        self.assertTrue(g.read_local_source(".env").startswith("Refused"))
+
+    def test_refuses_data_dir(self):
+        self.assertTrue(g.read_local_source("data/secret.json").startswith("Refused"))
+
+    def test_refuses_non_source_extension(self):
+        (self.root / "src" / "notes.json").write_text('{"k": 1}\n')
+        self.assertTrue(g.read_local_source("src/notes.json").startswith("Refused"))
+
+    def test_window_offset_limit(self):
+        self.assertEqual(g.read_local_source("src/mod.py", offset=2, limit=1).strip(),
+                         "@with_deadline")
+
+
+class CodeSearchTest(_TmpRootMixin, unittest.TestCase):
+    def test_empty_pattern_refused(self):
+        self.assertTrue(g.code_search("").startswith("Refused"))
+
+    def test_finds_literal_across_files_with_rg_if_present(self):
+        out = g.code_search("with_deadline")
+        self.assertIn("src/mod.py", out)
+        self.assertIn("src/two.py", out)
+
+    def test_fallback_finds_hit_without_ripgrep(self):
+        # The live (rg-absent) path: force the stdlib walk and confirm it still locates.
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("with_deadline")
+        self.assertIn("src/mod.py", out)
+        self.assertIn(":", out)  # path:line:text shape
+
+    def test_fallback_never_searches_data_or_dotenv(self):
+        # Even a literal that exists ONLY in data/.env must not surface (confinement).
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("sk-XYZ")           # lives in data/secret.json
+        self.assertNotIn("secret.json", out)
+        self.assertTrue(out.startswith("No matches"))
+
+    def test_total_results_capped(self):
+        big = self.root / "src" / "many.py"
+        big.write_text("\n".join("needle = %d" % i for i in range(50)) + "\n")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("needle", max_results=5)
+        self.assertLessEqual(len(out.splitlines()), 5)
+
+    def test_symlink_out_of_tree_is_never_searched(self):
+        # HIGH (Bugbot): a src/*.py symlink pointing OUTSIDE the tree must not be read by
+        # the fallback walk -- its content must never reach search_self. Confinement on
+        # the search path must match read_local_source.
+        outside = self.root.parent / "outside_secret.py"
+        outside.write_text("SECRET_NEEDLE = 'leak'\n")
+        try:
+            (self.root / "src" / "evil.py").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unsupported here")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("SECRET_NEEDLE")
+        self.assertNotIn("evil.py", out)
+        self.assertTrue(out.startswith("No matches"))
+        # and read_local_source refuses it directly too
+        self.assertTrue(g.read_local_source("src/evil.py").startswith("Refused"))
+
+    def test_fallback_scans_full_extension_allowlist(self):
+        # Bugbot: rg and the fallback must agree. The fallback now scans every allowed
+        # source extension (e.g. .toml), not just .py/.md, so results don't change by env.
+        (self.root / "src" / "conf.toml").write_text("key = 'NEEDLE_TOML'\n")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("NEEDLE_TOML")
+        self.assertIn("src/conf.toml", out)
+
+    def test_rg_error_exit_code_falls_back_to_stdlib(self):
+        # Bugbot: rg exit 2 (a runtime error, NOT raised by subprocess.run) must not read
+        # as "no matches" -- it must fall back to the stdlib walk.
+        import types
+        err = types.SimpleNamespace(returncode=2, stdout="", stderr="rg: boom")
+        with mock.patch.object(g.shutil, "which", return_value="/usr/bin/rg"), \
+             mock.patch.object(g.subprocess, "run", return_value=err):
+            out = g.code_search("with_deadline")
+        self.assertIn("src/mod.py", out)  # fallback found it despite the rg error
+
+    def test_fallback_skips_oversize_file(self):
+        # Bugbot: the fallback must honor the same per-file cap as rg (--max-filesize),
+        # so a huge file isn't fully read (which would also blow the 10s tool deadline).
+        (self.root / "src" / "huge.py").write_text("BIGTOKEN\n" + "x = 0\n" * 200_000)  # >1MB
+        (self.root / "src" / "small.py").write_text("BIGTOKEN = 1\n")
+        with mock.patch.object(g.shutil, "which", return_value=None):
+            out = g.code_search("BIGTOKEN")
+        self.assertIn("src/small.py", out)
+        self.assertNotIn("huge.py", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

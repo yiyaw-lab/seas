@@ -204,5 +204,41 @@ class IncidentLedgerTest(unittest.TestCase):
             self.assertEqual(inc.detail_report(), "No open incident clusters.")
 
 
+class FormatForPromptTest(unittest.TestCase):
+    """read_incidents relays to the chat model (and onward to the user), so its sample
+    MUST be redacted -- the raw ledger sample can embed a bearer header / token / email.
+    """
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        patcher = mock.patch.object(inc, "INCIDENTS_PATH", Path(self.tmp) / "inc.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_sample_is_redacted_and_raw_secret_never_returned(self):
+        for _ in range(3):  # 3 records -> an open cluster
+            inc.record_incident(
+                "tool_error", "leaky boom",
+                "Authorization: Bearer sk-LIVE-TOKEN-9 for ops@example.com")
+        out = inc.format_for_prompt()
+        self.assertIn("tool_error", out)
+        self.assertIn("count=3", out)
+        self.assertNotIn("sk-LIVE-TOKEN-9", out)      # token scrubbed
+        self.assertNotIn("ops@example.com", out)      # email scrubbed
+        self.assertIn("<redacted>", out)
+
+    def test_empty_ledger_is_safe_note(self):
+        self.assertIn("No open incidents", inc.format_for_prompt())
+
+    def test_fingerprint_is_redacted_too(self):
+        # Bugbot: the fingerprint is derived from the raw SIGNATURE and strips only
+        # digits/UUIDs/hex/URLs -- an email/token in the signature survives into the
+        # fingerprint, so it must be redacted before reaching the chat model.
+        for _ in range(3):
+            inc.record_incident("tool_error", "auth failed for ops@secret.com")
+        out = inc.format_for_prompt()
+        self.assertNotIn("ops@secret.com", out)  # scrubbed from the fingerprint line
+        self.assertIn("<redacted>", out)
+
+
 if __name__ == "__main__":
     unittest.main()
