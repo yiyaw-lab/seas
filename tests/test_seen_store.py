@@ -39,6 +39,23 @@ class ItemIdTest(unittest.TestCase):
             watch._item_id({"link": "https://x.com/a?utm_source=feed&ref=hn"}),
             watch._item_id({"link": "https://x.com/a"}))
 
+    def test_identity_query_kept_so_shared_path_items_dont_collapse(self):
+        # The bug: dropping the WHOLE query collapsed every HN item (/item?id=N)
+        # and YouTube video (/watch?v=N) to one id, so the feed went silent after
+        # its first item. Identity params must be kept. (FAILS before the fix:
+        # both ids equal "news.ycombinator.com/item".)
+        self.assertNotEqual(
+            watch._item_id({"link": "https://news.ycombinator.com/item?id=111"}),
+            watch._item_id({"link": "https://news.ycombinator.com/item?id=222"}))
+        self.assertNotEqual(
+            watch._item_id({"link": "https://www.youtube.com/watch?v=AAA"}),
+            watch._item_id({"link": "https://www.youtube.com/watch?v=BBB"}))
+        # identity kept, tracking still dropped: the same item via a tracking URL
+        # still dedups, and param order doesn't fork the id.
+        self.assertEqual(
+            watch._item_id({"link": "https://news.ycombinator.com/item?id=111&utm_source=x"}),
+            watch._item_id({"link": "https://news.ycombinator.com/item?id=111"}))
+
     def test_normalized_title_collapses_tag_and_whitespace(self):
         # No-link fallback: a [tag]-prefixed, oddly-spaced, punctuated reprint
         # dedups against the clean title.
