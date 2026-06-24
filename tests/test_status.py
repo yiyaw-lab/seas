@@ -211,6 +211,20 @@ class EmptyStoresTest(StatusBase):
         text = status.render()  # must not raise
         self.assertIn("Nothing in flight", text)
 
+    def test_proposals_in_flight_redacts_incident_key_pii(self):
+        """The fix-PR summary surfaced to the user must not expose PII from the incident key.
+
+        FAILS before the argo_status _proposals_in_flight incident_key-redact fix.
+        """
+        self._write(argo_paths, "PROPOSALS_PATH",
+                    [{"incident_key": "tool_error|send failed for victim@example.com",
+                      "pr_number": 7, "resolved": False,
+                      "merged": False, "ci_failed": False}])
+        text = status.render()
+        self.assertNotIn("victim@example.com", text)
+        self.assertIn("<redacted>", text)
+        self.assertIn("7", text)  # PR number still visible
+
 
 if __name__ == "__main__":
     unittest.main()

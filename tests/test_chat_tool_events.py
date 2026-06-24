@@ -13,10 +13,13 @@ Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 
 import os
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import argo_incidents as inc
 import argo_observe as observe
 
 
@@ -70,6 +73,27 @@ class ChatToolEventsTest(unittest.TestCase):
             return_tool_events=True)
         self.assertEqual(text, "sending the proposal now.")
         self.assertEqual(events, [])
+
+    def test_mcp_tool_result_error_snippet_is_redacted_before_logging(self):
+        """Secrets in mcp_tool_result content must be redacted before the snippet is
+        logged or recorded -- the raw error body can embed a bearer token or email.
+
+        FAILS before the chat_with_mcp mcp_tool_result snippet-redact fix.
+        """
+        tmp = tempfile.mkdtemp()
+        with mock.patch.object(inc, "INCIDENTS_PATH", Path(tmp) / "inc.json"):
+            with mock.patch.object(observe, "_record_tool_error", lambda *a: None):
+                blocks = [
+                    _block(type="mcp_tool_use", name="github_read_file"),
+                    _block(type="mcp_tool_result", is_error=True,
+                           content="401: Authorization: Bearer ghp_SECRETTOKEN1234567 ops@example.com"),
+                ]
+                with self.assertLogs("argo_observe", level="WARNING") as cm:
+                    self._run(blocks)
+        logged = " ".join(cm.output)
+        self.assertNotIn("ghp_SECRETTOKEN1234567", logged)
+        self.assertNotIn("ops@example.com", logged)
+        self.assertIn("<redacted>", logged)
 
 
 if __name__ == "__main__":

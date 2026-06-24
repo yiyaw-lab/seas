@@ -486,7 +486,8 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                 events.append(name)
                 log.info("mcp tool_use: %s", name)
             elif bt == "mcp_tool_result":
-                snippet = str(getattr(b, "content", ""))[:200]
+                import argo_incidents  # scrub secrets before the snippet is logged/stored
+                snippet = argo_incidents._redact(str(getattr(b, "content", ""))[:200])
                 if getattr(b, "is_error", False):
                     log.warning("mcp tool_result ERROR: %s", snippet)
                     _record_tool_error(name, snippet)

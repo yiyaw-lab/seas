@@ -353,9 +353,12 @@ def diagnose():
     _record_nudge()
     payload = {
         "title": f"Argo self-fix: {cluster.get('kind')} recurring",
+        # `key` embeds the raw fingerprint, and _fingerprint does not strip emails/tokens,
+        # so redact it HERE -- the description is surfaced to the fix-authoring model and
+        # the PR body. The internal `incident_key` below stays raw (dedup/mark matching).
         "description": (f"Diagnosis: {diagnosis}\n\nSuggested fix: "
-                        f"{result.get('suggestion', '')}\n\nIncident: {key} "
-                        f"(seen {cluster.get('count')}x)."),
+                        f"{result.get('suggestion', '')}\n\nIncident: "
+                        f"{argo_incidents._redact(key)} (seen {cluster.get('count')}x)."),
         "suspected_files": in_repo,
         "suggestion": result.get("suggestion", ""),
         "belief_id": belief_id,
