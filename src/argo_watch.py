@@ -26,7 +26,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from dotenv import load_dotenv
 
@@ -62,16 +62,31 @@ MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before reti
 _TITLE_TAG_RE = re.compile(r"^\s*\[[^\]]*\]\s*")  # a leading "[news]"-style tag
 
 
+# Query params that are pure tracking/marketing noise -- dropped so the SAME
+# article reaching us via two tracking URLs dedups. Every OTHER param is treated
+# as identity-bearing and KEPT: dropping the whole query collapsed every Hacker
+# News item (/item?id=N) and YouTube video (/watch?v=N) to one id, silently
+# killing those feeds after their first item ever seen.
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "ref", "ref_src", "fbclid", "gclid", "mc_cid", "mc_eid", "cmpid", "ncid",
+})
+
+
 def _canonical_url(link):
-    """host + path, scheme- and query-insensitive, so the SAME article reaching
-    us via two feeds (http vs https, a trailing slash, utm/ref tracking params)
-    collapses to one id instead of alerting twice."""
+    """host + path + identity query, scheme-insensitive, with tracking params
+    stripped, so the SAME article reaching us via two feeds (http vs https, a
+    trailing slash, utm/ref tracking) collapses to one id -- without collapsing
+    distinct items that live under a shared path (HN /item, YouTube /watch)."""
     parts = urlsplit(link)
     if not parts.netloc:
         # Not a scheme://host URL (e.g. an Atom urn:/tag: id). Keep the raw
         # string so it still dedups, just without canonicalization.
         return link.lower()
-    return f"{parts.netloc.lower()}{parts.path.rstrip('/')}"
+    kept = sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                  if k.lower() not in _TRACKING_PARAMS)
+    base = f"{parts.netloc.lower()}{parts.path.rstrip('/')}"
+    return f"{base}?{urlencode(kept)}" if kept else base
 
 
 def _normalize_title(title):
