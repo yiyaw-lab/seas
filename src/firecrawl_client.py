@@ -95,7 +95,7 @@ def search_related(query, category=None, limit=5, allowed_hosts=None):
     }
     if category:
         body["categories"] = [{"type": category}]
-    ok, res = _post("/search", body)
+    ok, res = _post("/search", body, timeout=DEFAULT_TIMEOUT)
     if not ok or not isinstance(res, dict) or not res.get("success"):
         return None
     out = []
