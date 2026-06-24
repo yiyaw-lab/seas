@@ -117,6 +117,30 @@ class DiagnoseFunnelTest(unittest.TestCase):
             res = dg.diagnose()
         self.assertTrue(res["acted"])  # re-diagnosed, not skipped
 
+    def test_staged_fix_description_redacts_pii_keeps_incident_key_raw(self):
+        """The fix-proposal description is surfaced to the authoring model + the PR body.
+        Secrets/PII in the incident key must be redacted from description while the
+        internal incident_key remains raw for dedup/mark matching.
+
+        FAILS before the argo_diagnose _stage_fix description-redact fix.
+        """
+        self._record(3, kind="tool_error", sig="auth failed for victim@example.com")
+        canned = {
+            "diagnosis": "token refresh path misfires",
+            "suspected_files": ["src/argo_webhook.py"],
+            "suggestion": "refresh before the call",
+            "confident_enough_to_propose": True,
+        }
+        with mock.patch.object(dg, "_diagnose_cluster", return_value=canned):
+            dg.diagnose()
+        self.assertEqual(len(self.staged), 1)
+        desc = self.staged[0]["description"]
+        self.assertNotIn("victim@example.com", desc)
+        self.assertIn("<redacted>", desc)
+        incident_key = self.staged[0]["incident_key"]
+        self.assertIn("victim@example.com", incident_key)  # raw key preserved
+        self.assertTrue(incident_key.startswith("tool_error|"))
+
 
 class ConfirmDeployedTest(unittest.TestCase):
     """confirm_deployed closes the post-merge watch: incident-keyed proposals are

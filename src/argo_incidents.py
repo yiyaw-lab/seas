@@ -175,7 +175,13 @@ def open_clusters(min_count=3, window_hours=24):
             seen = _parse(c.get("last_seen", ""))
             if seen is None or seen < cutoff:
                 continue
-            out.append({**c, "key": key})
+            # Scrub secrets at this single chokepoint: get_incidents/detail_report and
+            # read_incidents (-> the user) and the diagnose model prompt all read clusters
+            # here. `key` stays raw -- it is the internal mark/dedup id; it is redacted
+            # separately at the few places it is actually surfaced.
+            out.append({**c, "key": key,
+                        "samples": [_redact(s) for s in (c.get("samples") or [])],
+                        "fingerprint": _redact(c.get("fingerprint", ""))})
         out.sort(key=lambda c: (c.get("count", 0), c.get("last_seen", "")), reverse=True)
         return out
     except Exception:
@@ -183,16 +189,21 @@ def open_clusters(min_count=3, window_hours=24):
         return []
 
 
-# Secret scrubbers for the chat-facing read_incidents projection. The ledger's raw
-# `samples` are exception bodies and CAN embed a bearer header, an API-key prefix, an
-# email, or a token -- and read_incidents relays to the chat model (and onward to the
-# user), unlike the internal diagnose path. So a chat-facing sample is ALWAYS scrubbed.
+# Secret scrubbers for every projection that leaves the trust boundary. The ledger's
+# raw `samples` are exception bodies and the `fingerprint` is a normalized signature;
+# both CAN embed a bearer header, an API-key prefix, an email, or a token. They reach
+# the chat model and the user via read_incidents (format_for_prompt), get_incidents
+# (detail_report) and the diagnose model prompt -- so open_clusters scrubs them once,
+# centrally, before any reader sees them.
 _REDACT_PATTERNS = (
+    # keyword=value -- and absorb an HTTP "Bearer <token>" scheme word between the key
+    # and the value, else "Authorization: Bearer <jwt>" would redact only "Bearer".
     re.compile(r"(?i)\b(?:bearer|token|api[_-]?key|secret|password|authorization)\b"
-               r"\s*[:=]?\s*\S+"),
-    re.compile(r"\b(?:sk|pk|gh[posru]|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{6,}"),
-    re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),  # email
-    re.compile(r"\b[0-9a-fA-F]{24,}\b"),                                  # long hex
+               r"\s*[:=]?\s*(?:bearer\s+)?\S+"),
+    re.compile(r"\b(?:sk|pk|gh[posru]|xox[baprs])[-_][A-Za-z0-9_\-]{6,}"),  # token prefixes
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                    # AWS access key id
+    re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),    # email
+    re.compile(r"\b[0-9a-fA-F]{24,}\b"),                                    # long hex (sha/token)
 )
 
 

@@ -204,6 +204,77 @@ class IncidentLedgerTest(unittest.TestCase):
             self.assertEqual(inc.detail_report(), "No open incident clusters.")
 
 
+class OpenClustersRedactTest(unittest.TestCase):
+    """open_clusters() must redact samples + fingerprint before returning them.
+
+    FAILS before the open_clusters-chokepoint fix (samples/fingerprint were returned raw).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        patcher = mock.patch.object(inc, "INCIDENTS_PATH", Path(self.tmp) / "inc.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_open_clusters_redacts_samples_and_fingerprint_keeps_key_raw(self):
+        """FAILS before the open_clusters chokepoint fix."""
+        inc.record_incident(
+            "tool_error",
+            "auth failed for victim@example.com",
+            "Authorization: Bearer ghp_AAAAAAAAAAAAAAAAAAAA1234 from victim@example.com",
+        )
+        clusters = inc.open_clusters(min_count=1)
+        self.assertEqual(len(clusters), 1)
+        c = clusters[0]
+        joined = " ".join(c.get("samples") or [])
+        self.assertNotIn("ghp_AAAAAAAAAAAAAAAAAAAA1234", joined)
+        self.assertNotIn("victim@example.com", joined)
+        self.assertIn("<redacted>", joined)
+        self.assertNotIn("victim@example.com", c["fingerprint"])
+        self.assertTrue(c["key"].startswith("tool_error|"))
+
+    def test_detail_report_samples_are_redacted(self):
+        """detail_report() backs the get_incidents MCP tool; secrets must not reach the user.
+
+        FAILS before the open_clusters chokepoint fix.
+        """
+        inc.record_incident(
+            "tool_error",
+            "auth failed for victim@example.com",
+            "Authorization: Bearer ghp_AAAAAAAAAAAAAAAAAAAA1234 from victim@example.com",
+        )
+        report = inc.detail_report()
+        self.assertNotIn("ghp_AAAAAAAAAAAAAAAAAAAA1234", report)
+        self.assertNotIn("victim@example.com", report)
+        self.assertIn("<redacted>", report)
+        self.assertIn("tool_error", report)  # benign kind survives
+
+
+class RedactPatternsTest(unittest.TestCase):
+    """Unit tests for _redact's pattern coverage.
+
+    FAILS before the _REDACT_PATTERNS upgrade (bearer-scheme absorption + bare AKIA).
+    """
+
+    def test_bearer_scheme_word_absorbs_jwt(self):
+        """FAILS before the bearer-scheme absorption fix."""
+        result = inc._redact(
+            "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbG.payload.sig"
+        )
+        self.assertNotIn("eyJ0eXAiOiJKV1QiLCJhbG", result)
+        self.assertIn("<redacted>", result)
+
+    def test_bare_aws_access_key_id_redacted(self):
+        """FAILS before the bare AKIA pattern fix."""
+        result = inc._redact("creds AKIAIOSFODNN7EXAMPLE here")
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", result)
+        self.assertIn("<redacted>", result)
+
+    def test_plain_operator_text_unchanged(self):
+        """False-positive guard: innocuous text must survive _redact unchanged."""
+        self.assertEqual(inc._redact("plain operator text"), "plain operator text")
+
+
 class FormatForPromptTest(unittest.TestCase):
     """read_incidents relays to the chat model (and onward to the user), so its sample
     MUST be redacted -- the raw ledger sample can embed a bearer header / token / email.

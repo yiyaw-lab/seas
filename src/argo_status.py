@@ -42,6 +42,7 @@ does not depend on the LLM choosing a tool.
 
 from datetime import datetime, timezone
 
+import argo_incidents
 import argo_paths
 import argo_store
 import world_model
@@ -172,7 +173,9 @@ def _proposals_in_flight():
         if not p.get("incident_key"):
             continue  # evolution-origin PR -- surfaced by _evolution_in_flight, not here
         num = p.get("pr_number", "?")
-        key = p.get("incident_key") or "an incident"
+        # incident_key embeds the raw fingerprint (emails/tokens survive _fingerprint),
+        # and this summary is sent to the user -- so scrub it before it is rendered.
+        key = argo_incidents._redact(p.get("incident_key") or "an incident")
         if p.get("ci_failed"):
             out.append({
                 "verdict": BLOCKED, "kind": "fix-pr", "id": f"PR-{num}",
