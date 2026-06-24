@@ -1393,11 +1393,24 @@ def handle_update(update):
 
 
 def _safe_handle(update):
-    """Run handle_update in a background thread; never raise out of the thread."""
+    """Run handle_update in a background thread; never raise out of the thread.
+
+    Catches SystemExit too: a Telegram delivery failure inside the handler reaches
+    send_telegram.send_message -> fail() -> sys.exit(1), and SystemExit is NOT an
+    Exception, so a bare `except Exception` let it escape and silently kill the
+    daemon thread -- the update is already deduped, so Telegram never retries and
+    the user gets total silence. Log a traceback (operator console) and record an
+    incident so the failure surfaces instead of vanishing."""
     try:
         handle_update(update)
-    except Exception as exc:
-        print(f"handle_update error: {exc}")
+    except (Exception, SystemExit) as exc:
+        log.exception("handle_update failed for update %s", update.get("update_id"))
+        try:
+            import argo_incidents
+            argo_incidents.record_incident(
+                "handle_update_error", f"{type(exc).__name__}: {exc}", str(exc))
+        except Exception:
+            log.debug("could not record handle_update incident", exc_info=True)
 
 
 # Telegram RETRIES a webhook delivery (same update_id) if it doesn't get a fast
