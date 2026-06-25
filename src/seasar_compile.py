@@ -1080,6 +1080,8 @@ Build context for autonomous coding agents on this Build Order.
 - Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
+- `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
+- CI (`.github/workflows/seasar-gate.yml`) runs build-order + forced-stop + ownership + project verify as a REQUIRED check; a red gate blocks merge.
 - Build proceeds in waves; wait for the previous wave's gates before starting.
 """
 
@@ -1197,6 +1199,8 @@ def _md_work_order(wo, order=None):
     out.append("- The repo verify pipeline is green: typecheck + tests + `verify-build-order`.")
     out.append("- Every blocking quality gate touching your files is green.")
     out.append("- `python3 scripts/assert-no-sentinel.py` is green (every decision resolved).")
+    out.append(f"- `python3 scripts/check-ownership.py --agent \"{wo.get('agent', '')}\" "
+               f"<changed files>` is green (you stayed in your lane).")
     out.append("\n## Acceptance (per task)")
     out += [f"- {t.get('id')}: {t.get('acceptance', '')}" for t in my_tasks] or ["- (none)"]
     out.append("\n## Definition of done")
@@ -1316,6 +1320,133 @@ if __name__ == "__main__":
 '''
 
 
+# Build-time one-writer-per-file enforcement, emitted into every bundle. A non-agent
+# actor (CI/git) runs it, so an agent cannot write outside its lane by goodwill alone.
+_CHECK_OWNERSHIP = r'''#!/usr/bin/env python3
+"""check-ownership -- build-time one-writer-per-file enforcement, run by CI (not an agent).
+
+Audit mode (no --agent): fail (exit 1) if any file is written by more than one task in
+build-order.json -- a one-writer-per-file violation the plan must not contain.
+
+Lane mode (--agent NAME): fail if any changed file (positional args, or newline-separated
+on stdin) lies OUTSIDE that agent's allowed set -- the union of its work order's tasks'
+files. So an agent's diff cannot touch another lane, enforced by git/CI not by goodwill.
+Assumes tasks declare explicit file paths (Seasar's convention); a file an agent creates
+must be declared on its task.
+"""
+import json
+import os
+import sys
+
+
+def _order(root):
+    with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _file_owners(order):
+    owners = {}
+    for t in (order.get("tasks") or []):
+        if isinstance(t, dict):
+            for f in (t.get("files") or []):
+                owners.setdefault(f, []).append(t.get("id"))
+    return owners
+
+
+def _allowed(order, agent):
+    tasks = {t.get("id"): t for t in (order.get("tasks") or []) if isinstance(t, dict)}
+    for wo in (order.get("work_orders") or []):
+        if isinstance(wo, dict) and wo.get("agent") == agent:
+            return {f for tid in (wo.get("task_ids") or [])
+                    for f in (tasks.get(tid, {}).get("files") or [])}
+    return None
+
+
+def main(argv):
+    root = os.environ.get("SEASAR_ROOT", ".")
+    agent, files, it = None, [], iter(argv)
+    for a in it:
+        if a == "--agent":
+            agent = next(it, "")
+        elif a == "--root":
+            root = next(it, ".")
+        else:
+            files.append(a)
+    try:
+        order = _order(root)
+    except (OSError, ValueError) as e:
+        print("check-ownership: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+
+    if agent is None:
+        shared = {f: ids for f, ids in _file_owners(order).items() if len(ids) > 1}
+        if shared:
+            print("OWNERSHIP VIOLATION: file(s) written by more than one task:")
+            for f, ids in sorted(shared.items()):
+                print("  %s <- %s" % (f, ", ".join(map(str, ids))))
+            return 1
+        print("OK: every planned file has a single writer.")
+        return 0
+
+    allowed = _allowed(order, agent)
+    if allowed is None:
+        print("check-ownership: no work order for agent %r" % agent, file=sys.stderr)
+        return 1
+    if not files:
+        files = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+    outside = [f for f in files if f not in allowed]
+    if outside:
+        print("OUT OF LANE: agent %r changed file(s) outside its allowed set:" % agent)
+        for f in outside:
+            print("  " + f)
+        print("Allowed: " + (", ".join(sorted(allowed)) or "(none)"))
+        return 1
+    print("OK: agent %r stayed within its lane (%d file(s))." % (agent, len(files)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+
+# The non-agent enforcement actor: a CI required status check the downstream fleet cannot
+# route around. Wire it as a required check in branch protection so a red gate BLOCKS merge.
+_CI_WORKFLOW = '''name: seasar-gate
+# Wire this as a REQUIRED status check in branch protection: a red gate blocks the merge
+# button, so the fleet is held by GitHub/git, not by an agent choosing to obey.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  seasar-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build-order integrity
+        run: python3 scripts/verify-build-order.py build-order.json
+      - name: Forced stop (no unresolved decisions)
+        run: python3 scripts/assert-no-sentinel.py
+      - name: One writer per file (ownership audit)
+        run: python3 scripts/check-ownership.py
+      - name: Project verify (typecheck + tests + gate predicates)
+        run: |
+          if [ -f package.json ]; then
+            npm ci && npm run verify --if-present && npm test --if-present
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt && python -m pytest -q
+          else
+            echo "No recognized manifest -- set your project verify command here."
+          fi
+'''
+
+
 def _safe_bundle_path(raw):
     """Normalize a model-generated path for the bundle zip; return None if it would
     escape the root (Zip-Slip). Cross-platform: backslashes are normalized first so a
@@ -1384,6 +1515,9 @@ def build_bundle(order):
         # Forced-stop: the decision ledger + the gate that refuses to let a sentinel ship.
         put(f"{root}/DECISIONS.md", _md_decisions(order))
         put(f"{root}/scripts/assert-no-sentinel.py", _ASSERT_NO_SENTINEL)
+        # Build-time enforcement the fleet can't route around: ownership lint + CI gate.
+        put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
+        put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
