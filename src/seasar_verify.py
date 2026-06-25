@@ -1,0 +1,294 @@
+"""seasar_verify -- the executable consistency + executability checker for a Build
+Order.
+
+One source of truth, shared by two callers:
+  * seasar_compile.stamp() -- folds the result into the buildability score (the
+    `self_check_passes` factor) so a structurally-broken or prose-only order can never
+    grade well.
+  * scripts/verify-build-order.py -- the CLI gate the orchestrator runs on a compiled
+    order BEFORE any agent spends a token.
+
+Two severities:
+  ERROR (structural)     -- DAG integrity. A failure means agents WILL collide or block:
+                            same-wave file collisions, forward/dangling deps, a wave set
+                            that does not partition the tasks, a contract with no owner.
+  WARN  (executability)  -- the new DNA requirements. A failure means the order is prose,
+                            not runnable artifact: contracts with no compilable `source`,
+                            fixtures with no body/generator, a scaffold that is not a
+                            runnable skeleton, a missing merge/handoff protocol.
+
+Pure stdlib; operates on the order dict; NEVER raises on a malformed or legacy order --
+a missing field is a failed check, not a crash. Every accessor is defensive .get().
+"""
+
+import re
+
+ERROR = "error"   # structural -- agents WILL collide / block
+WARN = "warn"     # executability -- the order is prose, not runnable artifact
+
+# A scaffold is "runnable" if its literal files include a package manifest, a test/CI
+# config, and an env template (each graded separately). str.endswith accepts a tuple.
+_MANIFESTS = ("package.json", "pyproject.toml", "requirements.txt", "go.mod",
+              "cargo.toml", "gemfile", "pom.xml", "build.gradle", "composer.json",
+              "pubspec.yaml")
+_TEST_HINTS = ("vitest", "jest", "playwright", "pytest", "cypress", ".github/workflows",
+               "ci.yml", "ci.yaml", "test", "spec")
+_ENV_HINTS = (".env.example", ".env.template", ".env.sample")
+_FIXTURE_RE = re.compile(r"fixture", re.I)
+
+
+# --- defensive accessors -----------------------------------------------------
+
+def _dicts(order, key):
+    return [x for x in (order.get(key) or []) if isinstance(x, dict)]
+
+
+def _nonempty(v):
+    return bool(str(v or "").strip())
+
+
+def _strs(v):
+    """Coerce a field that should be a list of strings: a scalar or non-list yields []
+    (never char-iterated), non-str members are dropped. Mirrors _dicts() so a model that
+    emits files="a.py" or depends_on="T1" can't fabricate per-character collisions/deps."""
+    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def _wave_of(t):
+    """Tolerant 1-based wave (mirrors seasar_compile._wave_of; kept local so this
+    module has zero coupling to the compiler)."""
+    try:
+        return max(1, int(t.get("wave", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _tests_reference_fixture(order):
+    for t in _dicts(order, "tasks"):
+        blob = str(t.get("test", "")) + " " + str(t.get("acceptance", ""))
+        if _FIXTURE_RE.search(blob):
+            return True
+    return False
+
+
+def _fixture_materialized(f):
+    """A fixture is materialized if it carries literal text `body`, or (for a binary
+    input like an epub/pdf/image) `binary:true` + a reproducible `generator`."""
+    if _nonempty(f.get("body")):
+        return True
+    if f.get("binary") and _nonempty(f.get("generator")):
+        return True
+    return False
+
+
+def _scaffold_flags(order):
+    """(has_manifest, has_test_ci, has_env) over the literal scaffold_files that carry a
+    body -- the three things a runnable boot skeleton needs. A manifest is the floor: you
+    cannot install/build without one."""
+    paths = [str(s.get("path", "")).lower()
+             for s in _dicts(order, "scaffold_files") if _nonempty(s.get("body"))]
+    return (any(p.endswith(_MANIFESTS) for p in paths),
+            any(any(h in p for h in _TEST_HINTS) for p in paths),
+            any(p.endswith(_ENV_HINTS) for p in paths))
+
+
+def _scaffold_score(order):
+    """0-100 partial credit: of {manifest, test/CI config, env template}, how many the
+    literal scaffold_files provide. 0 if there is no runnable skeleton at all."""
+    return round(100 * sum(_scaffold_flags(order)) / 3)
+
+
+# --- the graded executability factors (consumed by stamp) --------------------
+
+def executability_factors(order):
+    """The three 0-100 factors that grade whether the order is materialized executable
+    artifact versus prose. Mirrors the WARN checks but as graded ratios for the score."""
+    order = order if isinstance(order, dict) else {}
+    contracts = _dicts(order, "contracts")
+    if contracts:
+        # Rubric per contract: literal `source` (the file agents IMPORT) weighted over a
+        # `source_path` (where it lands). Rewards full materialization, not a non-empty
+        # string -- a prose blurb with no landing file cannot score like a real contract.
+        # This replaces the old count-based contract_coverage as the contract-depth signal.
+        pts = sum((0.7 if _nonempty(c.get("source")) else 0.0)
+                  + (0.3 if _nonempty(c.get("source_path")) else 0.0)
+                  for c in contracts)
+        contracts_compile = round(100 * pts / len(contracts))
+    else:
+        contracts_compile = 0
+
+    fixtures = _dicts(order, "fixtures")
+    if fixtures:
+        mat = sum(1 for f in fixtures if _fixture_materialized(f))
+        fixtures_materialized = round(100 * mat / len(fixtures))
+    elif _tests_reference_fixture(order):
+        fixtures_materialized = 0       # tests need fixtures but none are materialized
+    else:
+        fixtures_materialized = 100      # nothing to materialize -> satisfied
+
+    return {
+        "contracts_compile": contracts_compile,
+        "fixtures_materialized": fixtures_materialized,
+        "scaffold_runnable": _scaffold_score(order),
+    }
+
+
+# --- the full pass/fail verifier (consumed by the CLI + self_check) ----------
+
+def verify_order(order):
+    """Run every structural + executability check on an order. Returns:
+        {ok, strict_ok, checks:[{name,ok,severity,detail}], summary, executability}
+    `ok`         -- no ERROR check failed (the DAG is sound; safe to dispatch agents).
+    `strict_ok`  -- ok AND no WARN check failed (the order is fully executable DNA).
+    `executability` -- 0-100, the fraction of WARN checks passing.
+    Never raises; a legacy order missing the new fields simply fails the WARN checks.
+    """
+    order = order if isinstance(order, dict) else {}
+    checks = []
+
+    def add(name, ok, severity, detail=""):
+        checks.append({"name": name, "ok": bool(ok), "severity": severity,
+                       "detail": "" if ok else str(detail)})
+
+    tasks = _dicts(order, "tasks")
+    task_ids = [t.get("id") for t in tasks if t.get("id")]
+    task_id_set = set(task_ids)
+
+    # ---- STRUCTURAL (ERROR) -- DAG integrity ----
+    add("tasks_present", len(tasks) > 0, ERROR, "no tasks defined")
+    # Every task needs a non-empty id, or it escapes the id-keyed checks below
+    # (waves_partition / deps / owner) and rides along, scheduled into no wave.
+    add("tasks_have_ids", all(_nonempty(t.get("id")) for t in tasks), ERROR,
+        "task(s) missing an id -- they escape every DAG check")
+    seen_ids, dup_ids = set(), []
+    for _i in task_ids:
+        if _i in seen_ids and _i not in dup_ids:
+            dup_ids.append(_i)
+        seen_ids.add(_i)
+    add("task_ids_unique", not dup_ids, ERROR,
+        "duplicate task id(s): " + ", ".join(map(str, dup_ids)))
+
+    by_wave = {}
+    for t in tasks:
+        by_wave.setdefault(_wave_of(t), []).append(t)
+    collisions = []
+    for wave, ts in by_wave.items():
+        for i in range(len(ts)):
+            for j in range(i + 1, len(ts)):
+                shared = set(_strs(ts[i].get("files"))) & set(_strs(ts[j].get("files")))
+                if shared:
+                    collisions.append(
+                        f"wave {wave}: {ts[i].get('id')} & {ts[j].get('id')} "
+                        f"share {sorted(shared)}")
+    add("wave_file_disjoint", not collisions, ERROR, "; ".join(collisions))
+
+    dep_missing, dep_forward = [], []
+    wave_by_id = {t.get("id"): _wave_of(t) for t in tasks}
+    for t in tasks:
+        tw = _wave_of(t)
+        for d in _strs(t.get("depends_on")):
+            if d not in task_id_set:
+                dep_missing.append(f"{t.get('id')}->{d}")
+            elif wave_by_id.get(d, 0) >= tw:
+                dep_forward.append(f"{t.get('id')}(w{tw})->{d}(w{wave_by_id.get(d)})")
+    add("deps_exist", not dep_missing, ERROR, "dangling: " + "; ".join(dep_missing))
+    add("deps_point_backward", not dep_forward, ERROR,
+        "not earlier-wave: " + "; ".join(dep_forward))
+
+    waves = (order.get("orchestration") or {}).get("waves") or []
+    flat = [tid for w in waves for tid in (w or [])]
+    add("waves_partition", sorted(flat) == sorted(task_ids), ERROR,
+        "orchestration.waves does not list every task id exactly once")
+
+    bad_owner = [c.get("name") for c in _dicts(order, "contracts")
+                 if c.get("owner_task") and c.get("owner_task") not in task_id_set]
+    add("contract_owner_exists", not bad_owner, ERROR,
+        "owner_task not a task: " + ", ".join(map(str, bad_owner)))
+
+    # ---- EXECUTABILITY (WARN) -- the DNA must be runnable artifact, not prose ----
+    contracts = _dicts(order, "contracts")
+    if contracts:
+        no_src = [c.get("name") for c in contracts if not _nonempty(c.get("source"))]
+        add("contracts_have_source", not no_src, WARN,
+            "prose-only (no compilable source): " + ", ".join(map(str, no_src)))
+        no_path = [c.get("name") for c in contracts
+                   if _nonempty(c.get("source")) and not _nonempty(c.get("source_path"))]
+        add("contracts_have_path", not no_path, WARN,
+            "source without source_path: " + ", ".join(map(str, no_path)))
+    else:
+        add("contracts_have_source", False, WARN, "no contracts defined")
+
+    fixtures = _dicts(order, "fixtures")
+    refs_fixture = _tests_reference_fixture(order)
+    if refs_fixture:
+        add("fixtures_present_if_referenced", len(fixtures) > 0, WARN,
+            "tasks reference fixtures but fixtures[] is empty")
+    if fixtures:
+        unmat = [f.get("path") for f in fixtures if not _fixture_materialized(f)]
+        add("fixtures_materialized", not unmat, WARN,
+            "no body/generator: " + ", ".join(map(str, unmat)))
+    elif refs_fixture:
+        add("fixtures_materialized", False, WARN,
+            "fixtures referenced by tests but none materialized")
+
+    add("scaffold_runnable", _scaffold_flags(order)[0], WARN,
+        "scaffold_files lack a package manifest (nothing to install -- not a runnable skeleton)")
+
+    orch = order.get("orchestration") or {}
+    add("handoff_protocol_present", _nonempty(orch.get("handoff_protocol")), WARN,
+        "orchestration.handoff_protocol is empty (no per-agent definition-of-done / merge order)")
+    add("contract_evolution_present", _nonempty(orch.get("contract_evolution")), WARN,
+        "orchestration.contract_evolution is empty (no propose-to-owner ritual for shared contracts)")
+
+    work_orders = _dicts(order, "work_orders")
+    if work_orders:
+        no_dod = [w.get("agent") for w in work_orders
+                  if not _nonempty(w.get("definition_of_done"))]
+        add("work_orders_have_dod", not no_dod, WARN,
+            "no definition_of_done: " + ", ".join(map(str, no_dod)))
+    else:
+        add("work_orders_have_dod", False, WARN, "no work_orders defined")
+
+    errors = sum(1 for c in checks if c["severity"] == ERROR and not c["ok"])
+    warnings = sum(1 for c in checks if c["severity"] == WARN and not c["ok"])
+    warn_total = sum(1 for c in checks if c["severity"] == WARN)
+    warn_pass = sum(1 for c in checks if c["severity"] == WARN and c["ok"])
+    ok = errors == 0
+    # The merge/handoff WARN checks NOT already graded by a dedicated score factor
+    # (contracts_compile / fixtures_materialized / scaffold_runnable). stamp() folds
+    # THIS into self_check_passes so the 8 score factors stay orthogonal.
+    independent = ("handoff_protocol_present", "contract_evolution_present",
+                   "work_orders_have_dod")
+    ind = [c for c in checks if c["name"] in independent]
+    ind_pass = sum(1 for c in ind if c["ok"])
+    return {
+        "ok": ok,
+        "strict_ok": ok and warnings == 0,
+        "checks": checks,
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "passed": sum(1 for c in checks if c["ok"]),
+            "total": len(checks),
+        },
+        "executability": round(100 * warn_pass / max(1, warn_total)),
+        "independent_executability": round(100 * ind_pass / max(1, len(ind))),
+    }
+
+
+def format_report(result, name=""):
+    """Human-readable per-check report for the CLI. Pure string; no I/O."""
+    head = "BUILD ORDER VERIFY" + (f"  {name}" if name else "")
+    lines = [head, "=" * len(head)]
+    for c in result["checks"]:
+        mark = "PASS" if c["ok"] else ("FAIL" if c["severity"] == ERROR else "warn")
+        line = f"  [{mark}] {c['name']}"
+        if c["detail"]:
+            line += f"  -- {c['detail']}"
+        lines.append(line)
+    s = result["summary"]
+    lines += ["",
+              f"  structural: {'OK' if result['ok'] else 'BROKEN'}"
+              f"   |   executability: {result['executability']}/100"
+              f"   |   {s['errors']} error(s), {s['warnings']} warning(s)"]
+    return "\n".join(lines)
