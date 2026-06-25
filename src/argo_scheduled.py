@@ -61,8 +61,12 @@ COMMANDS = {
 # no-ops below REFLECT_MIN_NEW before any model call -- and a lesson it did write
 # wouldn't be committed back anyway). gaps is the inward twin of frontier (the
 # proactive capability-gap proposer), sharing frontier's evolution ledger + EVOLVE
-# gate, so it belongs in the same place for the same reason.
-LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps", "pulse")
+# gate, so it belongs in the same place for the same reason. watch (the tripwire
+# sweep) joins them: its seen-store IS the dedupe memory between runs, so on the
+# always-on webhook it persists on the Railway volume (ARGO_SEEN_PATH) and fires on
+# the reliable 15-min local_loop -- instead of riding GitHub's throttled hourly cron,
+# which drifts past the tripwire's 14/19/0 UTC windows and silently drops a sweep.
+LOCAL_COMMANDS = ("diagnose", "frontier", "reflect", "gaps", "pulse", "watch")
 LOCAL_STATE_PATH = argo_paths.LOCAL_STATE_PATH
 LOCAL_INTERVAL_SECONDS = 15 * 60
 
@@ -228,7 +232,14 @@ def local_loop(only=LOCAL_COMMANDS, interval=LOCAL_INTERVAL_SECONDS):
 
 
 def main():
-    fire_due(dry="--dry-run" in sys.argv)
+    # The GitHub Actions runner fires only the deliveries that DON'T need the
+    # webhook's volume; the volume-bound LOCAL_COMMANDS run in the webhook's
+    # local_loop (above). Firing them here too would double-send -- watch would
+    # write a second, repo-committed seen-store that never dedupes against the
+    # volume one. (The other LOCAL_COMMANDS already self-guard on GITHUB_ACTIONS;
+    # excluding them here makes that explicit and skips the wasted no-op invokes.)
+    actions_only = tuple(c for c in COMMANDS if c not in LOCAL_COMMANDS)
+    fire_due(only=actions_only, dry="--dry-run" in sys.argv)
 
 
 if __name__ == "__main__":

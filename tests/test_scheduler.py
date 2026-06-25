@@ -181,6 +181,53 @@ class LocalCommandsTest(unittest.TestCase):
         self.assertEqual(ran, ["frontier"])
 
 
+class WatchPlacementTest(unittest.TestCase):
+    """The tripwire 'watch' sweep moved off GitHub's throttled hourly cron onto the
+    webhook's reliable local_loop, with its seen-store on the Railway volume. So:
+    (1) watch must be a LOCAL_COMMAND (fired by local_loop), and (2) the Actions
+    runner's main() must NOT fire it -- otherwise watch double-sends, writing a
+    second repo-committed seen-store that never dedupes against the volume one.
+    Both assertions fail before the move (watch was Actions-only) and pass after."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.schedule = self.tmp / "schedule.json"
+        self.state = self.tmp / "schedule_state.json"
+        self.local_state = self.tmp / "schedule_state_local.json"
+        self.enterContext(mock.patch.object(sched, "SCHEDULE_PATH", self.schedule))
+        self.enterContext(mock.patch.object(sched, "STATE_PATH", self.state))
+        # Both windows due at 15:00: a watch sweep and a non-volume project delivery.
+        self.schedule.write_text(json.dumps({"schedules": [
+            {"name": "tripwire", "days": "daily", "hour": [15],
+             "command": "watch", "enabled": True},
+            {"name": "weekly-project", "days": "daily", "hour": [15],
+             "command": "project", "enabled": True},
+        ]}))
+        self.calls = []
+        self.enterContext(mock.patch.object(
+            sched, "run_command", lambda cmd: self.calls.append(cmd)))
+
+    def test_watch_is_volume_bound(self):
+        self.assertEqual(sched.COMMANDS["watch"], ("argo_watch", "main"))
+        self.assertIn("watch", sched.LOCAL_COMMANDS)
+
+    def test_actions_main_does_not_fire_watch(self):
+        # The Actions entrypoint fires only the non-volume deliveries (project),
+        # never watch -- that's what prevents the double-send into two seen-stores.
+        with mock.patch.object(sched, "datetime") as dt:
+            dt.now.return_value = _now(15)
+            sched.main()
+        self.assertEqual(self.calls, ["project"])
+        self.assertNotIn("watch", self.calls)
+
+    def test_watch_fires_in_the_local_loop_pass(self):
+        with mock.patch.object(sched, "datetime") as dt:
+            dt.now.return_value = _now(15)
+            ran = sched.fire_due(only=sched.LOCAL_COMMANDS, state_path=self.local_state)
+        self.assertIn("watch", ran)
+        self.assertNotIn("project", ran)  # non-volume: stays on the Actions runner
+
+
 class ShippedScheduleTest(unittest.TestCase):
     """Guards the live data/schedule.json. Enabling the frontier loop (and its
     inward twin, gaps) is a data flip the webhook's local_loop reads at deploy time,

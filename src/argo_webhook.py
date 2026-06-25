@@ -1671,6 +1671,19 @@ def main():
             argo_scheduled.local_loop()
         threading.Thread(target=_local_sched, daemon=True,
                          name="argo-local-scheduler").start()
+        # The tripwire (watch) now fires in this loop, so its seen-store must live on
+        # the Railway volume (ARGO_SEEN_PATH). If it resolves under the repo instead,
+        # it's image-baked: it resets on every redeploy and the first sweep re-sends
+        # the whole backlog. Surface that misconfig in the logs, not as a wall of
+        # duplicate alerts -- the "invisible config that's bitten us repeatedly".
+        try:
+            argo_paths.SEEN_PATH.relative_to(argo_paths.ROOT)
+            log.warning("ARGO_SEEN_PATH is not pointed at a volume (resolves under the "
+                        "repo at %s): the tripwire seen-store will reset on redeploy and "
+                        "re-send old news. Set it to the Railway volume and seed it once "
+                        "from data/argo_seen.json.", argo_paths.SEEN_PATH)
+        except ValueError:
+            pass  # out-of-repo path == a mounted volume: correct
     # Startup diagnostics (no secrets) so the Railway logs show whether tools are
     # actually wired — the invisible config that's bitten us repeatedly.
     anthropic_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
