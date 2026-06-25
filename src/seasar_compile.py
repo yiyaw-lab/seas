@@ -232,6 +232,7 @@ _CAST_SCHEMA = """{
   "orchestration": { "topology": "orchestrator-worker", "waves": [["T1","T2"],["T3"]], "consistency_check": "how spec<->tasks<->contracts are checked to agree before any agent starts", "handoff_protocol": "each agent's definition-of-done + the integration/merge order + how a downstream agent requests a change to a contract it does NOT own (propose-to-owner, never edit the file)", "contract_evolution": "the exact ritual to change a frozen contract mid-build without two agents writing the same file" },
   "fixtures": [{ "path": "tests/fixtures/sample.epub", "purpose": "golden input every anchor/export test runs against", "format": "epub|pdf|json|csv|sql|md", "body": "the LITERAL fixture content for text fixtures; empty when binary", "binary": false, "generator": "for a binary fixture (epub/pdf/image): the literal script/command that reproducibly PRODUCES it", "produced_by_task": "T0", "consumed_by_tasks": ["T6","T7"] }],
   "scaffold_files": [{ "path": "package.json", "purpose": "the runnable boot skeleton, present before any feature task", "body": "the LITERAL file content -- real JSON/TS/YAML that installs, typechecks, lints, and runs an empty test green" }],
+  "decisions": [{ "id": "D1", "question": "a real ambiguity the spec does NOT settle that an implementing agent would otherwise resolve SILENTLY (e.g. may a confidential record be exported?)", "anchor_task": "T7", "anchor_file": "src/lib/export/policy.ts", "options": ["allow", "deny"], "recommended": "deny", "rationale": "why it matters + why the default" }],
   "hardening": [{ "concern": "a red-team objection in plain terms", "source": "critic|user|ops", "resolution": "concretely how THIS plan answers it -- cite the spec rule, quality gate, task, or contract that addresses it -- or an honest concession kept as a stated risk with its mitigation" }],
   "provisions": [{ "name": "OpenAI API key", "kind": "secret|account|config|infra|data|decision", "env_var": "OPENAI_API_KEY (the var agents read it from; empty if not an env var)", "needed_by": ["T2"], "how_to_get": "concrete steps or URL to obtain/decide it", "blocking": true, "recommended": "for a config/decision: the default the build proceeds on; empty for a secret" }]
 }"""
@@ -285,6 +286,14 @@ HARD RULES FOR THE PLAN:
   declare its `env_var`; tasks read from env, they never prompt the human. Add a
   quality gate (or fold into the consistency_check) that all blocking provisions are
   satisfied before wave 1 starts.
+- `decisions`: surface EVERY ambiguity the spec does NOT settle that an implementing
+  agent would otherwise resolve SILENTLY (a confident wrong guess is the dominant
+  autonomous failure). For each give the `question`, the `anchor_task`/`anchor_file`
+  that faces it, the `options`, a `recommended` default, and the `rationale`. These
+  become a DECISIONS.md ledger seeded with a unique `SEASAR_DECIDE_<id>` sentinel per
+  decision; a generated assert-no-sentinel gate FAILS the build while any sentinel
+  survives, so no decision can ship unresolved. Prefer 2-6 high-leverage decisions;
+  do not invent ambiguity the spec already settles.
 
 Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
@@ -355,7 +364,7 @@ def _normalize_order(order):
     the result. Mutates and returns `order`."""
     # list-of-dict fields -> list, dict members only.
     for k in ("repo_scaffold", "contracts", "tasks", "work_orders", "quality_gates",
-              "hardening", "provisions", "fixtures", "scaffold_files"):
+              "hardening", "provisions", "fixtures", "scaffold_files", "decisions"):
         order[k] = [x for x in _as_list(order.get(k)) if isinstance(x, dict)]
     # hardening items: coerce the three string fields so the renderer can't crash.
     for h in order["hardening"]:
@@ -398,6 +407,17 @@ def _normalize_order(order):
     for wo in order["work_orders"]:
         wo["task_ids"] = [str(i) for i in _as_list(wo.get("task_ids"))]
         wo["definition_of_done"] = str(wo.get("definition_of_done", "") or "")
+    # decisions: the forced-stop ledger -- each is an ambiguity an agent must RESOLVE,
+    # not guess. Coerce fields and give every decision a stable id (the SEASAR_DECIDE_<id>
+    # sentinel and its assert-no-sentinel gate depend on it).
+    for n, d in enumerate(order["decisions"], 1):
+        d["id"] = str(d.get("id", "") or "") or f"D{n}"
+        d["question"] = str(d.get("question", "") or "")
+        d["anchor_task"] = str(d.get("anchor_task", "") or "")
+        d["anchor_file"] = str(d.get("anchor_file", "") or "")
+        d["options"] = [str(o) for o in _as_list(d.get("options"))]
+        d["recommended"] = str(d.get("recommended", "") or "")
+        d["rationale"] = str(d.get("rationale", "") or "")
     # constitution -> list of non-empty strings.
     order["constitution"] = [
         str(c).strip() for c in _as_list(order.get("constitution")) if str(c).strip()
@@ -1032,10 +1052,12 @@ Build context for autonomous coding agents on this Build Order.
 - Never edit a file outside your assigned task's `files` list.
 - Never merge past a failing quality gate (see `orchestration.md`).
 - Never change a published contract without re-running `verify-build-order`.
+- Never resolve a DECISIONS.md item silently -- a surviving `SEASAR_DECIDE_` sentinel fails the build.
 
 ## Commands
 - Run your task's test (see `tasks.md`) and confirm its acceptance gate is green.
 - Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
+- Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Build proceeds in waves; wait for the previous wave's gates before starting.
 """
 
@@ -1121,6 +1143,12 @@ def _md_work_order(wo, order=None):
         c.get("source_path") for c in (order.get("contracts") or [])
         if c.get("source_path") and c.get("owner_task") not in my_ids
     })
+    # Decisions this agent faces (anchored to its tasks or its files) -- it must RESOLVE
+    # each, never guess; the SEASAR_DECIDE_ sentinel gate enforces it.
+    allowed_set = set(allowed)
+    my_decisions = [d for d in (order.get("decisions") or [])
+                    if d.get("anchor_task") in my_ids
+                    or (d.get("anchor_file") and d.get("anchor_file") in allowed_set)]
     out = [f"# Work order: {wo.get('agent', '')}\n",
            f"- **role:** {wo.get('role', '')}",
            f"- **task ids:** {', '.join(my_ids) or '(none)'}",
@@ -1132,10 +1160,21 @@ def _md_work_order(wo, order=None):
     out.append("- Any file not in Allowed above.")
     out += [f"- `{p}` (a contract owned by another task -- propose a change, never edit)"
             for p in forbidden]
+    if my_decisions:
+        out.append("\n## Decisions you must RESOLVE (no silent guesses)")
+        for d in my_decisions:
+            opts = " | ".join(d.get("options") or []) or "(open)"
+            rec = d.get("recommended")
+            # Reference by id, NOT the literal sentinel token -- a matchable token in the
+            # packet would keep assert-no-sentinel red even after the decision is resolved.
+            out.append(f"- {d.get('id')}: {d.get('question', '')}  [{opts}]"
+                       + (f" (recommended: {rec})" if rec else "")
+                       + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
     out.append("- The repo verify pipeline is green: typecheck + tests + `verify-build-order`.")
     out.append("- Every blocking quality gate touching your files is green.")
+    out.append("- `python3 scripts/assert-no-sentinel.py` is green (every decision resolved).")
     out.append("\n## Acceptance (per task)")
     out += [f"- {t.get('id')}: {t.get('acceptance', '')}" for t in my_tasks] or ["- (none)"]
     out.append("\n## Definition of done")
@@ -1145,6 +1184,90 @@ def _md_work_order(wo, order=None):
     out.append("- Record any contract ambiguity or change request in HANDOFF.md "
                "(never silently guess).")
     return "\n".join(out) + "\n"
+
+
+def _sentinel(d):
+    """The unique forced-stop token for a decision: SEASAR_DECIDE_<id>."""
+    return "SEASAR_DECIDE_" + (d.get("id") or "X")
+
+
+def _md_decisions(order):
+    """DECISIONS.md -- the forced-stop ledger. Each decision is an ambiguity the spec
+    does NOT settle, seeded with a unique SEASAR_DECIDE_<id> sentinel that the
+    assert-no-sentinel gate refuses to let survive -- so an agent cannot ship a silent
+    guess. Resolving a decision = replacing its sentinel line with the chosen option +
+    where it is enforced."""
+    decisions = order.get("decisions") or []
+    out = ["# DECISIONS -- resolve every one before the build goes green\n",
+           "Each item is an ambiguity the spec does NOT settle -- exactly where an agent "
+           "would otherwise guess silently. Pick an option, implement it, and REPLACE its "
+           "`SEASAR_DECIDE_<id>` line below with your choice + the file:line that enforces "
+           "it. `scripts/assert-no-sentinel.py` fails the build while ANY sentinel "
+           "survives anywhere in the repo.\n"]
+    if not decisions:
+        out.append("_No open decisions: the spec settled every ambiguity._\n")
+        return "\n".join(out)
+    for d in decisions:
+        opts = " | ".join(d.get("options") or []) or "(open)"
+        rec = d.get("recommended") or ""
+        anchor = ", ".join(x for x in (d.get("anchor_task"), d.get("anchor_file")) if x)
+        out.append(f"## {d.get('id', '?')} -- {d.get('question', '')}")
+        if anchor:
+            out.append(f"- anchor: {anchor}")
+        out.append(f"- options: {opts}" + (f"   (recommended: {rec})" if rec else ""))
+        if d.get("rationale"):
+            out.append(f"- why: {d.get('rationale')}")
+        out.append(f"- [ ] {_sentinel(d)} -- replace with: chosen <option>; "
+                   f"enforced at <file:line>\n")
+    return "\n".join(out)
+
+
+# The forced-stop gate, emitted into every bundle. Greps the produced repo for any
+# unresolved decision sentinel and fails the build while one survives -- so a
+# confidently-wrong SILENT guess cannot ship (the dominant autonomous-fleet failure).
+_ASSERT_NO_SENTINEL = '''#!/usr/bin/env python3
+"""assert-no-sentinel -- the forced-stop gate. Exits non-zero while ANY decision
+sentinel (SEASAR_DECIDE_<id>) survives anywhere under the given root (default: cwd), so
+an agent cannot mark the build done with an unresolved decision. Run it in CI and before
+every handoff: `python3 scripts/assert-no-sentinel.py`.
+"""
+import os
+import re
+import sys
+
+PATTERN = re.compile(r"SEASAR_DECIDE_[A-Za-z0-9]+")
+SKIP_DIRS = {".git", "node_modules", ".venv", "dist", "build", "__pycache__", ".next"}
+
+
+def main(root="."):
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in filenames:
+            if fn == os.path.basename(__file__):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    for i, line in enumerate(fh, 1):
+                        if PATTERN.search(line):
+                            hits.append(f"{path}:{i}: {line.strip()}")
+            except OSError:
+                continue
+    if hits:
+        print(f"FORCED STOP: {len(hits)} unresolved decision sentinel(s):")
+        for h in hits:
+            print("  " + h)
+        print("Resolve each (pick an option, implement it, update DECISIONS.md) until no "
+              "sentinel remains.")
+        return 1
+    print("OK: no unresolved decision sentinels.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "."))
+'''
 
 
 def _safe_bundle_path(raw):
@@ -1212,6 +1335,9 @@ def build_bundle(order):
         # The raw order, for tooling.
         put(f"{root}/build-order.json", json.dumps(order, indent=2) + "\n")
         put(f"{root}/HANDOFF.md", _md_handoff())
+        # Forced-stop: the decision ledger + the gate that refuses to let a sentinel ship.
+        put(f"{root}/DECISIONS.md", _md_decisions(order))
+        put(f"{root}/scripts/assert-no-sentinel.py", _ASSERT_NO_SENTINEL)
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
