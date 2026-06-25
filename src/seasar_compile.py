@@ -228,7 +228,7 @@ _CAST_SCHEMA = """{
     "test": "the test that proves this task done", "acceptance": "boolean exit gate, checkable"
   }],
   "work_orders": [{ "agent": "Agent A", "role": "Backend", "task_ids": ["T1","T3"], "worktree": "wt/agent-a", "brief": "the scoped brief for this worker", "definition_of_done": "what 'done' means for this agent + the handoff artifact it leaves (e.g. contract committed, typecheck green) before a dependent agent starts" }],
-  "quality_gates": [{ "name": "...", "threshold": "...", "blocks_merge": true }],
+  "quality_gates": [{ "name": "anchor-drift", "threshold": "the measurable bar, in words", "blocks_merge": true, "test_lang": "typescript|python|...", "test_path": "tests/gates/anchor-drift.test.ts", "test_source": "the LITERAL runnable test (authored by YOU, the compiler) that asserts the threshold against named fixture_refs -- the feature agent INHERITS it, never writes its own", "fixture_refs": ["tests/fixtures/sample.epub"] }],
   "orchestration": { "topology": "orchestrator-worker", "waves": [["T1","T2"],["T3"]], "consistency_check": "how spec<->tasks<->contracts are checked to agree before any agent starts", "handoff_protocol": "each agent's definition-of-done + the integration/merge order + how a downstream agent requests a change to a contract it does NOT own (propose-to-owner, never edit the file)", "contract_evolution": "the exact ritual to change a frozen contract mid-build without two agents writing the same file" },
   "fixtures": [{ "path": "tests/fixtures/sample.epub", "purpose": "golden input every anchor/export test runs against", "format": "epub|pdf|json|csv|sql|md", "body": "the LITERAL fixture content for text fixtures; empty when binary", "binary": false, "generator": "for a binary fixture (epub/pdf/image): the literal script/command that reproducibly PRODUCES it", "produced_by_task": "T0", "consumed_by_tasks": ["T6","T7"] }],
   "scaffold_files": [{ "path": "package.json", "purpose": "the runnable boot skeleton, present before any feature task", "body": "the LITERAL file content -- real JSON/TS/YAML that installs, typechecks, lints, and runs an empty test green" }],
@@ -294,6 +294,10 @@ HARD RULES FOR THE PLAN:
   decision; a generated assert-no-sentinel gate FAILS the build while any sentinel
   survives, so no decision can ship unresolved. Prefer 2-6 high-leverage decisions;
   do not invent ambiguity the spec already settles.
+- `quality_gates`: for each BLOCKING gate, author the LITERAL executable test
+  (`test_source` + `test_path` + `test_lang`) that operationalizes its `threshold`
+  against named `fixture_refs`. YOU write the predicate so the feature agent inherits a
+  gate it cannot tautologize -- a gate with only a prose `threshold` is not a gate.
 
 Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
@@ -418,6 +422,16 @@ def _normalize_order(order):
         d["options"] = [str(o) for o in _as_list(d.get("options"))]
         d["recommended"] = str(d.get("recommended", "") or "")
         d["rationale"] = str(d.get("rationale", "") or "")
+    # quality_gates: each carries a compiler-authored executable predicate (test_source)
+    # so the feature agent inherits a gate it cannot tautologize.
+    for g in order["quality_gates"]:
+        g["name"] = str(g.get("name", "") or "")
+        g["threshold"] = str(g.get("threshold", "") or "")
+        g["test_lang"] = str(g.get("test_lang", "") or "")
+        g["test_path"] = str(g.get("test_path", "") or "")
+        g["test_source"] = str(g.get("test_source", "") or "")
+        g["fixture_refs"] = [str(x) for x in _as_list(g.get("fixture_refs"))]
+        g["blocks_merge"] = bool(g.get("blocks_merge", False))
     # constitution -> list of non-empty strings.
     order["constitution"] = [
         str(c).strip() for c in _as_list(order.get("constitution")) if str(c).strip()
@@ -1058,6 +1072,7 @@ Build context for autonomous coding agents on this Build Order.
 - Run your task's test (see `tasks.md`) and confirm its acceptance gate is green.
 - Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
+- Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
 - Build proceeds in waves; wait for the previous wave's gates before starting.
 """
 
@@ -1373,6 +1388,13 @@ def build_bundle(order):
             else:
                 body = f.get("body") or f"# {f.get('purpose', '')}\n"
                 put(f"{root}/{fp}", body if body.endswith("\n") else body + "\n")
+        # Compiler-authored gate predicates: the runnable test that JUDGES each gate, so
+        # a feature agent inherits it instead of grading its own work (no tautology gate).
+        for g in (order.get("quality_gates") or []):
+            src = g.get("test_source") or ""
+            gp = _safe_bundle_path(g.get("test_path"))
+            if src.strip() and gp:
+                put(f"{root}/{gp}", src if src.endswith("\n") else src + "\n")
         # The feature-file map: paths owned by tasks; stub bodies the agents fill in.
         for e in (order.get("repo_scaffold") or []):
             path = _safe_bundle_path(e.get("path"))

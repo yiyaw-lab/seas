@@ -234,6 +234,13 @@ def verify_order(order):
     add("scaffold_runnable", _scaffold_flags(order)[0], WARN,
         "scaffold_files lack a package manifest (nothing to install -- not a runnable skeleton)")
 
+    gates = [g for g in _dicts(order, "quality_gates") if g.get("blocks_merge")]
+    if gates:
+        no_pred = [g.get("name") for g in gates if not _nonempty(g.get("test_source"))]
+        add("gates_have_predicates", not no_pred, WARN,
+            "blocking gate(s) with no executable test_source (prose, not a gate): "
+            + ", ".join(map(str, no_pred)))
+
     orch = order.get("orchestration") or {}
     add("handoff_protocol_present", _nonempty(orch.get("handoff_protocol")), WARN,
         "orchestration.handoff_protocol is empty (no per-agent definition-of-done / merge order)")
