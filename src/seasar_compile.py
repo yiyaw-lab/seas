@@ -412,10 +412,17 @@ def _normalize_order(order):
         wo["task_ids"] = [str(i) for i in _as_list(wo.get("task_ids"))]
         wo["definition_of_done"] = str(wo.get("definition_of_done", "") or "")
     # decisions: the forced-stop ledger -- each is an ambiguity an agent must RESOLVE,
-    # not guess. Coerce fields and give every decision a stable id (the SEASAR_DECIDE_<id>
-    # sentinel and its assert-no-sentinel gate depend on it).
+    # not guess. Give every decision a UNIQUE, gate-matchable id: charset-clamped to
+    # [A-Za-z0-9] so the seeded SEASAR_DECIDE_<id> token matches the gate regex, and
+    # deduped so two decisions never collapse to one indistinguishable sentinel.
+    _seen_ids = set()
     for n, d in enumerate(order["decisions"], 1):
-        d["id"] = str(d.get("id", "") or "") or f"D{n}"
+        rid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("id", "") or "")) or f"D{n}"
+        cand, k = rid, 2
+        while cand in _seen_ids:
+            cand, k = f"{rid}{k}", k + 1
+        d["id"] = cand
+        _seen_ids.add(cand)
         d["question"] = str(d.get("question", "") or "")
         d["anchor_task"] = str(d.get("anchor_task", "") or "")
         d["anchor_file"] = str(d.get("anchor_file", "") or "")
@@ -1216,9 +1223,10 @@ def _md_decisions(order):
     out = ["# DECISIONS -- resolve every one before the build goes green\n",
            "Each item is an ambiguity the spec does NOT settle -- exactly where an agent "
            "would otherwise guess silently. Pick an option, implement it, and REPLACE its "
-           "`SEASAR_DECIDE_<id>` line below with your choice + the file:line that enforces "
-           "it. `scripts/assert-no-sentinel.py` fails the build while ANY sentinel "
-           "survives anywhere in the repo.\n"]
+           "`SEASAR_DECIDE_<id>` checkbox line below with a `RESOLVED_<id>: <choice> | "
+           "enforced at <file>:<line>` line. `scripts/assert-no-sentinel.py` fails the "
+           "build while ANY sentinel survives OR any decision lacks its RESOLVED_<id> "
+           "line -- so a decision cannot be closed by silently deleting its row.\n"]
     if not decisions:
         out.append("_No open decisions: the spec settled every ambiguity._\n")
         return "\n".join(out)
@@ -1232,20 +1240,23 @@ def _md_decisions(order):
         out.append(f"- options: {opts}" + (f"   (recommended: {rec})" if rec else ""))
         if d.get("rationale"):
             out.append(f"- why: {d.get('rationale')}")
-        out.append(f"- [ ] {_sentinel(d)} -- replace with: chosen <option>; "
-                   f"enforced at <file:line>\n")
+        out.append(f"- [ ] {_sentinel(d)} -- to resolve: replace this line with "
+                   f"`RESOLVED_<id>: <chosen option> | enforced at <file>:<line>` "
+                   f"(this decision's id is {d.get('id')})\n")
     return "\n".join(out)
 
 
 # The forced-stop gate, emitted into every bundle. Greps the produced repo for any
 # unresolved decision sentinel and fails the build while one survives -- so a
 # confidently-wrong SILENT guess cannot ship (the dominant autonomous-fleet failure).
-_ASSERT_NO_SENTINEL = '''#!/usr/bin/env python3
-"""assert-no-sentinel -- the forced-stop gate. Exits non-zero while ANY decision
-sentinel (SEASAR_DECIDE_<id>) survives anywhere under the given root (default: cwd), so
-an agent cannot mark the build done with an unresolved decision. Run it in CI and before
+_ASSERT_NO_SENTINEL = r'''#!/usr/bin/env python3
+"""assert-no-sentinel -- the forced-stop gate. Fails (exit 1) while ANY decision sentinel
+(SEASAR_DECIDE_<id>) survives under the given root (default: cwd), OR any decision from
+build-order.json lacks its RESOLVED_<id> line in DECISIONS.md -- so a decision cannot be
+closed by a silent guess NOR by quietly deleting its ledger row. Run it in CI and before
 every handoff: `python3 scripts/assert-no-sentinel.py`.
 """
+import json
 import os
 import re
 import sys
@@ -1254,29 +1265,49 @@ PATTERN = re.compile(r"SEASAR_DECIDE_[A-Za-z0-9]+")
 SKIP_DIRS = {".git", "node_modules", ".venv", "dist", "build", "__pycache__", ".next"}
 
 
+def _decision_ids(root):
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    return [str(d.get("id")) for d in (order.get("decisions") or [])
+            if isinstance(d, dict) and d.get("id")]
+
+
 def main(root="."):
-    hits = []
+    self_path = os.path.realpath(__file__)
+    hits, decisions_md = [], ""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
-            if fn == os.path.basename(__file__):
-                continue
             path = os.path.join(dirpath, fn)
+            if os.path.realpath(path) == self_path:
+                continue
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                    for i, line in enumerate(fh, 1):
-                        if PATTERN.search(line):
-                            hits.append(f"{path}:{i}: {line.strip()}")
+                    text = fh.read()
             except OSError:
                 continue
-    if hits:
-        print(f"FORCED STOP: {len(hits)} unresolved decision sentinel(s):")
-        for h in hits:
-            print("  " + h)
-        print("Resolve each (pick an option, implement it, update DECISIONS.md) until no "
-              "sentinel remains.")
+            if fn == "DECISIONS.md":
+                decisions_md = text
+            for i, line in enumerate(text.splitlines(), 1):
+                if PATTERN.search(line):
+                    hits.append(f"{path}:{i}: {line.strip()}")
+    unresolved = [rid for rid in _decision_ids(root)
+                  if ("RESOLVED_" + rid) not in decisions_md]
+    if hits or unresolved:
+        if hits:
+            print("FORCED STOP: %d unresolved decision sentinel(s):" % len(hits))
+            for h in hits:
+                print("  " + h)
+        if unresolved:
+            print("FORCED STOP: %d decision(s) with no RESOLVED_<id> line in "
+                  "DECISIONS.md: %s" % (len(unresolved), ", ".join(unresolved)))
+        print("Resolve each: pick an option, implement it, write RESOLVED_<id> in "
+              "DECISIONS.md, and remove the sentinel.")
         return 1
-    print("OK: no unresolved decision sentinels.")
+    print("OK: every decision resolved; no sentinels survive.")
     return 0
 
 
@@ -1392,9 +1423,14 @@ def build_bundle(order):
         # a feature agent inherits it instead of grading its own work (no tautology gate).
         for g in (order.get("quality_gates") or []):
             src = g.get("test_source") or ""
+            if not src.strip():
+                continue
             gp = _safe_bundle_path(g.get("test_path"))
-            if src.strip() and gp:
-                put(f"{root}/{gp}", src if src.endswith("\n") else src + "\n")
+            if not gp:
+                log.warning("seasar bundle: gate %r has test_source but an empty/unsafe "
+                            "test_path %r -- predicate NOT emitted", g.get("name"), g.get("test_path"))
+                continue
+            put(f"{root}/{gp}", src if src.endswith("\n") else src + "\n")
         # The feature-file map: paths owned by tasks; stub bodies the agents fill in.
         for e in (order.get("repo_scaffold") or []):
             path = _safe_bundle_path(e.get("path"))

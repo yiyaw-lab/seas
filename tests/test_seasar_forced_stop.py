@@ -8,6 +8,7 @@ PASSES once it is resolved.
 
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import unittest
 import zipfile
 
 import seasar_compile as sc
+import seasar_verify as sv
 
 # Built by concatenation so this test file does NOT itself contain a matchable sentinel.
 TOKEN = "SEASAR_DECIDE_" + "D1"
@@ -68,6 +70,33 @@ class DecisionLedgerTest(unittest.TestCase):
         # the packet must NOT carry the literal sentinel (it would pin the gate red).
         self.assertNotIn(TOKEN, packet)
 
+    def test_colliding_ids_get_distinct_sentinels(self):
+        # explicit dup + a blank that would clobber -> all must end distinct.
+        order = {"decisions": [{"id": "D2", "question": "a"},
+                               {"id": "", "question": "b"},
+                               {"id": "D2", "question": "c"}]}
+        sc._normalize_order(order)
+        ids = [d["id"] for d in order["decisions"]]
+        self.assertEqual(len(set(ids)), 3, "ids must be unique: %r" % ids)
+        sentinels = re.findall(r"SEASAR_DECIDE_[A-Za-z0-9]+", sc._md_decisions(order))
+        self.assertEqual(len(set(sentinels)), 3, "each decision needs a distinct sentinel")
+
+    def test_non_alnum_id_is_clamped(self):
+        order = {"decisions": [{"id": "D-1 (export?)", "question": "q"}]}
+        sc._normalize_order(order)
+        self.assertEqual(order["decisions"][0]["id"], "D1export")  # only [A-Za-z0-9] kept
+
+    def test_orphan_decision_flagged_by_verify(self):
+        # a decision anchored to no real task/file routes to no agent -> verify WARNs.
+        order = {"tasks": [{"id": "T1", "wave": 1, "files": ["a.ts"]}],
+                 "orchestration": {"waves": [["T1"]]},
+                 "decisions": [{"id": "D1", "question": "q", "anchor_task": "T9",
+                                "anchor_file": "nope.ts"}]}
+        sc._normalize_order(order)
+        c = next(c for c in sv.verify_order(order)["checks"] if c["name"] == "decisions_routed")
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["severity"], sv.WARN)
+
 
 class AssertNoSentinelGateTest(unittest.TestCase):
     """Negative control on the emitted gate: it FAILS on a surviving sentinel, PASSES once
@@ -94,13 +123,19 @@ class AssertNoSentinelGateTest(unittest.TestCase):
             r1 = self._run_gate(root)
             self.assertEqual(r1.returncode, 1, r1.stdout + r1.stderr)
             self.assertIn("FORCED STOP", r1.stdout)
-            # resolve it: rewrite the ledger without the sentinel.
-            with open(os.path.join(root, "DECISIONS.md"), "w", encoding="utf-8") as fh:
-                fh.write("# DECISIONS\n\nD1 resolved: deny, enforced at "
-                         "src/export/policy.ts:10\n")
+            # 2. delete the sentinel WITHOUT writing RESOLVED_<id> -> still red (no silent close)
+            dec = os.path.join(root, "DECISIONS.md")
+            with open(dec, "w", encoding="utf-8") as fh:
+                fh.write("# DECISIONS\n\n(row deleted without deciding)\n")
             r2 = self._run_gate(root)
-            self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
-            self.assertIn("OK", r2.stdout)
+            self.assertEqual(r2.returncode, 1, r2.stdout)   # RESOLVED_D1 missing -> still fails
+            # 3. properly resolve: a RESOLVED_<id> line, no sentinel -> green
+            with open(dec, "w", encoding="utf-8") as fh:
+                fh.write("# DECISIONS\n\nRESOLVED_D1: deny | enforced at "
+                         "src/export/policy.ts:10\n")
+            r3 = self._run_gate(root)
+            self.assertEqual(r3.returncode, 0, r3.stdout + r3.stderr)
+            self.assertIn("OK", r3.stdout)
 
     def test_gate_clean_when_no_decisions(self):
         order = {"title": "X", "tasks": [{"id": "T1", "wave": 1, "files": ["a.ts"]}]}
@@ -108,6 +143,18 @@ class AssertNoSentinelGateTest(unittest.TestCase):
             root = self._extract(order, tmp)
             r = self._run_gate(root)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_gate_catches_sentinel_in_same_named_file(self):
+        # the realpath self-skip must NOT skip a DIFFERENT file sharing the gate's basename.
+        order = {"title": "X", "tasks": [{"id": "T1", "wave": 1, "files": ["a.ts"]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._extract(order, tmp)
+            sub = os.path.join(root, "sub")
+            os.makedirs(sub)
+            with open(os.path.join(sub, "assert-no-sentinel.py"), "w", encoding="utf-8") as fh:
+                fh.write("# " + "SEASAR_DECIDE_" + "Z9 left in a same-named file\n")
+            r = self._run_gate(root)
+            self.assertEqual(r.returncode, 1, r.stdout)
 
 
 if __name__ == "__main__":

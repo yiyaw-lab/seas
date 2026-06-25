@@ -236,10 +236,38 @@ def verify_order(order):
 
     gates = [g for g in _dicts(order, "quality_gates") if g.get("blocks_merge")]
     if gates:
-        no_pred = [g.get("name") for g in gates if not _nonempty(g.get("test_source"))]
+        # require BOTH a test_source AND a test_path -- the exact pair the bundle needs to
+        # emit a file; a gate with source but no path is a silently-evaporated predicate.
+        no_pred = [g.get("name") for g in gates
+                   if not (_nonempty(g.get("test_source")) and _nonempty(g.get("test_path")))]
         add("gates_have_predicates", not no_pred, WARN,
-            "blocking gate(s) with no executable test_source (prose, not a gate): "
+            "blocking gate(s) with no executable test_source+test_path (prose, not a gate): "
             + ", ".join(map(str, no_pred)))
+        # a predicate that imports a fixture not in the bundle would fail to run.
+        mat = {f.get("path") for f in _dicts(order, "fixtures") if _fixture_materialized(f)}
+        miss = [f"{g.get('name')}:{r}" for g in gates
+                for r in _strs(g.get("fixture_refs")) if r not in mat]
+        add("gate_fixtures_materialized", not miss, WARN,
+            "blocking gate(s) reference an unmaterialized fixture: " + ", ".join(map(str, miss)))
+        # two gates writing one test_path -> the bundle drops one predicate.
+        paths = [g.get("test_path") for g in gates
+                 if _nonempty(g.get("test_source")) and _nonempty(g.get("test_path"))]
+        dups = sorted({p for p in paths if paths.count(p) > 1})
+        add("gate_predicates_distinct", not dups, WARN,
+            "blocking gates share a test_path (one predicate is dropped at bundle time): "
+            + ", ".join(map(str, dups)))
+
+    # every decision must anchor to a real task/file, or it routes to NO agent's packet
+    # while still blocking the build globally (a silent fleet deadlock).
+    decisions = _dicts(order, "decisions")
+    if decisions:
+        all_files = {f for t in tasks for f in _strs(t.get("files"))}
+        unrouted = [d.get("id") for d in decisions
+                    if d.get("anchor_task") not in task_id_set
+                    and d.get("anchor_file") not in all_files]
+        add("decisions_routed", not unrouted, WARN,
+            "decision(s) anchored to no real task/file (routes to no agent): "
+            + ", ".join(map(str, unrouted)))
 
     orch = order.get("orchestration") or {}
     add("handoff_protocol_present", _nonempty(orch.get("handoff_protocol")), WARN,

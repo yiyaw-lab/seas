@@ -18,6 +18,8 @@ def order_with_gate(test_source="expect(drift).toBe(0)"):
         "title": "Demo",
         "tasks": [{"id": "T1", "wave": 1, "files": ["src/anchor.ts"]}],
         "orchestration": {"waves": [["T1"]]},  # structurally sound -> isolates the gate WARN
+        "fixtures": [{"path": "tests/fixtures/sample.epub", "binary": True,
+                      "generator": "node scripts/make-epub.js"}],
         "quality_gates": [{
             "name": "anchor-drift",
             "threshold": "0 drift across layout changes",
@@ -58,6 +60,32 @@ class GatePredicateVerifyTest(unittest.TestCase):
         names = [c["name"] for c in
                  sv.verify_order({"tasks": [{"id": "T1", "wave": 1, "files": ["a.ts"]}]})["checks"]]
         self.assertNotIn("gates_have_predicates", names)
+
+    def test_gate_with_source_but_empty_path_warns(self):
+        # test_source present but no test_path -> the bundle emits nothing (evaporation).
+        order = order_with_gate()
+        order["quality_gates"][0]["test_path"] = ""
+        c = gate_check(order)
+        self.assertFalse(c["ok"])
+
+    def test_gate_unmaterialized_fixture_warns(self):
+        order = order_with_gate()
+        order["fixtures"] = []  # the gate still references sample.epub, now absent
+        sc._normalize_order(order)
+        c = next(c for c in sv.verify_order(order)["checks"]
+                 if c["name"] == "gate_fixtures_materialized")
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["severity"], sv.WARN)
+
+    def test_two_gates_one_path_warns(self):
+        order = order_with_gate()
+        clash = dict(order["quality_gates"][0])
+        clash["name"] = "other-gate"  # same test_path -> one predicate dropped at bundle time
+        order["quality_gates"].append(clash)
+        sc._normalize_order(order)
+        c = next(c for c in sv.verify_order(order)["checks"]
+                 if c["name"] == "gate_predicates_distinct")
+        self.assertFalse(c["ok"])
 
 
 class GatePredicateBundleTest(unittest.TestCase):
