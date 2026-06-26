@@ -1080,6 +1080,8 @@ Build context for autonomous coding agents on this Build Order.
 - Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
+- `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
+- CI (`.github/workflows/seasar-gate.yml`) runs build-order + forced-stop + ownership + project verify as a REQUIRED check; a red gate blocks merge.
 - Build proceeds in waves; wait for the previous wave's gates before starting.
 """
 
@@ -1197,6 +1199,8 @@ def _md_work_order(wo, order=None):
     out.append("- The repo verify pipeline is green: typecheck + tests + `verify-build-order`.")
     out.append("- Every blocking quality gate touching your files is green.")
     out.append("- `python3 scripts/assert-no-sentinel.py` is green (every decision resolved).")
+    out.append(f"- `python3 scripts/check-ownership.py --agent \"{wo.get('agent', '')}\" "
+               f"<changed files>` is green (you stayed in your lane).")
     out.append("\n## Acceptance (per task)")
     out += [f"- {t.get('id')}: {t.get('acceptance', '')}" for t in my_tasks] or ["- (none)"]
     out.append("\n## Definition of done")
@@ -1316,6 +1320,196 @@ if __name__ == "__main__":
 '''
 
 
+# Build-time one-writer-per-file enforcement, emitted into every bundle. A non-agent
+# actor (CI/git) runs it, so an agent cannot write outside its lane by goodwill alone.
+_CHECK_OWNERSHIP = r'''#!/usr/bin/env python3
+"""check-ownership -- build-time one-writer-per-file enforcement, run by CI (not an agent).
+
+Reads build-order.json from $SEASAR_ROOT or cwd. Three modes:
+  audit  (no flag)       : fail if any file is written by more than one task.
+  lanes  (--lanes)       : given a changed-file set (args or newline stdin), fail unless
+                           every lane-controlled changed file fits inside ONE agent's lane
+                           (its tasks' files) -- a PR may not cross two agents' lanes.
+                           Files in no lane (shared/undeclared) are ignored.
+  agent  (--agent NAME)  : like lanes, for a single named agent self-checking its diff.
+
+Paths are normpath-compared ('./src/a.ts' == 'src/a.ts'). Exact-path convention: an agent
+must DECLARE on its task any file it creates. Empty changed-file input is an error, not a
+pass -- a broken/empty diff is not a clean lane.
+"""
+import json
+import os
+import sys
+
+
+def _norm(p):
+    return os.path.normpath(p.strip())
+
+
+def _order(root):
+    with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _file_owners(order):
+    owners = {}
+    for t in (order.get("tasks") or []):
+        if isinstance(t, dict):
+            for f in (t.get("files") or []):
+                owners.setdefault(_norm(f), set()).add(t.get("id"))
+    return owners
+
+
+def _agent_lanes(order):
+    tasks = {t.get("id"): t for t in (order.get("tasks") or []) if isinstance(t, dict)}
+    lanes = {}
+    for wo in (order.get("work_orders") or []):
+        if isinstance(wo, dict) and wo.get("agent"):
+            lane = lanes.setdefault(wo.get("agent"), set())
+            for tid in (wo.get("task_ids") or []):
+                lane.update(_norm(f) for f in (tasks.get(tid, {}).get("files") or []))
+    return lanes
+
+
+def _changed(argv_files):
+    if argv_files:
+        return argv_files
+    if sys.stdin is None or sys.stdin.isatty():
+        return None
+    return [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+
+
+def main(argv):
+    root = os.environ.get("SEASAR_ROOT", ".")
+    mode, agent, files, it = "audit", None, [], iter(argv)
+    for a in it:
+        if a == "--agent":
+            agent, mode = next(it, ""), "agent"
+        elif a == "--lanes":
+            mode = "lanes"
+        elif a == "--root":
+            root = next(it, ".")
+        else:
+            files.append(a)
+    try:
+        order = _order(root)
+    except (OSError, ValueError) as e:
+        print("check-ownership: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+
+    if mode == "audit":
+        shared = {f: ids for f, ids in _file_owners(order).items() if len(ids) > 1}
+        if shared:
+            print("OWNERSHIP VIOLATION: file(s) written by more than one task:")
+            for f, ids in sorted(shared.items()):
+                print("  %s <- %s" % (f, ", ".join(map(str, sorted(ids)))))
+            return 1
+        print("OK: every planned file has a single writer.")
+        return 0
+
+    if mode == "agent" and not agent:
+        print("check-ownership: --agent given without a value", file=sys.stderr)
+        return 2
+
+    changed = _changed(files)
+    if changed is None:
+        print("check-ownership: %s mode needs changed files as args or piped on stdin"
+              % mode, file=sys.stderr)
+        return 2
+    if not changed:
+        print("check-ownership: no changed files supplied -- refusing to pass vacuously "
+              "(a broken/empty diff is not a clean lane)", file=sys.stderr)
+        return 1
+
+    lanes = _agent_lanes(order)
+    changed_norm = [_norm(f) for f in changed]
+
+    if mode == "agent":
+        if agent not in lanes:
+            print("check-ownership: no work order for agent %r" % agent, file=sys.stderr)
+            return 1
+        outside = [f for f in changed_norm if f not in lanes[agent]]
+        if outside:
+            print("OUT OF LANE: agent %r changed file(s) outside its allowed set:" % agent)
+            for f in outside:
+                print("  " + f)
+            print("Allowed: " + (", ".join(sorted(lanes[agent])) or "(none)"))
+            return 1
+        print("OK: agent %r stayed within its lane (%d file(s))." % (agent, len(changed)))
+        return 0
+
+    # lanes mode: the lane-controlled changed files must fit inside ONE agent's lane.
+    in_lanes = {f for f in changed_norm if any(f in lane for lane in lanes.values())}
+    if not in_lanes:
+        print("OK: no lane-controlled files changed.")
+        return 0
+    if any(in_lanes <= lane for lane in lanes.values()):
+        print("OK: all changed lane-files belong to one agent's lane.")
+        return 0
+    print("CROSS-LANE VIOLATION: changed files span more than one agent's lane:")
+    for f in sorted(in_lanes):
+        owners = sorted(a for a, lane in lanes.items() if f in lane)
+        print("  %s <- %s" % (f, ", ".join(owners)))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+
+# The non-agent enforcement actor: a CI required status check the downstream fleet cannot
+# route around. Wire it as a required check in branch protection so a red gate BLOCKS merge.
+_CI_WORKFLOW = '''name: seasar-gate
+# Wire this as a REQUIRED status check in branch protection: a red gate blocks the merge
+# button, so the fleet is held by GitHub/git, not by an agent choosing to obey.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  seasar-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build-order integrity
+        run: python3 scripts/verify-build-order.py build-order.json
+      - name: Forced stop (no unresolved decisions)
+        run: python3 scripts/assert-no-sentinel.py
+      - name: One writer per file (plan audit)
+        run: python3 scripts/check-ownership.py
+      - name: Stay in lane (no cross-lane edits in this change)
+        run: |
+          set -o pipefail
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+            base="origin/${{ github.base_ref }}"
+          else
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+          fi
+          changed="$(git diff --name-only "$base"...HEAD)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed" | python3 scripts/check-ownership.py --lanes
+          else
+            echo "no changes to lane-check"
+          fi
+      - name: Project verify (typecheck + tests + gate predicates)
+        run: |
+          if [ -f package.json ]; then
+            npm ci && npm run verify --if-present && npm test --if-present
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt && python -m pytest -q
+          else
+            echo "No recognized manifest -- set your project verify command here."
+          fi
+'''
+
+
 def _safe_bundle_path(raw):
     """Normalize a model-generated path for the bundle zip; return None if it would
     escape the root (Zip-Slip). Cross-platform: backslashes are normalized first so a
@@ -1384,6 +1578,9 @@ def build_bundle(order):
         # Forced-stop: the decision ledger + the gate that refuses to let a sentinel ship.
         put(f"{root}/DECISIONS.md", _md_decisions(order))
         put(f"{root}/scripts/assert-no-sentinel.py", _ASSERT_NO_SENTINEL)
+        # Build-time enforcement the fleet can't route around: ownership lint + CI gate.
+        put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
+        put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
