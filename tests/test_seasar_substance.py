@@ -61,6 +61,14 @@ class CompileTimeProbeTest(unittest.TestCase):
             _contract_order("import sys\nsys.exit(7)\n", "python"),
             "contracts_source_parses")["ok"])
 
+    def test_deeply_nested_json_does_not_raise(self):
+        # an adversarial source must NOT crash verify_order (the never-raises contract).
+        order = sc._normalize_order(_contract_order("[" * 5000 + "]" * 5000, "json"))
+        result = sv.verify_order(order)               # must not raise
+        self.assertIs(result["ok"], True)             # WARN, not a crash
+        c = next(c for c in result["checks"] if c["name"] == "contracts_source_parses")
+        self.assertFalse(c["ok"])
+
 
 class BuildTimeGateTest(unittest.TestCase):
     def _root(self, order, dest):
@@ -101,6 +109,38 @@ class BuildTimeGateTest(unittest.TestCase):
                 os.path.join(root, "scripts", "check-contracts-compile.py")))
             with open(os.path.join(root, ".github", "workflows", "seasar-gate.yml")) as fh:
                 self.assertIn("check-contracts-compile.py", fh.read())
+
+    def test_missing_source_file_reported(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._root(_contract_order("x = 1\n", "python", "src/c.py"), t)
+            os.remove(os.path.join(root, "src", "c.py"))
+            r = self._run(root)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("does not exist", r.stdout)
+
+    def test_one_broken_among_many_fails_by_name(self):
+        order = {"title": "X",
+                 "tasks": [{"id": "T1", "wave": 1, "files": ["src/a.py", "src/b.py"]}],
+                 "contracts": [
+                     {"name": "Good", "owner_task": "T1", "source": "x = 1\n",
+                      "source_lang": "python", "source_path": "src/a.py"},
+                     {"name": "Bad", "owner_task": "T1", "source": "def (:\n",
+                      "source_lang": "py", "source_path": "src/b.py"}]}   # py alias
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(self._root(order, t))
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("Bad", r.stdout)
+            self.assertNotIn("Good (", r.stdout)   # the valid contract isn't a failure
+
+    def test_no_bytecode_cache_left_in_bundle(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self._root(_contract_order("x = 1\n", "python", "src/c.py"), t)
+            self._run(root)
+            stray = []
+            for _dp, dns, fns in os.walk(root):
+                stray += [f for f in fns if f.endswith(".pyc")]
+                stray += [d for d in dns if d == "__pycache__"]
+            self.assertEqual(stray, [], "gate must write no .pyc/__pycache__: %r" % stray)
 
 
 if __name__ == "__main__":

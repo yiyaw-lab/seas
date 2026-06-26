@@ -1662,14 +1662,13 @@ if __name__ == "__main__":
 _CHECK_CONTRACTS_COMPILE = r'''#!/usr/bin/env python3
 """check-contracts-compile -- the substance prober. For every contract with source +
 source_path, COMPILE/parse the file in its language (not merely check it is non-empty):
-  python            -> py_compile (syntax only; never executed)
+  python            -> compile() (syntax only; never executed; writes no .pyc)
   json/json-schema  -> json.loads
 Other languages are skipped here (the project verify step -- tsc/etc. -- compiles them).
 A contract that looks like code but does not compile fails the build.
 """
 import json
 import os
-import py_compile
 import sys
 
 
@@ -1696,13 +1695,15 @@ def main(root="."):
             continue
         try:
             if lang in ("python", "py"):
-                py_compile.compile(path, doraise=True)
+                with open(path, "rb") as fh:
+                    compile(fh.read(), path, "exec")   # syntax-only; writes no .pyc
             else:
                 with open(path, encoding="utf-8") as fh:
                     json.load(fh)
             checked += 1
-        except (py_compile.PyCompileError, ValueError) as e:
-            fails.append("%s (%s): %s" % (c.get("name"), lang, str(e).splitlines()[0]))
+        except Exception as e:   # fail-closed: report any compile/parse error
+            fails.append("%s (%s): %s" % (c.get("name"), lang,
+                                          (str(e).splitlines() or ["parse error"])[0]))
     if fails:
         print("CONTRACT COMPILE FAILED:")
         for f in fails:

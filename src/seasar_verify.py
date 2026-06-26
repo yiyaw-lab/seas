@@ -71,7 +71,7 @@ def _source_parse_error(c):
             json.loads(src)
         else:
             return None
-    except (SyntaxError, ValueError) as e:
+    except Exception as e:   # leaf helper: NEVER propagate -- verify_order must not raise
         return (str(e).splitlines() or ["parse error"])[0]
     return None
 
@@ -240,8 +240,8 @@ def verify_order(order):
         # substance prober: contract source we can check in-process (python/json) must
         # actually parse, not just be non-empty -- a contract that looks like code but
         # does not compile is prose with extra steps.
-        bad = ["%s: %s" % (c.get("name"), _source_parse_error(c))
-               for c in contracts if _source_parse_error(c)]
+        errs = [(c.get("name"), _source_parse_error(c)) for c in contracts]
+        bad = ["%s: %s" % (n, e) for n, e in errs if e]
         add("contracts_source_parses", not bad, WARN,
             "contract source does not parse/compile: " + "; ".join(bad))
     else:
