@@ -221,7 +221,7 @@ _CAST_SCHEMA = """{
     "examples": [{ "input": "concrete input", "output": "concrete expected output" }]
   },
   "repo_scaffold": [{ "path": "src/api/server.ts", "purpose": "one line" }],
-  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it" }],
+  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)" }],
   "tasks": [{
     "id": "T1", "title": "...", "wave": 1, "depends_on": [],
     "files": ["src/api/server.ts"], "agent_role": "Backend|Frontend|Schema|Infra|Tests",
@@ -359,6 +359,30 @@ def _wave_of(t):
         return 1
 
 
+def _merge_order(order):
+    """Deterministic topological merge order: a task merges only after the tasks it
+    depends on, ties broken by (wave, id) so the order is stable. The orchestrator merges
+    in this order and re-runs the gate after each merge (the merge-queue). A dependency
+    cycle can't hang -- leftover tasks are appended by (wave, id)."""
+    tasks = [t for t in (order.get("tasks") or []) if isinstance(t, dict) and t.get("id")]
+    by_id = {t["id"]: t for t in tasks}
+    deps = {t["id"]: {d for d in (t.get("depends_on") or []) if d in by_id and d != t["id"]}
+            for t in tasks}
+    key = lambda i: (_wave_of(by_id[i]), str(i))
+    done, out = set(), []
+    while True:
+        ready = sorted([i for i in deps if i not in done and deps[i] <= done], key=key)
+        if not ready:
+            break
+        done.add(ready[0])
+        out.append(ready[0])
+    for i in sorted(deps, key=key):
+        if i not in done:
+            done.add(i)
+            out.append(i)   # cycle remnant -- deterministic, never a hang
+    return out
+
+
 def _normalize_order(order):
     """Coerce the model's raw JSON into the shape the rest of the pipeline (stamp,
     bundle) and the frontend renderers ASSUME: every required array/object present
@@ -390,6 +414,7 @@ def _normalize_order(order):
         c["source"] = str(c.get("source", "") or "")
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
+        c["version"] = str(c.get("version", "") or "1.0.0")
     # fixtures: the wave-0 golden corpus every test runs against.
     for f in order["fixtures"]:
         f["path"] = str(f.get("path", "") or "")
@@ -510,6 +535,9 @@ def _validate_and_repair(order):
         owner = c.get("owner_task")
         if owner and owner not in task_ids:
             notes.append(f"contract {c.get('name')} owner_task {owner!r} is not a task")
+        if not str(c.get("source_path", "") or "").strip():
+            notes.append(f"contract {c.get('name')} has no source_path -- the "
+                         f"contract-freeze gate cannot enforce it")
 
     for n in notes:
         log.warning("stamp consistency: %s", n)
@@ -618,6 +646,11 @@ def stamp(order):
         },
     }
     order["buildability"] = buildability
+    # the merge-queue: a deterministic topo order the orchestrator merges in (re-running
+    # the gate after each), so N PRs green-in-isolation can't poison the wave out of order.
+    orch = order.get("orchestration")
+    if isinstance(orch, dict):
+        orch["merge_order"] = _merge_order(order)
     return buildability
 
 
@@ -1067,6 +1100,7 @@ Build context for autonomous coding agents on this Build Order.
 ### Ask (propose, never guess)
 - If a task needs to write a file owned by another task, STOP -- do not edit it.
 - To change a contract you do not own, follow contract_evolution: {evolution}
+- File a CCR in CONTRACT_CHANGES.md (the owner amends + bumps version; CI re-verifies). A contract source change with no matching CCR fails `check-contract-freeze.py`.
 - Record the request in HANDOFF.md; never silently guess a shape.
 
 ### Never
@@ -1498,6 +1532,16 @@ jobs:
           else
             echo "no changes to lane-check"
           fi
+      - name: Contract freeze (no silent contract change without a CCR)
+        run: |
+          set -o pipefail
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+            base="origin/${{ github.base_ref }}"
+          else
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+          fi
+          git diff --name-only "$base"...HEAD | python3 scripts/check-contract-freeze.py
       - name: Project verify (typecheck + tests + gate predicates)
         run: |
           if [ -f package.json ]; then
@@ -1507,6 +1551,106 @@ jobs:
           else
             echo "No recognized manifest -- set your project verify command here."
           fi
+'''
+
+
+def _md_merge_order(order):
+    """MERGE_ORDER.md -- the order the orchestrator merges work in, re-running the gate
+    after each merge so two PRs green-in-isolation can't poison a wave."""
+    mo = (order.get("orchestration") or {}).get("merge_order") or []
+    if not mo:
+        return "# Merge order\n\n_(single task or unsequenced)_\n"
+    lines = ["# Merge order\n",
+             "Merge in THIS order, re-running `.github/workflows/seasar-gate.yml` after "
+             "each merge (a PR green against the old base may not be green against the "
+             "newly-merged HEAD):\n"]
+    for n, tid in enumerate(mo, 1):
+        lines.append(f"{n}. {tid}")
+    return "\n".join(lines) + "\n"
+
+
+def _md_contract_changes(order):
+    """CONTRACT_CHANGES.md -- the async contract-change-request (CCR) ledger. Contracts are
+    frozen and single-owner; a downstream agent that needs a change does NOT edit the file
+    (lane enforcement forbids it) -- it files a CCR here. The owner amends the contract,
+    bumps its version, and CI re-verifies every consumer."""
+    contracts = [c for c in (order.get("contracts") or []) if isinstance(c, dict)]
+    out = ["# CONTRACT CHANGES -- the async change-request ledger\n",
+           "Contracts are FROZEN and single-owner. To change one you do not own, do NOT "
+           "edit it -- file a CCR below; the owner amends it, bumps `version`, and CI "
+           "re-verifies consumers. Any change to a contract's source file requires a "
+           "matching `CCR <name>` line here, or `scripts/check-contract-freeze.py` fails "
+           "the build.\n",
+           "## Open requests",
+           "<!-- one per line: `CCR <contract-name>: <task> needs <field/behavior> -- <why>` -->\n",
+           "## Frozen contracts (owner / version)"]
+    for c in contracts:
+        out.append("- `%s` -- owner %s, v%s, file `%s`"
+                   % (c.get("name", ""), c.get("owner_task", "?"),
+                      c.get("version", "1.0.0"), c.get("source_path", "")))
+    if not contracts:
+        out.append("- (none)")
+    return "\n".join(out) + "\n"
+
+
+# A frozen contract may not change silently: any diff to a contract source file must carry
+# a matching CCR in CONTRACT_CHANGES.md, or this emitted gate fails the build at CI time.
+_CHECK_CONTRACT_FREEZE = r'''#!/usr/bin/env python3
+"""check-contract-freeze -- a changed contract source file must have a logged CCR.
+
+Given changed files (args or newline stdin) + build-order.json, fail (exit 1) for any
+contract whose source_path is in the change but has no `CCR <name>` line in
+CONTRACT_CHANGES.md -- so a frozen contract cannot change silently and consumers see the
+ripple. File a CCR via the ritual in CONTRACT_CHANGES.md.
+"""
+import json
+import os
+import re
+import sys
+
+
+def main(argv):
+    root = os.environ.get("SEASAR_ROOT", ".")
+    files = [a for a in argv if not a.startswith("--")]
+    if not files and not (sys.stdin is None or sys.stdin.isatty()):
+        files = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError) as e:
+        print("check-contract-freeze: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+    try:
+        with open(os.path.join(root, "CONTRACT_CHANGES.md"), encoding="utf-8") as fh:
+            ledger = fh.read()
+    except OSError:
+        ledger = ""
+    changed = {os.path.normpath(f) for f in files}
+    unlogged = []
+    for c in (order.get("contracts") or []):
+        if not isinstance(c, dict):
+            continue
+        sp = c.get("source_path")
+        if not (sp and os.path.normpath(sp) in changed):
+            continue
+        # Line-anchored, delimited match on the canonical "CCR <name>:" form -- a CCR for
+        # ApiV2 must NOT satisfy Api (prefix), and a prose mention in another CCR's body
+        # must not either. A nameless contract can't be logged -> always flagged.
+        name = str(c.get("name", "") or "").strip()
+        pat = re.compile(r"(?m)^\s*CCR\s+" + re.escape(name) + r"\s*:") if name else None
+        if pat is None or not pat.search(ledger):
+            unlogged.append(c.get("name"))
+    if unlogged:
+        print("CONTRACT FREEZE: changed contract(s) with no logged CCR in "
+              "CONTRACT_CHANGES.md: " + ", ".join(map(str, unlogged)))
+        print("File a CCR (see CONTRACT_CHANGES.md) so consumers re-verify.")
+        return 1
+    print("OK: no unlogged contract changes.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
 '''
 
 
@@ -1580,6 +1724,9 @@ def build_bundle(order):
         put(f"{root}/scripts/assert-no-sentinel.py", _ASSERT_NO_SENTINEL)
         # Build-time enforcement the fleet can't route around: ownership lint + CI gate.
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
+        put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
+        put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
+        put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
