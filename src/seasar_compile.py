@@ -1115,6 +1115,7 @@ Build context for autonomous coding agents on this Build Order.
 - Before you hand off, run the emitted gates: `assert-no-sentinel.py`, `check-ownership.py --agent "<you>"`, `check-contract-freeze.py`, `check-contracts-compile.py` (CI runs them too).
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
+- `python3 scripts/selftest-gates.py` proves the gates have teeth (each fires on a broken fixture); if you weaken a gate it goes red -- do not "fix" it by neutering the gate.
 - `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
 - CI (`.github/workflows/seasar-gate.yml`) runs build-order + forced-stop + ownership + project verify as a REQUIRED check; a red gate blocks merge.
 - Build proceeds in waves; wait for the previous wave's gates before starting.
@@ -1555,6 +1556,8 @@ jobs:
           python3 scripts/check-contract-freeze.py < /tmp/seasar_changed.txt
       - name: Contract source compiles (substance prober)
         run: python3 scripts/check-contracts-compile.py
+      - name: Gates have teeth (negative control -- no tautology gate)
+        run: python3 scripts/selftest-gates.py
       - name: Project verify (typecheck + tests + gate predicates)
         run: |
           if [ -f package.json ]; then
@@ -1732,6 +1735,146 @@ if __name__ == "__main__":
 '''
 
 
+# The negative control, emitted into every bundle: prove the OTHER gates have teeth.
+# A gate that cannot fail is decoration; this runs each one against a deliberately
+# broken fixture (must exit nonzero) AND a clean one (must exit 0), so a tautology gate
+# -- e.g. one quietly reduced to `exit 0` -- is caught at build time, not trusted on faith.
+_SELFTEST_GATES = r'''#!/usr/bin/env python3
+"""selftest-gates -- the negative control: prove the emitted gates have TEETH.
+
+A gate that cannot fail is not a gate, it is decoration. For every enforcement gate this
+bundle ships, run it against a deliberately BROKEN fixture (expect a nonzero exit -- the
+gate FIRES) and against a CLEAN fixture (expect exit 0 -- it passes legitimate work). If
+any gate fails to fire on its broken fixture, THIS script fails the build, so a tautology
+gate (e.g. one quietly reduced to `exit 0`) is caught here rather than trusted on faith.
+Run in CI alongside the gates: `python3 scripts/selftest-gates.py`.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+# Assembled at runtime so this file does not itself contain a literal decision sentinel
+# (assert-no-sentinel walks the whole repo and would otherwise flag this script as one).
+_MARK = "SEASAR_" + "DECIDE_" + "D1"
+
+
+def _run(script, root, argv=(), stdin=None):
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, script), *argv],
+        input=stdin, capture_output=True, text=True,
+        env=dict(os.environ, SEASAR_ROOT=root), cwd=root,
+    )
+
+
+def _write(root, rel, data):
+    p = os.path.join(root, rel)
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(data)
+
+
+def _sentinel_broken(root):
+    _write(root, "build-order.json", json.dumps({"decisions": [{"id": "D1"}]}))
+    _write(root, "notes.txt", "open question -- " + _MARK + "\n")
+
+
+def _sentinel_clean(root):
+    _write(root, "build-order.json", json.dumps({"decisions": [{"id": "D1"}]}))
+    _write(root, "DECISIONS.md", "RESOLVED_D1: picked option A\n")
+
+
+def _compile_broken(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [
+        {"name": "C", "source_lang": "python", "source_path": "c.py", "source": "def ("}]}))
+    _write(root, "c.py", "def (\n")
+
+
+def _compile_clean(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [
+        {"name": "C", "source_lang": "python", "source_path": "c.py", "source": "x = 1\n"}]}))
+    _write(root, "c.py", "x = 1\n")
+
+
+_ORDER_2LANE = {
+    "tasks": [{"id": "T1", "files": ["a.py"]}, {"id": "T2", "files": ["b.py"]}],
+    "work_orders": [{"agent": "A", "task_ids": ["T1"]}, {"agent": "B", "task_ids": ["T2"]}],
+}
+
+
+def _ownership(root):
+    _write(root, "build-order.json", json.dumps(_ORDER_2LANE))
+
+
+def _freeze_broken(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [{"name": "C", "source_path": "c.py"}]}))
+    _write(root, "CONTRACT_CHANGES.md", "# Contract changes\n")
+
+
+def _freeze_clean(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [{"name": "C", "source_path": "c.py"}]}))
+    _write(root, "CONTRACT_CHANGES.md", "# Contract changes\n\nCCR C: bumped to v2\n")
+
+
+# (label, script, broken-spec, clean-spec); each spec = (build_fn, argv, stdin).
+CASES = [
+    ("assert-no-sentinel (forced stop)", "assert-no-sentinel.py",
+     (_sentinel_broken, (), None), (_sentinel_clean, (), None)),
+    ("check-contracts-compile (substance prober)", "check-contracts-compile.py",
+     (_compile_broken, (), None), (_compile_clean, (), None)),
+    ("check-ownership --lanes (one writer per file)", "check-ownership.py",
+     (_ownership, ("--lanes",), "a.py\nb.py\n"), (_ownership, ("--lanes",), "a.py\n")),
+    ("check-contract-freeze (no silent contract change)", "check-contract-freeze.py",
+     (_freeze_broken, (), "c.py\n"), (_freeze_clean, (), "c.py\n")),
+]
+
+
+def _check(label, script, broken, clean):
+    problems = []
+    for kind, spec, expect_fail in (("broken", broken, True), ("clean", clean, False)):
+        build_fn, argv, stdin = spec
+        with tempfile.TemporaryDirectory() as root:
+            build_fn(root)
+            r = _run(script, root, argv, stdin)
+        fired = r.returncode != 0
+        if fired != expect_fail:
+            want = "FAIL (nonzero)" if expect_fail else "PASS (zero)"
+            problems.append("  %s on the %s fixture: expected %s, got exit %d -- %s"
+                            % (script, kind, want, r.returncode,
+                               (r.stdout + r.stderr).strip().replace("\n", " ")[:300]))
+    return problems
+
+
+def main():
+    missing = [s for _, s, _, _ in CASES if not os.path.exists(os.path.join(HERE, s))]
+    if missing:
+        print("selftest-gates: gate script(s) missing from scripts/: "
+              + ", ".join(sorted(set(missing))), file=sys.stderr)
+        return 1
+    all_problems = []
+    for label, script, broken, clean in CASES:
+        probs = _check(label, script, broken, clean)
+        print("[%s] %s" % ("TEETH" if not probs else "NO TEETH", label))
+        all_problems.extend(probs)
+    if all_problems:
+        print("\nGATE SELF-TEST FAILED -- a gate did not behave as a gate:")
+        for p in all_problems:
+            print(p)
+        return 1
+    print("\nOK: all %d gates fire on broken input and pass clean input (negative control)."
+          % len(CASES))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
 def _safe_bundle_path(raw):
     """Normalize a model-generated path for the bundle zip; return None if it would
     escape the root (Zip-Slip). Cross-platform: backslashes are normalized first so a
@@ -1804,6 +1947,8 @@ def build_bundle(order):
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
         put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
         put(f"{root}/scripts/check-contracts-compile.py", _CHECK_CONTRACTS_COMPILE)
+        # The negative control: a gate that ships proving the OTHER gates have teeth.
+        put(f"{root}/scripts/selftest-gates.py", _SELFTEST_GATES)
         put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
         put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
