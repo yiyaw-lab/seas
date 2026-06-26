@@ -21,6 +21,7 @@ Pure stdlib; operates on the order dict; NEVER raises on a malformed or legacy o
 a missing field is a failed check, not a crash. Every accessor is defensive .get().
 """
 
+import json
 import re
 
 ERROR = "error"   # structural -- agents WILL collide / block
@@ -48,10 +49,34 @@ def _nonempty(v):
 
 
 def _strs(v):
-    """Coerce a field that should be a list of strings: a scalar or non-list yields []
-    (never char-iterated), non-str members are dropped. Mirrors _dicts() so a model that
-    emits files="a.py" or depends_on="T1" can't fabricate per-character collisions/deps."""
-    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+    """Coerce a field that should be a list of strings. A list keeps its str members; a
+    bare non-empty string becomes a ONE-element list (so files="a.py" is the path "a.py" --
+    never char-iterated, and never dropped, so two same-wave tasks with the same scalar
+    still collide); anything else -> []."""
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, str)]
+    return [v.strip()] if isinstance(v, str) and v.strip() else []
+
+
+def _source_parse_error(c):
+    """Substance prober: return a syntax/parse error for a contract whose source we CAN
+    check in-process (python via compile(), json via json.loads). compile() only
+    SYNTAX-checks -- it never executes the source. Other languages return None (the emitted
+    check-contracts-compile.py runs their real compiler at build time)."""
+    src = c.get("source") or ""
+    if not src.strip():
+        return None
+    lang = str(c.get("source_lang", "") or "").lower()
+    try:
+        if lang in ("python", "py"):
+            compile(src, "<contract:%s>" % (c.get("name") or ""), "exec")
+        elif lang in ("json", "json-schema", "jsonschema"):
+            json.loads(src)
+        else:
+            return None
+    except Exception as e:   # leaf helper: NEVER propagate -- verify_order must not raise
+        return (str(e).splitlines() or ["parse error"])[0]
+    return None
 
 
 def _wave_of(t):
@@ -196,9 +221,22 @@ def verify_order(order):
         "not earlier-wave: " + "; ".join(dep_forward))
 
     waves = (order.get("orchestration") or {}).get("waves") or []
-    flat = [tid for w in waves for tid in (w or [])]
+    flat = [tid for w in waves for tid in (w or []) if isinstance(tid, str)]
     add("waves_partition", sorted(flat) == sorted(task_ids), ERROR,
         "orchestration.waves does not list every task id exactly once")
+    # Partition-by-set is not enough: the orchestrator schedules off orchestration.waves'
+    # ORDER, so a task placed in too-early a group can run before a dependency even when
+    # every id appears once. Validate the actual schedule respects deps.
+    pos = {}
+    for i, w in enumerate(waves):
+        for tid in (w or []):
+            if isinstance(tid, str):
+                pos.setdefault(tid, i)
+    sched_forward = [f"{t.get('id')}<-{d}" for t in tasks for d in _strs(t.get("depends_on"))
+                     if pos.get(t.get("id")) is not None and pos.get(d) is not None
+                     and pos[d] >= pos[t.get("id")]]
+    add("waves_schedule_deps", not sched_forward, ERROR,
+        "orchestration.waves schedules a task at/before a dependency: " + "; ".join(sched_forward))
 
     bad_owner = [c.get("name") for c in _dicts(order, "contracts")
                  if c.get("owner_task") and c.get("owner_task") not in task_id_set]
@@ -215,6 +253,13 @@ def verify_order(order):
                    if _nonempty(c.get("source")) and not _nonempty(c.get("source_path"))]
         add("contracts_have_path", not no_path, WARN,
             "source without source_path: " + ", ".join(map(str, no_path)))
+        # substance prober: contract source we can check in-process (python/json) must
+        # actually parse, not just be non-empty -- a contract that looks like code but
+        # does not compile is prose with extra steps.
+        errs = [(c.get("name"), _source_parse_error(c)) for c in contracts]
+        bad = ["%s: %s" % (n, e) for n, e in errs if e]
+        add("contracts_source_parses", not bad, WARN,
+            "contract source does not parse/compile: " + "; ".join(bad))
     else:
         add("contracts_have_source", False, WARN, "no contracts defined")
 
@@ -293,7 +338,9 @@ def verify_order(order):
     # (contracts_compile / fixtures_materialized / scaffold_runnable). stamp() folds
     # THIS into self_check_passes so the 8 score factors stay orthogonal.
     independent = ("handoff_protocol_present", "contract_evolution_present",
-                   "work_orders_have_dod")
+                   "work_orders_have_dod", "gates_have_predicates",
+                   "gate_fixtures_materialized", "gate_predicates_distinct",
+                   "decisions_routed")
     ind = [c for c in checks if c["name"] in independent]
     ind_pass = sum(1 for c in ind if c["ok"])
     return {

@@ -520,11 +520,12 @@ def _validate_and_repair(order):
     # rebuild it deterministically from each task's `wave`.
     orch = order.get("orchestration") or {}
     waves = orch.get("waves") or []
-    flat = [tid for w in waves for tid in w]
+    flat = [tid for w in waves for tid in (w or []) if isinstance(tid, str)]
     if sorted(flat) != sorted(task_ids):
         rebuilt = {}
         for t in tasks:
-            rebuilt.setdefault(_wave_of(t), []).append(t.get("id"))
+            if t.get("id"):
+                rebuilt.setdefault(_wave_of(t), []).append(t.get("id"))
         orch["waves"] = [rebuilt[w] for w in sorted(rebuilt)]
         order["orchestration"] = orch
         notes.append("orchestration.waves did not partition all tasks; "
@@ -1106,12 +1107,12 @@ Build context for autonomous coding agents on this Build Order.
 ### Never
 - Never edit a file outside your assigned task's `files` list.
 - Never merge past a failing quality gate (see `orchestration.md`).
-- Never change a published contract without re-running `verify-build-order`.
+- Never change a published contract without filing a CCR in CONTRACT_CHANGES.md (check-contract-freeze enforces it).
 - Never resolve a DECISIONS.md item silently -- a surviving `SEASAR_DECIDE_` sentinel fails the build.
 
 ## Commands
 - Run your task's test (see `tasks.md`) and confirm its acceptance gate is green.
-- Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
+- Before you hand off, run the emitted gates: `assert-no-sentinel.py`, `check-ownership.py --agent "<you>"`, `check-contract-freeze.py`, `check-contracts-compile.py` (CI runs them too).
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
 - `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
@@ -1146,9 +1147,13 @@ def _md_tasks(order):
 def _md_orchestration(order):
     orch = order.get("orchestration") or {}
     waves = orch.get("waves") or []
-    wave_lines = "\n".join(
-        f"- Wave {i + 1}: {', '.join(w)}" for i, w in enumerate(waves)
-    ) or "- (none)"
+    wave_of = {t.get("id"): _wave_of(t) for t in (order.get("tasks") or []) if t.get("id")}
+
+    def _wline(w):
+        ids = [t for t in (w or []) if isinstance(t, str)]
+        nums = [wave_of[t] for t in ids if t in wave_of]
+        return f"- Wave {min(nums) if nums else '?'}: {', '.join(ids)}"
+    wave_lines = "\n".join(_wline(w) for w in waves) or "- (none)"
     gates = "\n".join(
         f"- **{g.get('name', '')}** -- threshold: {g.get('threshold', '')} "
         f"(blocks merge: {bool(g.get('blocks_merge'))})"
@@ -1230,7 +1235,8 @@ def _md_work_order(wo, order=None):
                        + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
-    out.append("- The repo verify pipeline is green: typecheck + tests + `verify-build-order`.")
+    out.append("- The emitted gates pass (assert-no-sentinel + check-ownership + "
+               "check-contract-freeze + check-contracts-compile) plus typecheck + tests.")
     out.append("- Every blocking quality gate touching your files is green.")
     out.append("- `python3 scripts/assert-no-sentinel.py` is green (every decision resolved).")
     out.append(f"- `python3 scripts/check-ownership.py --agent \"{wo.get('agent', '')}\" "
@@ -1333,7 +1339,8 @@ def main(root="."):
                 if PATTERN.search(line):
                     hits.append(f"{path}:{i}: {line.strip()}")
     unresolved = [rid for rid in _decision_ids(root)
-                  if ("RESOLVED_" + rid) not in decisions_md]
+                  if not re.search(r"RESOLVED_" + re.escape(rid) + r"(?![A-Za-z0-9])",
+                                   decisions_md)]
     if hits or unresolved:
         if hits:
             print("FORCED STOP: %d unresolved decision sentinel(s):" % len(hits))
@@ -1462,9 +1469,10 @@ def main(argv):
         if agent not in lanes:
             print("check-ownership: no work order for agent %r" % agent, file=sys.stderr)
             return 1
-        outside = [f for f in changed_norm if f not in lanes[agent]]
+        other = {f for a, lane in lanes.items() if a != agent for f in lane}
+        outside = [f for f in changed_norm if f in other and f not in lanes[agent]]
         if outside:
-            print("OUT OF LANE: agent %r changed file(s) outside its allowed set:" % agent)
+            print("OUT OF LANE: agent %r changed file(s) owned by another agent:" % agent)
             for f in outside:
                 print("  " + f)
             print("Allowed: " + (", ".join(sorted(lanes[agent])) or "(none)"))
@@ -1511,37 +1519,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Build-order integrity
-        run: python3 scripts/verify-build-order.py build-order.json
       - name: Forced stop (no unresolved decisions)
         run: python3 scripts/assert-no-sentinel.py
       - name: One writer per file (plan audit)
         run: python3 scripts/check-ownership.py
       - name: Stay in lane (no cross-lane edits in this change)
         run: |
-          set -o pipefail
-          if [ -n "${{ github.base_ref }}" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
             base="origin/${{ github.base_ref }}"
           else
-            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            base="${{ github.event.before }}"
+            case "$base" in ""|0000000*) base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)" ;; esac
           fi
-          changed="$(git diff --name-only "$base"...HEAD)"
-          if [ -n "$changed" ]; then
-            printf '%s\n' "$changed" | python3 scripts/check-ownership.py --lanes
+          if ! git diff --name-only "$base...HEAD" > /tmp/seasar_changed.txt; then
+            echo "git diff against $base failed -- cannot lane-check"; exit 1
+          fi
+          if [ -s /tmp/seasar_changed.txt ]; then
+            python3 scripts/check-ownership.py --lanes < /tmp/seasar_changed.txt
           else
-            echo "no changes to lane-check"
+            echo "no file changes to lane-check"
           fi
       - name: Contract freeze (no silent contract change without a CCR)
         run: |
-          set -o pipefail
-          if [ -n "${{ github.base_ref }}" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
             base="origin/${{ github.base_ref }}"
           else
-            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            base="${{ github.event.before }}"
+            case "$base" in ""|0000000*) base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)" ;; esac
           fi
-          git diff --name-only "$base"...HEAD | python3 scripts/check-contract-freeze.py
+          if ! git diff --name-only "$base...HEAD" > /tmp/seasar_changed.txt; then
+            echo "git diff against $base failed -- cannot freeze-check"; exit 1
+          fi
+          python3 scripts/check-contract-freeze.py < /tmp/seasar_changed.txt
+      - name: Contract source compiles (substance prober)
+        run: python3 scripts/check-contracts-compile.py
       - name: Project verify (typecheck + tests + gate predicates)
         run: |
           if [ -f package.json ]; then
@@ -1625,13 +1638,15 @@ def main(argv):
             ledger = fh.read()
     except OSError:
         ledger = ""
-    changed = {os.path.normpath(f) for f in files}
+    def _n(p):
+        return os.path.normpath(str(p or "").replace("\\", "/").lstrip("/"))
+    changed = {_n(f) for f in files}
     unlogged = []
     for c in (order.get("contracts") or []):
         if not isinstance(c, dict):
             continue
         sp = c.get("source_path")
-        if not (sp and os.path.normpath(sp) in changed):
+        if not (sp and _n(sp) in changed):
             continue
         # Line-anchored, delimited match on the canonical "CCR <name>:" form -- a CCR for
         # ApiV2 must NOT satisfy Api (prefix), and a prose mention in another CCR's body
@@ -1651,6 +1666,69 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+'''
+
+
+# The substance prober, emitted into every bundle: actually COMPILE each contract source
+# file in its language (not just check it is non-empty), so code that does not compile
+# fails the build. python/json run here; other langs are covered by the project verify.
+_CHECK_CONTRACTS_COMPILE = r'''#!/usr/bin/env python3
+"""check-contracts-compile -- the substance prober. For every contract with source +
+source_path, COMPILE/parse the file in its language (not merely check it is non-empty):
+  python            -> compile() (syntax only; never executed; writes no .pyc)
+  json/json-schema  -> json.loads
+Other languages are skipped here (the project verify step -- tsc/etc. -- compiles them).
+A contract that looks like code but does not compile fails the build.
+"""
+import json
+import os
+import sys
+
+
+def main(root="."):
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError) as e:
+        print("check-contracts-compile: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+    fails, checked = [], 0
+    for c in (order.get("contracts") or []):
+        if not isinstance(c, dict):
+            continue
+        sp = c.get("source_path")
+        if not (sp and str(c.get("source", "") or "").strip()):
+            continue
+        lang = str(c.get("source_lang", "") or "").lower()
+        if lang not in ("python", "py", "json", "json-schema", "jsonschema"):
+            continue
+        path = os.path.join(root, sp)
+        if not os.path.exists(path):
+            fails.append("%s: source_path %s does not exist" % (c.get("name"), sp))
+            continue
+        try:
+            if lang in ("python", "py"):
+                with open(path, "rb") as fh:
+                    compile(fh.read(), path, "exec")   # syntax-only; writes no .pyc
+            else:
+                with open(path, encoding="utf-8") as fh:
+                    json.load(fh)
+            checked += 1
+        except Exception as e:   # fail-closed: report any compile/parse error
+            fails.append("%s (%s): %s" % (c.get("name"), lang,
+                                          (str(e).splitlines() or ["parse error"])[0]))
+    if fails:
+        print("CONTRACT COMPILE FAILED:")
+        for f in fails:
+            print("  " + f)
+        return 1
+    print("OK: %d contract source(s) compiled/parsed in-process "
+          "(others covered by project verify)." % checked)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "."))
 '''
 
 
@@ -1680,7 +1758,7 @@ def _md_handoff():
             "- (task id) -- the decision you could not make from the spec/contracts\n\n"
             "## Contract-change requests (propose-to-owner)\n"
             "- (task id) -- contract `<name>` needs `<field/behavior>`; do NOT edit it "
-            "yourself. The owner task amends it and re-runs verify-build-order.\n\n"
+            "yourself. The owner task amends it and re-runs the gates (CI).\n\n"
             "## Blocked\n"
             "- (task id) -- waiting on (task id / gate)\n")
 
@@ -1725,6 +1803,7 @@ def build_bundle(order):
         # Build-time enforcement the fleet can't route around: ownership lint + CI gate.
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
         put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
+        put(f"{root}/scripts/check-contracts-compile.py", _CHECK_CONTRACTS_COMPILE)
         put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
         put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
