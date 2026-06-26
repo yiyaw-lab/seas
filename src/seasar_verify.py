@@ -79,6 +79,19 @@ def _source_parse_error(c):
     return None
 
 
+def _has_behavior(c):
+    """True if a contract carries a behavioral spec -- the runtime semantics a type
+    signature does NOT pin down (ordering, idempotency, error model, pagination, units) or
+    a language-neutral interface IR. The exact place cross-agent semantic drift hides: two
+    agents agree on the shape and silently disagree on the behavior."""
+    beh = c.get("behavior")
+    if isinstance(beh, dict) and any(str(v).strip() for v in beh.values()):
+        return True
+    iface = c.get("interface")
+    return (isinstance(iface, list)
+            and any(isinstance(o, dict) and str(o.get("op", "")).strip() for o in iface))
+
+
 def _wave_of(t):
     """Tolerant 1-based wave (mirrors seasar_compile._wave_of; kept local so this
     module has zero coupling to the compiler)."""
@@ -260,6 +273,14 @@ def verify_order(order):
         bad = ["%s: %s" % (n, e) for n, e in errs if e]
         add("contracts_source_parses", not bad, WARN,
             "contract source does not parse/compile: " + "; ".join(bad))
+        # A typed seam pins the SHAPE; behavior (ordering/idempotency/errors/pagination/
+        # units) or a language-neutral interface IR pins the SEMANTICS. A sourced contract
+        # with neither is where two agents agree on types and silently diverge on behavior.
+        no_beh = [c.get("name") for c in contracts
+                  if _nonempty(c.get("source")) and not _has_behavior(c)]
+        add("contracts_specify_behavior", not no_beh, WARN,
+            "typed seam(s) with no behavioral spec or interface IR "
+            "(semantic drift risk): " + ", ".join(map(str, no_beh)))
     else:
         add("contracts_have_source", False, WARN, "no contracts defined")
 
@@ -340,7 +361,7 @@ def verify_order(order):
     independent = ("handoff_protocol_present", "contract_evolution_present",
                    "work_orders_have_dod", "gates_have_predicates",
                    "gate_fixtures_materialized", "gate_predicates_distinct",
-                   "decisions_routed")
+                   "decisions_routed", "contracts_specify_behavior")
     ind = [c for c in checks if c["name"] in independent]
     ind_pass = sum(1 for c in ind if c["ok"])
     return {

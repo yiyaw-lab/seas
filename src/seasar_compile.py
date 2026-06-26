@@ -221,7 +221,7 @@ _CAST_SCHEMA = """{
     "examples": [{ "input": "concrete input", "output": "concrete expected output" }]
   },
   "repo_scaffold": [{ "path": "src/api/server.ts", "purpose": "one line" }],
-  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)" }],
+  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)", "behavior": { "ordering": "result/event order guarantee, or 'unordered'", "idempotency": "which ops are safe to retry and on what key", "errors": "error model -- shape, codes, and what is thrown vs returned", "pagination": "cursor/offset scheme + page bounds, or 'none'", "units": "units + encodings (cents not dollars, RFC3339 UTC, ...)" }, "interface": [{ "op": "operationName", "params": [{ "name": "x", "type": "language-neutral type" }], "returns": "language-neutral type", "errors": ["NotFound", "..."] }] }],
   "tasks": [{
     "id": "T1", "title": "...", "wave": 1, "depends_on": [],
     "files": ["src/api/server.ts"], "agent_role": "Backend|Frontend|Schema|Infra|Tests",
@@ -268,6 +268,9 @@ HARD RULES FOR THE PLAN:
   across the whole plan so parallel agents never collide.
 - every contract is a typed seam between modules; set its `owner_task` to the task
   that defines it. Anything other tasks depend on should expose a contract.
+- a contract's `source` pins the SHAPE; its `behavior` + `interface` pin the SEMANTICS
+  (ordering, idempotency, errors, pagination, units). State them -- unstated behavior is
+  exactly where two agents agree on types and silently diverge at the seam.
 - `orchestration.waves` must list every task id EXACTLY ONCE, grouped by wave.
 - `agent_count` and the number of work_orders should match the fleet size ({agents}).
 - distribute tasks across work_orders so each agent owns a coherent slice.
@@ -383,6 +386,48 @@ def _merge_order(order):
     return out
 
 
+_BEHAVIOR_ASPECTS = ("ordering", "idempotency", "errors", "pagination", "units")
+
+
+def _normalize_behavior(raw):
+    """A contract's behavioral spec: the runtime semantics a type signature does NOT pin
+    down -- ordering, idempotency, error model, pagination, units. Keep only the recognized
+    aspects, stringified and non-empty; the exact seam where two agents agree on the shape
+    and silently disagree on the behavior."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k in _BEHAVIOR_ASPECTS:
+        v = str(raw.get(k, "") or "").strip()
+        if v:
+            out[k] = v
+    return out
+
+
+def _normalize_interface(raw):
+    """The language-neutral interface IR: each operation (name, params, returns, errors)
+    specified independent of source_lang, so the seam is pinned once and the literal
+    `source` is one realization of it. Defensive against model junk -- an op needs a name."""
+    if not isinstance(raw, list):
+        return []
+    ops = []
+    for o in raw:
+        if not isinstance(o, dict):
+            continue
+        name = str(o.get("op", "") or o.get("name", "") or "").strip()
+        if not name:
+            continue
+        params = []
+        for p in (o.get("params") or []):
+            if isinstance(p, dict) and str(p.get("name", "") or "").strip():
+                params.append({"name": str(p.get("name")).strip(),
+                               "type": str(p.get("type", "") or "").strip()})
+        ops.append({"op": name, "params": params,
+                    "returns": str(o.get("returns", "") or "").strip(),
+                    "errors": [str(e).strip() for e in _as_list(o.get("errors")) if str(e).strip()]})
+    return ops
+
+
 def _normalize_order(order):
     """Coerce the model's raw JSON into the shape the rest of the pipeline (stamp,
     bundle) and the frontend renderers ASSUME: every required array/object present
@@ -415,6 +460,9 @@ def _normalize_order(order):
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
         c["version"] = str(c.get("version", "") or "1.0.0")
+        # Behavior + language-neutral interface IR: the SEMANTICS a type signature omits.
+        c["behavior"] = _normalize_behavior(c.get("behavior"))
+        c["interface"] = _normalize_interface(c.get("interface"))
     # fixtures: the wave-0 golden corpus every test runs against.
     for f in order["fixtures"]:
         f["path"] = str(f.get("path", "") or "")
@@ -1183,7 +1231,27 @@ def _md_contract(c):
         out.append(f"- **source file:** `{c.get('source_path')}`")
     if c.get("source_lang"):
         out.append(f"- **language:** {c.get('source_lang')}")
+    if c.get("version"):
+        out.append(f"- **version:** {c.get('version')}")
     out.append(f"\n## Rationale\n{c.get('detail', '')}")
+    beh = c.get("behavior") or {}
+    if beh:
+        out.append("\n## Behavior (runtime semantics -- a type signature does not pin these down)")
+        for k in _BEHAVIOR_ASPECTS:
+            if beh.get(k):
+                out.append(f"- **{k}:** {beh[k]}")
+    iface = c.get("interface") or []
+    if iface:
+        out.append("\n## Interface (language-neutral IR -- `source` is one realization)")
+        for o in iface:
+            params = ", ".join((f"{p['name']}: {p['type']}" if p.get("type") else p["name"])
+                               for p in o.get("params", []))
+            sig = f"- `{o['op']}({params})`"
+            if o.get("returns"):
+                sig += f" -> {o['returns']}"
+            out.append(sig)
+            if o.get("errors"):
+                out.append(f"  - errors: {', '.join(o['errors'])}")
     src = c.get("source") or ""
     if src.strip():
         out.append(f"\n## Source (canonical -- IMPORT this, do not re-derive)\n"
@@ -1955,6 +2023,15 @@ def build_bundle(order):
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
+            # The language-neutral IR: the seam's shape + semantics as structured data, so
+            # the contract is codegen-/diff-/tooling-consumable independent of source_lang
+            # (the literal `source` below is one realization of it).
+            put(f"{root}/contracts/{name}.contract.json", json.dumps({
+                "name": c.get("name"), "kind": c.get("kind"), "version": c.get("version"),
+                "owner_task": c.get("owner_task"), "source_lang": c.get("source_lang"),
+                "source_path": c.get("source_path"),
+                "behavior": c.get("behavior") or {}, "interface": c.get("interface") or [],
+            }, indent=2) + "\n")
             # Contracts ARE source: emit the literal compilable file agents IMPORT.
             src = c.get("source") or ""
             sp = _safe_bundle_path(c.get("source_path"))

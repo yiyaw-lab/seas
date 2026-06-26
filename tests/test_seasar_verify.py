@@ -58,6 +58,7 @@ def good_order():
                 "detail": "shared request/response types",
                 "source": "export interface Req { id: string }",
                 "source_path": "src/contracts/api.ts",
+                "behavior": {"errors": "4xx as Problem+JSON; 404 returns null, never throws"},
             },
         ],
         "fixtures": [
