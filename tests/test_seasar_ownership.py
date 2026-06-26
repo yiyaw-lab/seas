@@ -45,9 +45,11 @@ class BundleEmissionTest(unittest.TestCase):
             self.assertTrue(os.path.exists(yml))
             with open(yml, encoding="utf-8") as fh:
                 body = fh.read()
-            for gate in ("verify-build-order.py", "assert-no-sentinel.py",
-                         "check-ownership.py", "--lanes"):
+            for gate in ("assert-no-sentinel.py", "check-ownership.py", "--lanes",
+                         "check-contract-freeze.py", "check-contracts-compile.py"):
                 self.assertIn(gate, body, "CI yaml must wire %s" % gate)
+            # verify-build-order is a COMPILE-time gate (not emitted into the bundle).
+            self.assertNotIn("verify-build-order.py", body)
 
 
 class AuditModeTest(unittest.TestCase):

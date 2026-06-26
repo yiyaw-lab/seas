@@ -520,11 +520,12 @@ def _validate_and_repair(order):
     # rebuild it deterministically from each task's `wave`.
     orch = order.get("orchestration") or {}
     waves = orch.get("waves") or []
-    flat = [tid for w in waves for tid in w]
+    flat = [tid for w in waves for tid in (w or []) if isinstance(tid, str)]
     if sorted(flat) != sorted(task_ids):
         rebuilt = {}
         for t in tasks:
-            rebuilt.setdefault(_wave_of(t), []).append(t.get("id"))
+            if t.get("id"):
+                rebuilt.setdefault(_wave_of(t), []).append(t.get("id"))
         orch["waves"] = [rebuilt[w] for w in sorted(rebuilt)]
         order["orchestration"] = orch
         notes.append("orchestration.waves did not partition all tasks; "
@@ -1106,12 +1107,12 @@ Build context for autonomous coding agents on this Build Order.
 ### Never
 - Never edit a file outside your assigned task's `files` list.
 - Never merge past a failing quality gate (see `orchestration.md`).
-- Never change a published contract without re-running `verify-build-order`.
+- Never change a published contract without filing a CCR in CONTRACT_CHANGES.md (check-contract-freeze enforces it).
 - Never resolve a DECISIONS.md item silently -- a surviving `SEASAR_DECIDE_` sentinel fails the build.
 
 ## Commands
 - Run your task's test (see `tasks.md`) and confirm its acceptance gate is green.
-- Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
+- Before you hand off, run the emitted gates: `assert-no-sentinel.py`, `check-ownership.py --agent "<you>"`, `check-contract-freeze.py`, `check-contracts-compile.py` (CI runs them too).
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
 - `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
@@ -1146,9 +1147,13 @@ def _md_tasks(order):
 def _md_orchestration(order):
     orch = order.get("orchestration") or {}
     waves = orch.get("waves") or []
-    wave_lines = "\n".join(
-        f"- Wave {i + 1}: {', '.join(w)}" for i, w in enumerate(waves)
-    ) or "- (none)"
+    wave_of = {t.get("id"): _wave_of(t) for t in (order.get("tasks") or []) if t.get("id")}
+
+    def _wline(w):
+        ids = [t for t in (w or []) if isinstance(t, str)]
+        nums = [wave_of[t] for t in ids if t in wave_of]
+        return f"- Wave {min(nums) if nums else '?'}: {', '.join(ids)}"
+    wave_lines = "\n".join(_wline(w) for w in waves) or "- (none)"
     gates = "\n".join(
         f"- **{g.get('name', '')}** -- threshold: {g.get('threshold', '')} "
         f"(blocks merge: {bool(g.get('blocks_merge'))})"
@@ -1230,7 +1235,8 @@ def _md_work_order(wo, order=None):
                        + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
-    out.append("- The repo verify pipeline is green: typecheck + tests + `verify-build-order`.")
+    out.append("- The emitted gates pass (assert-no-sentinel + check-ownership + "
+               "check-contract-freeze + check-contracts-compile) plus typecheck + tests.")
     out.append("- Every blocking quality gate touching your files is green.")
     out.append("- `python3 scripts/assert-no-sentinel.py` is green (every decision resolved).")
     out.append(f"- `python3 scripts/check-ownership.py --agent \"{wo.get('agent', '')}\" "
@@ -1333,7 +1339,8 @@ def main(root="."):
                 if PATTERN.search(line):
                     hits.append(f"{path}:{i}: {line.strip()}")
     unresolved = [rid for rid in _decision_ids(root)
-                  if ("RESOLVED_" + rid) not in decisions_md]
+                  if not re.search(r"RESOLVED_" + re.escape(rid) + r"(?![A-Za-z0-9])",
+                                   decisions_md)]
     if hits or unresolved:
         if hits:
             print("FORCED STOP: %d unresolved decision sentinel(s):" % len(hits))
@@ -1462,9 +1469,10 @@ def main(argv):
         if agent not in lanes:
             print("check-ownership: no work order for agent %r" % agent, file=sys.stderr)
             return 1
-        outside = [f for f in changed_norm if f not in lanes[agent]]
+        other = {f for a, lane in lanes.items() if a != agent for f in lane}
+        outside = [f for f in changed_norm if f in other and f not in lanes[agent]]
         if outside:
-            print("OUT OF LANE: agent %r changed file(s) outside its allowed set:" % agent)
+            print("OUT OF LANE: agent %r changed file(s) owned by another agent:" % agent)
             for f in outside:
                 print("  " + f)
             print("Allowed: " + (", ".join(sorted(lanes[agent])) or "(none)"))
@@ -1511,37 +1519,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Build-order integrity
-        run: python3 scripts/verify-build-order.py build-order.json
       - name: Forced stop (no unresolved decisions)
         run: python3 scripts/assert-no-sentinel.py
       - name: One writer per file (plan audit)
         run: python3 scripts/check-ownership.py
       - name: Stay in lane (no cross-lane edits in this change)
         run: |
-          set -o pipefail
-          if [ -n "${{ github.base_ref }}" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
             base="origin/${{ github.base_ref }}"
           else
-            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            base="${{ github.event.before }}"
+            case "$base" in ""|0000000*) base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)" ;; esac
           fi
-          changed="$(git diff --name-only "$base"...HEAD)"
-          if [ -n "$changed" ]; then
-            printf '%s\n' "$changed" | python3 scripts/check-ownership.py --lanes
+          if ! git diff --name-only "$base...HEAD" > /tmp/seasar_changed.txt; then
+            echo "git diff against $base failed -- cannot lane-check"; exit 1
+          fi
+          if [ -s /tmp/seasar_changed.txt ]; then
+            python3 scripts/check-ownership.py --lanes < /tmp/seasar_changed.txt
           else
-            echo "no changes to lane-check"
+            echo "no file changes to lane-check"
           fi
       - name: Contract freeze (no silent contract change without a CCR)
         run: |
-          set -o pipefail
-          if [ -n "${{ github.base_ref }}" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
             base="origin/${{ github.base_ref }}"
           else
-            base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+            base="${{ github.event.before }}"
+            case "$base" in ""|0000000*) base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)" ;; esac
           fi
-          git diff --name-only "$base"...HEAD | python3 scripts/check-contract-freeze.py
+          if ! git diff --name-only "$base...HEAD" > /tmp/seasar_changed.txt; then
+            echo "git diff against $base failed -- cannot freeze-check"; exit 1
+          fi
+          python3 scripts/check-contract-freeze.py < /tmp/seasar_changed.txt
       - name: Contract source compiles (substance prober)
         run: python3 scripts/check-contracts-compile.py
       - name: Project verify (typecheck + tests + gate predicates)
@@ -1627,13 +1638,15 @@ def main(argv):
             ledger = fh.read()
     except OSError:
         ledger = ""
-    changed = {os.path.normpath(f) for f in files}
+    def _n(p):
+        return os.path.normpath(str(p or "").replace("\\", "/").lstrip("/"))
+    changed = {_n(f) for f in files}
     unlogged = []
     for c in (order.get("contracts") or []):
         if not isinstance(c, dict):
             continue
         sp = c.get("source_path")
-        if not (sp and os.path.normpath(sp) in changed):
+        if not (sp and _n(sp) in changed):
             continue
         # Line-anchored, delimited match on the canonical "CCR <name>:" form -- a CCR for
         # ApiV2 must NOT satisfy Api (prefix), and a prose mention in another CCR's body
@@ -1745,7 +1758,7 @@ def _md_handoff():
             "- (task id) -- the decision you could not make from the spec/contracts\n\n"
             "## Contract-change requests (propose-to-owner)\n"
             "- (task id) -- contract `<name>` needs `<field/behavior>`; do NOT edit it "
-            "yourself. The owner task amends it and re-runs verify-build-order.\n\n"
+            "yourself. The owner task amends it and re-runs the gates (CI).\n\n"
             "## Blocked\n"
             "- (task id) -- waiting on (task id / gate)\n")
 
