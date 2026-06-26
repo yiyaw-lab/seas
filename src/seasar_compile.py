@@ -221,7 +221,7 @@ _CAST_SCHEMA = """{
     "examples": [{ "input": "concrete input", "output": "concrete expected output" }]
   },
   "repo_scaffold": [{ "path": "src/api/server.ts", "purpose": "one line" }],
-  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)", "behavior": { "ordering": "result/event order guarantee, or 'unordered'", "idempotency": "which ops are safe to retry and on what key", "errors": "error model -- shape, codes, and what is thrown vs returned", "pagination": "cursor/offset scheme + page bounds, or 'none'", "units": "units + encodings (cents not dollars, RFC3339 UTC, ...)" }, "interface": [{ "op": "operationName", "params": [{ "name": "x", "type": "language-neutral type" }], "returns": "language-neutral type", "errors": ["NotFound", "..."] }] }],
+  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)", "consumers": ["task ids that IMPORT this seam -- a version bump re-verifies them; also auto-derived from depends_on(owner_task)"], "behavior": { "ordering": "result/event order guarantee, or 'unordered'", "idempotency": "which ops are safe to retry and on what key", "errors": "error model -- shape, codes, and what is thrown vs returned", "pagination": "cursor/offset scheme + page bounds, or 'none'", "units": "units + encodings (cents not dollars, RFC3339 UTC, ...)" }, "interface": [{ "op": "operationName", "params": [{ "name": "x", "type": "language-neutral type" }], "returns": "language-neutral type", "errors": ["NotFound", "..."] }] }],
   "tasks": [{
     "id": "T1", "title": "...", "wave": 1, "depends_on": [],
     "files": ["src/api/server.ts"], "agent_role": "Backend|Frontend|Schema|Infra|Tests",
@@ -460,6 +460,8 @@ def _normalize_order(order):
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
         c["version"] = str(c.get("version", "") or "1.0.0")
+        # Explicit consumer edges (the version-bump ripple); also auto-derived later.
+        c["consumers"] = [str(x) for x in _as_list(c.get("consumers"))]
         # Behavior + language-neutral interface IR: the SEMANTICS a type signature omits.
         c["behavior"] = _normalize_behavior(c.get("behavior"))
         c["interface"] = _normalize_interface(c.get("interface"))
@@ -1292,6 +1294,16 @@ def _md_work_order(wo, order=None):
     out.append("- Any file not in Allowed above.")
     out += [f"- `{p}` (a contract owned by another task -- propose a change, never edit)"
             for p in forbidden]
+    # The consumer-edge ripple, routed to this agent: contracts its tasks import, so a
+    # version bump on one is its signal to re-verify (not a silent break at the seam).
+    consumed = [c for c in (order.get("contracts") or [])
+                if any(i in _contract_consumers(order, c)[0] for i in my_ids)]
+    if consumed:
+        out.append("\n## Contracts you consume (re-verify if their version bumps)")
+        for c in consumed:
+            out.append("- `%s` v%s (owner %s) -- file `%s`"
+                       % (c.get("name", ""), c.get("version", "1.0.0"),
+                          c.get("owner_task", ""), c.get("source_path", "")))
     if my_decisions:
         out.append("\n## Decisions you must RESOLVE (no silent guesses)")
         for d in my_decisions:
@@ -1653,6 +1665,28 @@ def _md_merge_order(order):
     return "\n".join(lines) + "\n"
 
 
+def _contract_consumers(order, c):
+    """The consumer-edge ripple for one contract: the consuming tasks (and their agents),
+    so a semver bump's blast radius is explicit and ROUTED -- not 'consumers re-verify' in
+    the abstract. Derived from the contract's explicit `consumers` UNION every task that
+    depends on its owner_task; the owner is never its own consumer. Returns (task_ids, agents),
+    both sorted and deduped."""
+    tasks = {t.get("id"): t for t in (order.get("tasks") or [])
+             if isinstance(t, dict) and t.get("id")}
+    owner = c.get("owner_task")
+    declared = {str(x) for x in (c.get("consumers") or []) if str(x) in tasks}
+    derived = {tid for tid, t in tasks.items()
+               if owner and owner in (t.get("depends_on") or [])}
+    consumer_ids = sorted((declared | derived) - {owner})
+    agent_of = {}
+    for wo in (order.get("work_orders") or []):
+        if isinstance(wo, dict) and wo.get("agent"):
+            for tid in (wo.get("task_ids") or []):
+                agent_of[tid] = wo.get("agent")
+    agents = sorted({agent_of[t] for t in consumer_ids if t in agent_of})
+    return consumer_ids, agents
+
+
 def _md_contract_changes(order):
     """CONTRACT_CHANGES.md -- the async contract-change-request (CCR) ledger. Contracts are
     frozen and single-owner; a downstream agent that needs a change does NOT edit the file
@@ -1667,11 +1701,18 @@ def _md_contract_changes(order):
            "the build.\n",
            "## Open requests",
            "<!-- one per line: `CCR <contract-name>: <task> needs <field/behavior> -- <why>` -->\n",
-           "## Frozen contracts (owner / version)"]
+           "## Frozen contracts (owner / version / consumer ripple)"]
     for c in contracts:
         out.append("- `%s` -- owner %s, v%s, file `%s`"
                    % (c.get("name", ""), c.get("owner_task", "?"),
                       c.get("version", "1.0.0"), c.get("source_path", "")))
+        cons_ids, cons_agents = _contract_consumers(order, c)
+        if cons_ids:
+            who = ", ".join(cons_agents) if cons_agents else "(unassigned)"
+            out.append("  - on a version bump, re-verify: %s (tasks %s)"
+                       % (who, ", ".join(cons_ids)))
+        else:
+            out.append("  - no downstream consumers (leaf seam)")
     if not contracts:
         out.append("- (none)")
     return "\n".join(out) + "\n"
@@ -2029,7 +2070,7 @@ def build_bundle(order):
             put(f"{root}/contracts/{name}.contract.json", json.dumps({
                 "name": c.get("name"), "kind": c.get("kind"), "version": c.get("version"),
                 "owner_task": c.get("owner_task"), "source_lang": c.get("source_lang"),
-                "source_path": c.get("source_path"),
+                "source_path": c.get("source_path"), "consumers": c.get("consumers") or [],
                 "behavior": c.get("behavior") or {}, "interface": c.get("interface") or [],
             }, indent=2) + "\n")
             # Contracts ARE source: emit the literal compilable file agents IMPORT.

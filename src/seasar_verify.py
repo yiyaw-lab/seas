@@ -281,6 +281,13 @@ def verify_order(order):
         add("contracts_specify_behavior", not no_beh, WARN,
             "typed seam(s) with no behavioral spec or interface IR "
             "(semantic drift risk): " + ", ".join(map(str, no_beh)))
+        # A declared consumer edge that points at no real task is a broken ripple: a
+        # version bump would route its re-verify signal to nobody.
+        bad_consumers = ["%s->%s" % (c.get("name"), x) for c in contracts
+                         for x in _strs(c.get("consumers")) if x not in task_id_set]
+        add("consumers_are_tasks", not bad_consumers, WARN,
+            "contract.consumers edge to a non-task (broken ripple): "
+            + ", ".join(bad_consumers))
     else:
         add("contracts_have_source", False, WARN, "no contracts defined")
 
