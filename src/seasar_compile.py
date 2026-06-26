@@ -810,14 +810,23 @@ def _print_costs_summary():
     if not COSTS_PATH.exists():
         print("no cost ledger yet")
         return
-    recs = [json.loads(l) for l in COSTS_PATH.read_text().splitlines() if l.strip()]
+    recs = []
+    for line in COSTS_PATH.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a truncated line from a mid-write crash: skip it, never crash the summary
+        if isinstance(rec, dict):
+            recs.append(rec)
     if not recs:
         print("cost ledger empty")
         return
     n = len(recs)
-    tot = sum(r["total_cost_usd"] for r in recs)
-    avg_in = sum(r["total_input_tokens"] for r in recs) // n
-    avg_out = sum(r["total_output_tokens"] for r in recs) // n
+    tot = sum(r.get("total_cost_usd", 0) for r in recs)
+    avg_in = sum(r.get("total_input_tokens", 0) for r in recs) // n
+    avg_out = sum(r.get("total_output_tokens", 0) for r in recs) // n
     print(f"{n} build orders  |  total ${tot:.2f}  |  avg ${tot / n:.3f}/order")
     print(f"avg tokens: {avg_in} in / {avg_out} out  |  ledger: {COSTS_PATH}")
 
