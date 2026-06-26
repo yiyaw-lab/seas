@@ -376,8 +376,9 @@ def _merge_order(order):
             break
         done.add(ready[0])
         out.append(ready[0])
-    for i in sorted((t["id"] for t in tasks), key=key):
+    for i in sorted(deps, key=key):
         if i not in done:
+            done.add(i)
             out.append(i)   # cycle remnant -- deterministic, never a hang
     return out
 
@@ -534,6 +535,9 @@ def _validate_and_repair(order):
         owner = c.get("owner_task")
         if owner and owner not in task_ids:
             notes.append(f"contract {c.get('name')} owner_task {owner!r} is not a task")
+        if not str(c.get("source_path", "") or "").strip():
+            notes.append(f"contract {c.get('name')} has no source_path -- the "
+                         f"contract-freeze gate cannot enforce it")
 
     for n in notes:
         log.warning("stamp consistency: %s", n)
@@ -1601,6 +1605,7 @@ ripple. File a CCR via the ritual in CONTRACT_CHANGES.md.
 """
 import json
 import os
+import re
 import sys
 
 
@@ -1626,9 +1631,15 @@ def main(argv):
         if not isinstance(c, dict):
             continue
         sp = c.get("source_path")
-        if sp and os.path.normpath(sp) in changed:
-            if ("CCR " + str(c.get("name", ""))) not in ledger:
-                unlogged.append(c.get("name"))
+        if not (sp and os.path.normpath(sp) in changed):
+            continue
+        # Line-anchored, delimited match on the canonical "CCR <name>:" form -- a CCR for
+        # ApiV2 must NOT satisfy Api (prefix), and a prose mention in another CCR's body
+        # must not either. A nameless contract can't be logged -> always flagged.
+        name = str(c.get("name", "") or "").strip()
+        pat = re.compile(r"(?m)^\s*CCR\s+" + re.escape(name) + r"\s*:") if name else None
+        if pat is None or not pat.search(ledger):
+            unlogged.append(c.get("name"))
     if unlogged:
         print("CONTRACT FREEZE: changed contract(s) with no logged CCR in "
               "CONTRACT_CHANGES.md: " + ", ".join(map(str, unlogged)))
