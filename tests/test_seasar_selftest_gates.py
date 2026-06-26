@@ -59,6 +59,17 @@ class SelftestGatesTest(unittest.TestCase):
                              "selftest failed with the real gates:\n" + r.stdout + r.stderr)
             self.assertIn("negative control", r.stdout)
 
+    def test_selftest_fails_on_uncovered_gate(self):
+        # A new emitted gate with no CASES entry must make the selftest red -- otherwise a
+        # future gate ships with zero negative-control coverage (the teeth-prover's blind spot).
+        with tempfile.TemporaryDirectory() as d:
+            root = _bundle_root(_order(), d)
+            with open(os.path.join(root, "scripts", "check-newgate.py"), "w") as fh:
+                fh.write("import sys\nsys.exit(0)\n")
+            r = _run_selftest(root)
+            self.assertNotEqual(r.returncode, 0, "selftest ignored an uncovered emitted gate")
+            self.assertIn("NO negative-control coverage", r.stdout + r.stderr)
+
     def test_selftest_has_teeth_when_a_gate_is_neutered(self):
         with tempfile.TemporaryDirectory() as d:
             root = _bundle_root(_order(), d)

@@ -1246,9 +1246,9 @@ def _md_contract(c):
     if iface:
         out.append("\n## Interface (language-neutral IR -- `source` is one realization)")
         for o in iface:
-            params = ", ".join((f"{p['name']}: {p['type']}" if p.get("type") else p["name"])
-                               for p in o.get("params", []))
-            sig = f"- `{o['op']}({params})`"
+            params = ", ".join((f"{p.get('name', '')}: {p['type']}" if p.get("type")
+                                else p.get("name", "")) for p in (o.get("params") or []))
+            sig = f"- `{o.get('op', '')}({params})`"
             if o.get("returns"):
                 sig += f" -> {o['returns']}"
             out.append(sig)
@@ -1858,6 +1858,7 @@ any gate fails to fire on its broken fixture, THIS script fails the build, so a 
 gate (e.g. one quietly reduced to `exit 0`) is caught here rather than trusted on faith.
 Run in CI alongside the gates: `python3 scripts/selftest-gates.py`.
 """
+import glob
 import json
 import os
 import subprocess
@@ -1963,6 +1964,17 @@ def main():
     if missing:
         print("selftest-gates: gate script(s) missing from scripts/: "
               + ", ".join(sorted(set(missing))), file=sys.stderr)
+        return 1
+    # Coverage completeness: every emitted enforcement gate (assert-*/check-*) must have a
+    # negative-control CASE, or a future gate could ship with NO teeth-check while this
+    # script stays green -- exactly the blind spot the negative control exists to prevent.
+    covered = {s for _, s, _, _ in CASES}
+    emitted = {os.path.basename(p) for pat in ("assert-*.py", "check-*.py")
+               for p in glob.glob(os.path.join(HERE, pat))}
+    uncovered = sorted(emitted - covered)
+    if uncovered:
+        print("selftest-gates: emitted gate(s) with NO negative-control coverage "
+              "(add a CASES entry): " + ", ".join(uncovered), file=sys.stderr)
         return 1
     all_problems = []
     for label, script, broken, clean in CASES:
