@@ -76,14 +76,14 @@ def get_updates(token, offset):
 
 
 def load_offset():
-    if OFFSET_PATH.exists():
-        return json.loads(OFFSET_PATH.read_text()).get("offset")
-    return None
+    # argo_store guards a corrupt/truncated file (returns the default), so a
+    # mid-write crash on the non-atomically-written offset can't crash getUpdates.
+    return argo_store.load_json(OFFSET_PATH, {}).get("offset")
 
 
 def save_offset(offset):
     OFFSET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OFFSET_PATH.write_text(json.dumps({"offset": offset}) + "\n")
+    argo_store.save_json(OFFSET_PATH, {"offset": offset})  # atomic: temp + os.replace
 
 
 def parse_rating(text):
