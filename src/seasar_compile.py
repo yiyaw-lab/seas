@@ -228,7 +228,7 @@ _CAST_SCHEMA = """{
     "test": "the test that proves this task done", "acceptance": "boolean exit gate, checkable"
   }],
   "work_orders": [{ "agent": "Agent A", "role": "Backend", "task_ids": ["T1","T3"], "worktree": "wt/agent-a", "brief": "the scoped brief for this worker", "definition_of_done": "what 'done' means for this agent + the handoff artifact it leaves (e.g. contract committed, typecheck green) before a dependent agent starts" }],
-  "quality_gates": [{ "name": "...", "threshold": "...", "blocks_merge": true }],
+  "quality_gates": [{ "name": "anchor-drift", "threshold": "the measurable bar, in words", "blocks_merge": true, "test_lang": "typescript|python|...", "test_path": "tests/gates/anchor-drift.test.ts", "test_source": "the LITERAL runnable test (authored by YOU, the compiler) that asserts the threshold against named fixture_refs -- the feature agent INHERITS it, never writes its own", "fixture_refs": ["tests/fixtures/sample.epub"] }],
   "orchestration": { "topology": "orchestrator-worker", "waves": [["T1","T2"],["T3"]], "consistency_check": "how spec<->tasks<->contracts are checked to agree before any agent starts", "handoff_protocol": "each agent's definition-of-done + the integration/merge order + how a downstream agent requests a change to a contract it does NOT own (propose-to-owner, never edit the file)", "contract_evolution": "the exact ritual to change a frozen contract mid-build without two agents writing the same file" },
   "fixtures": [{ "path": "tests/fixtures/sample.epub", "purpose": "golden input every anchor/export test runs against", "format": "epub|pdf|json|csv|sql|md", "body": "the LITERAL fixture content for text fixtures; empty when binary", "binary": false, "generator": "for a binary fixture (epub/pdf/image): the literal script/command that reproducibly PRODUCES it", "produced_by_task": "T0", "consumed_by_tasks": ["T6","T7"] }],
   "scaffold_files": [{ "path": "package.json", "purpose": "the runnable boot skeleton, present before any feature task", "body": "the LITERAL file content -- real JSON/TS/YAML that installs, typechecks, lints, and runs an empty test green" }],
@@ -294,6 +294,10 @@ HARD RULES FOR THE PLAN:
   decision; a generated assert-no-sentinel gate FAILS the build while any sentinel
   survives, so no decision can ship unresolved. Prefer 2-6 high-leverage decisions;
   do not invent ambiguity the spec already settles.
+- `quality_gates`: for each BLOCKING gate, author the LITERAL executable test
+  (`test_source` + `test_path` + `test_lang`) that operationalizes its `threshold`
+  against named `fixture_refs`. YOU write the predicate so the feature agent inherits a
+  gate it cannot tautologize -- a gate with only a prose `threshold` is not a gate.
 
 Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
@@ -408,16 +412,33 @@ def _normalize_order(order):
         wo["task_ids"] = [str(i) for i in _as_list(wo.get("task_ids"))]
         wo["definition_of_done"] = str(wo.get("definition_of_done", "") or "")
     # decisions: the forced-stop ledger -- each is an ambiguity an agent must RESOLVE,
-    # not guess. Coerce fields and give every decision a stable id (the SEASAR_DECIDE_<id>
-    # sentinel and its assert-no-sentinel gate depend on it).
+    # not guess. Give every decision a UNIQUE, gate-matchable id: charset-clamped to
+    # [A-Za-z0-9] so the seeded SEASAR_DECIDE_<id> token matches the gate regex, and
+    # deduped so two decisions never collapse to one indistinguishable sentinel.
+    _seen_ids = set()
     for n, d in enumerate(order["decisions"], 1):
-        d["id"] = str(d.get("id", "") or "") or f"D{n}"
+        rid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("id", "") or "")) or f"D{n}"
+        cand, k = rid, 2
+        while cand in _seen_ids:
+            cand, k = f"{rid}{k}", k + 1
+        d["id"] = cand
+        _seen_ids.add(cand)
         d["question"] = str(d.get("question", "") or "")
         d["anchor_task"] = str(d.get("anchor_task", "") or "")
         d["anchor_file"] = str(d.get("anchor_file", "") or "")
         d["options"] = [str(o) for o in _as_list(d.get("options"))]
         d["recommended"] = str(d.get("recommended", "") or "")
         d["rationale"] = str(d.get("rationale", "") or "")
+    # quality_gates: each carries a compiler-authored executable predicate (test_source)
+    # so the feature agent inherits a gate it cannot tautologize.
+    for g in order["quality_gates"]:
+        g["name"] = str(g.get("name", "") or "")
+        g["threshold"] = str(g.get("threshold", "") or "")
+        g["test_lang"] = str(g.get("test_lang", "") or "")
+        g["test_path"] = str(g.get("test_path", "") or "")
+        g["test_source"] = str(g.get("test_source", "") or "")
+        g["fixture_refs"] = [str(x) for x in _as_list(g.get("fixture_refs"))]
+        g["blocks_merge"] = bool(g.get("blocks_merge", False))
     # constitution -> list of non-empty strings.
     order["constitution"] = [
         str(c).strip() for c in _as_list(order.get("constitution")) if str(c).strip()
@@ -1058,6 +1079,7 @@ Build context for autonomous coding agents on this Build Order.
 - Run your task's test (see `tasks.md`) and confirm its acceptance gate is green.
 - Run `python3 scripts/verify-build-order.py build-order.json` before you start and before you hand off.
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
+- Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
 - Build proceeds in waves; wait for the previous wave's gates before starting.
 """
 
@@ -1201,9 +1223,10 @@ def _md_decisions(order):
     out = ["# DECISIONS -- resolve every one before the build goes green\n",
            "Each item is an ambiguity the spec does NOT settle -- exactly where an agent "
            "would otherwise guess silently. Pick an option, implement it, and REPLACE its "
-           "`SEASAR_DECIDE_<id>` line below with your choice + the file:line that enforces "
-           "it. `scripts/assert-no-sentinel.py` fails the build while ANY sentinel "
-           "survives anywhere in the repo.\n"]
+           "`SEASAR_DECIDE_<id>` checkbox line below with a `RESOLVED_<id>: <choice> | "
+           "enforced at <file>:<line>` line. `scripts/assert-no-sentinel.py` fails the "
+           "build while ANY sentinel survives OR any decision lacks its RESOLVED_<id> "
+           "line -- so a decision cannot be closed by silently deleting its row.\n"]
     if not decisions:
         out.append("_No open decisions: the spec settled every ambiguity._\n")
         return "\n".join(out)
@@ -1217,20 +1240,23 @@ def _md_decisions(order):
         out.append(f"- options: {opts}" + (f"   (recommended: {rec})" if rec else ""))
         if d.get("rationale"):
             out.append(f"- why: {d.get('rationale')}")
-        out.append(f"- [ ] {_sentinel(d)} -- replace with: chosen <option>; "
-                   f"enforced at <file:line>\n")
+        out.append(f"- [ ] {_sentinel(d)} -- to resolve: replace this line with "
+                   f"`RESOLVED_<id>: <chosen option> | enforced at <file>:<line>` "
+                   f"(this decision's id is {d.get('id')})\n")
     return "\n".join(out)
 
 
 # The forced-stop gate, emitted into every bundle. Greps the produced repo for any
 # unresolved decision sentinel and fails the build while one survives -- so a
 # confidently-wrong SILENT guess cannot ship (the dominant autonomous-fleet failure).
-_ASSERT_NO_SENTINEL = '''#!/usr/bin/env python3
-"""assert-no-sentinel -- the forced-stop gate. Exits non-zero while ANY decision
-sentinel (SEASAR_DECIDE_<id>) survives anywhere under the given root (default: cwd), so
-an agent cannot mark the build done with an unresolved decision. Run it in CI and before
+_ASSERT_NO_SENTINEL = r'''#!/usr/bin/env python3
+"""assert-no-sentinel -- the forced-stop gate. Fails (exit 1) while ANY decision sentinel
+(SEASAR_DECIDE_<id>) survives under the given root (default: cwd), OR any decision from
+build-order.json lacks its RESOLVED_<id> line in DECISIONS.md -- so a decision cannot be
+closed by a silent guess NOR by quietly deleting its ledger row. Run it in CI and before
 every handoff: `python3 scripts/assert-no-sentinel.py`.
 """
+import json
 import os
 import re
 import sys
@@ -1239,29 +1265,49 @@ PATTERN = re.compile(r"SEASAR_DECIDE_[A-Za-z0-9]+")
 SKIP_DIRS = {".git", "node_modules", ".venv", "dist", "build", "__pycache__", ".next"}
 
 
+def _decision_ids(root):
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    return [str(d.get("id")) for d in (order.get("decisions") or [])
+            if isinstance(d, dict) and d.get("id")]
+
+
 def main(root="."):
-    hits = []
+    self_path = os.path.realpath(__file__)
+    hits, decisions_md = [], ""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
-            if fn == os.path.basename(__file__):
-                continue
             path = os.path.join(dirpath, fn)
+            if os.path.realpath(path) == self_path:
+                continue
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                    for i, line in enumerate(fh, 1):
-                        if PATTERN.search(line):
-                            hits.append(f"{path}:{i}: {line.strip()}")
+                    text = fh.read()
             except OSError:
                 continue
-    if hits:
-        print(f"FORCED STOP: {len(hits)} unresolved decision sentinel(s):")
-        for h in hits:
-            print("  " + h)
-        print("Resolve each (pick an option, implement it, update DECISIONS.md) until no "
-              "sentinel remains.")
+            if fn == "DECISIONS.md":
+                decisions_md = text
+            for i, line in enumerate(text.splitlines(), 1):
+                if PATTERN.search(line):
+                    hits.append(f"{path}:{i}: {line.strip()}")
+    unresolved = [rid for rid in _decision_ids(root)
+                  if ("RESOLVED_" + rid) not in decisions_md]
+    if hits or unresolved:
+        if hits:
+            print("FORCED STOP: %d unresolved decision sentinel(s):" % len(hits))
+            for h in hits:
+                print("  " + h)
+        if unresolved:
+            print("FORCED STOP: %d decision(s) with no RESOLVED_<id> line in "
+                  "DECISIONS.md: %s" % (len(unresolved), ", ".join(unresolved)))
+        print("Resolve each: pick an option, implement it, write RESOLVED_<id> in "
+              "DECISIONS.md, and remove the sentinel.")
         return 1
-    print("OK: no unresolved decision sentinels.")
+    print("OK: every decision resolved; no sentinels survive.")
     return 0
 
 
@@ -1373,6 +1419,18 @@ def build_bundle(order):
             else:
                 body = f.get("body") or f"# {f.get('purpose', '')}\n"
                 put(f"{root}/{fp}", body if body.endswith("\n") else body + "\n")
+        # Compiler-authored gate predicates: the runnable test that JUDGES each gate, so
+        # a feature agent inherits it instead of grading its own work (no tautology gate).
+        for g in (order.get("quality_gates") or []):
+            src = g.get("test_source") or ""
+            if not src.strip():
+                continue
+            gp = _safe_bundle_path(g.get("test_path"))
+            if not gp:
+                log.warning("seasar bundle: gate %r has test_source but an empty/unsafe "
+                            "test_path %r -- predicate NOT emitted", g.get("name"), g.get("test_path"))
+                continue
+            put(f"{root}/{gp}", src if src.endswith("\n") else src + "\n")
         # The feature-file map: paths owned by tasks; stub bodies the agents fill in.
         for e in (order.get("repo_scaffold") or []):
             path = _safe_bundle_path(e.get("path"))
