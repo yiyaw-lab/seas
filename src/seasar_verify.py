@@ -21,6 +21,7 @@ Pure stdlib; operates on the order dict; NEVER raises on a malformed or legacy o
 a missing field is a failed check, not a crash. Every accessor is defensive .get().
 """
 
+import json
 import re
 
 ERROR = "error"   # structural -- agents WILL collide / block
@@ -52,6 +53,27 @@ def _strs(v):
     (never char-iterated), non-str members are dropped. Mirrors _dicts() so a model that
     emits files="a.py" or depends_on="T1" can't fabricate per-character collisions/deps."""
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def _source_parse_error(c):
+    """Substance prober: return a syntax/parse error for a contract whose source we CAN
+    check in-process (python via compile(), json via json.loads). compile() only
+    SYNTAX-checks -- it never executes the source. Other languages return None (the emitted
+    check-contracts-compile.py runs their real compiler at build time)."""
+    src = c.get("source") or ""
+    if not src.strip():
+        return None
+    lang = str(c.get("source_lang", "") or "").lower()
+    try:
+        if lang in ("python", "py"):
+            compile(src, "<contract:%s>" % (c.get("name") or ""), "exec")
+        elif lang in ("json", "json-schema", "jsonschema"):
+            json.loads(src)
+        else:
+            return None
+    except (SyntaxError, ValueError) as e:
+        return (str(e).splitlines() or ["parse error"])[0]
+    return None
 
 
 def _wave_of(t):
@@ -215,6 +237,13 @@ def verify_order(order):
                    if _nonempty(c.get("source")) and not _nonempty(c.get("source_path"))]
         add("contracts_have_path", not no_path, WARN,
             "source without source_path: " + ", ".join(map(str, no_path)))
+        # substance prober: contract source we can check in-process (python/json) must
+        # actually parse, not just be non-empty -- a contract that looks like code but
+        # does not compile is prose with extra steps.
+        bad = ["%s: %s" % (c.get("name"), _source_parse_error(c))
+               for c in contracts if _source_parse_error(c)]
+        add("contracts_source_parses", not bad, WARN,
+            "contract source does not parse/compile: " + "; ".join(bad))
     else:
         add("contracts_have_source", False, WARN, "no contracts defined")
 

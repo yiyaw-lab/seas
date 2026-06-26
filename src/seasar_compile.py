@@ -1542,6 +1542,8 @@ jobs:
             base="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
           fi
           git diff --name-only "$base"...HEAD | python3 scripts/check-contract-freeze.py
+      - name: Contract source compiles (substance prober)
+        run: python3 scripts/check-contracts-compile.py
       - name: Project verify (typecheck + tests + gate predicates)
         run: |
           if [ -f package.json ]; then
@@ -1654,6 +1656,68 @@ if __name__ == "__main__":
 '''
 
 
+# The substance prober, emitted into every bundle: actually COMPILE each contract source
+# file in its language (not just check it is non-empty), so code that does not compile
+# fails the build. python/json run here; other langs are covered by the project verify.
+_CHECK_CONTRACTS_COMPILE = r'''#!/usr/bin/env python3
+"""check-contracts-compile -- the substance prober. For every contract with source +
+source_path, COMPILE/parse the file in its language (not merely check it is non-empty):
+  python            -> py_compile (syntax only; never executed)
+  json/json-schema  -> json.loads
+Other languages are skipped here (the project verify step -- tsc/etc. -- compiles them).
+A contract that looks like code but does not compile fails the build.
+"""
+import json
+import os
+import py_compile
+import sys
+
+
+def main(root="."):
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError) as e:
+        print("check-contracts-compile: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+    fails, checked = [], 0
+    for c in (order.get("contracts") or []):
+        if not isinstance(c, dict):
+            continue
+        sp = c.get("source_path")
+        if not (sp and str(c.get("source", "") or "").strip()):
+            continue
+        lang = str(c.get("source_lang", "") or "").lower()
+        if lang not in ("python", "py", "json", "json-schema", "jsonschema"):
+            continue
+        path = os.path.join(root, sp)
+        if not os.path.exists(path):
+            fails.append("%s: source_path %s does not exist" % (c.get("name"), sp))
+            continue
+        try:
+            if lang in ("python", "py"):
+                py_compile.compile(path, doraise=True)
+            else:
+                with open(path, encoding="utf-8") as fh:
+                    json.load(fh)
+            checked += 1
+        except (py_compile.PyCompileError, ValueError) as e:
+            fails.append("%s (%s): %s" % (c.get("name"), lang, str(e).splitlines()[0]))
+    if fails:
+        print("CONTRACT COMPILE FAILED:")
+        for f in fails:
+            print("  " + f)
+        return 1
+    print("OK: %d contract source(s) compiled/parsed in-process "
+          "(others covered by project verify)." % checked)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "."))
+'''
+
+
 def _safe_bundle_path(raw):
     """Normalize a model-generated path for the bundle zip; return None if it would
     escape the root (Zip-Slip). Cross-platform: backslashes are normalized first so a
@@ -1725,6 +1789,7 @@ def build_bundle(order):
         # Build-time enforcement the fleet can't route around: ownership lint + CI gate.
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
         put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
+        put(f"{root}/scripts/check-contracts-compile.py", _CHECK_CONTRACTS_COMPILE)
         put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
         put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
