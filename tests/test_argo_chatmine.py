@@ -388,6 +388,118 @@ class ChatMineTest(unittest.TestCase):
         self.assertEqual(c["count"], before_count)
         self.assertNotIn("recurred_after_fix", c)
 
+    # --- NEW SIGNAL 1: Argo self-bluff (a claimed completed action on an Argo turn) --
+    # These mine the INVERSE role from the user-correction signals: a turn whose role
+    # IS "Argo". A flat "i just opened the PR" is frequently a phantom claim.
+
+    def test_argo_bluff_claimed_action_fires(self):
+        self._write_chat([
+            ("Yiya", "can you open the PR for the fix?"),
+            ("Argo", "i just opened the PR for you."),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["kind"], "chat_weakness")
+        self.assertEqual(clusters[0]["fingerprint"], "chat weakness: argo_bluff")
+
+    def test_argo_bluff_does_not_fire_on_user_turn_or_offer(self):
+        # A USER asking Argo to do it, and Argo OFFERING (not claiming done), are clean.
+        self._write_chat([
+            ("Yiya", "i just opened the PR, can you review it?"),
+            ("Argo", "i can open a follow-up PR if you want."),
+        ])
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        self.assertEqual(self._weakness_clusters(), [])
+
+    # --- NEW SIGNAL 2: Argo-voiced explicit failure (on an Argo turn) --------------
+
+    def test_argo_failure_phrase_fires(self):
+        self._write_chat([
+            ("Yiya", "pull the latest from that page."),
+            ("Argo", "i couldn't fetch that page, sorry."),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["fingerprint"], "chat weakness: argo_failure")
+
+    def test_argo_failure_no_access_fires(self):
+        self._write_chat([
+            ("Argo", "i don't have access to that file."),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        self.assertEqual(self._weakness_clusters()[0]["fingerprint"],
+                         "chat weakness: argo_failure")
+
+    # --- NEW SIGNAL 3: confused exchange (same user text in consecutive user turns) -
+
+    def test_repeated_consecutive_user_turn_fires_confusion(self):
+        self._write_chat([
+            ("Yiya", "what's the ETA on the deploy?"),
+            ("Yiya", "what's the ETA on the deploy?"),
+        ])
+        self.assertGreaterEqual(argo_chatmine.mine_chat_log(), 1)
+        clusters = self._weakness_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["fingerprint"], "chat weakness: confused_repeat")
+
+    def test_repeat_with_argo_answer_between_does_not_fire(self):
+        # Re-asking AFTER Argo answered is a normal follow-up, not a confused re-ask:
+        # the intervening Argo turn breaks the consecutive-user streak.
+        self._write_chat([
+            ("Yiya", "what's the ETA on the deploy?"),
+            ("Argo", "tomorrow morning."),
+            ("Yiya", "what's the ETA on the deploy?"),
+        ])
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        self.assertEqual(self._weakness_clusters(), [])
+
+    # --- NEGATIVE CONTROL holds WITH the new signals active ------------------------
+    # Re-asserts test_a_clean_transcript's invariant now that Argo-turn + confusion
+    # signals are live: an Argo turn that says "i ... created ..."-shaped words in a
+    # benign way, and distinct user questions, still record NOTHING.
+
+    def test_clean_transcript_still_zero_with_new_signals(self):
+        self._write_chat([
+            ("Yiya", "can you summarize the latest AI papers?"),
+            ("Argo", "sure, here are three i found useful."),
+            ("Yiya", "what went wrong with the launch last week?"),
+            ("Argo", "the rollout slipped a day; no errors though."),
+            ("Yiya", "is it wrong to ship on a friday?"),
+            ("Argo", "i can open a doc on on-call tradeoffs if you want."),
+            ("Yiya", "love it, you nailed it."),
+        ])
+        self.assertEqual(argo_chatmine.mine_chat_log(), 0)
+        self.assertEqual(self._weakness_clusters(), [])
+
+    # --- NEW-SIGNAL IDEMPOTENCY: re-mining the same log files nothing the 2nd time --
+    # The committed test_remine_same_log_records_zero_new only covers the OLD user-
+    # correction signals; this locks the same watermark guarantee for all THREE new
+    # signals (Argo bluff, Argo failure, confused re-ask) together.
+
+    def test_remine_new_signals_records_zero_new(self):
+        self._write_chat([
+            ("Argo", "i just opened the PR for you."),          # argo_bluff
+            ("Yiya", "fetch that page please."),
+            ("Argo", "i couldn't fetch that page, sorry."),     # argo_failure
+            ("Yiya", "what's the ETA on the deploy?"),
+            ("Yiya", "what's the ETA on the deploy?"),          # confused_repeat
+        ])
+        first = argo_chatmine.mine_chat_log()
+        self.assertEqual(first, 3)  # one incident per new signal
+        fps = {c["fingerprint"] for c in self._weakness_clusters()}
+        self.assertEqual(fps, {"chat weakness: argo_bluff",
+                               "chat weakness: argo_failure",
+                               "chat weakness: confused_repeat"})
+        before = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        # Second pass over the UNCHANGED log: the watermark gates all three new
+        # signals, so nothing new is filed and no cluster count is bumped.
+        second = argo_chatmine.mine_chat_log()
+        self.assertEqual(second, 0)
+        after = {c["fingerprint"]: c["count"] for c in self._weakness_clusters()}
+        self.assertEqual(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,12 +8,21 @@ in plain words, that it got something wrong ("no, that's not what i meant",
 reached the self-improvement funnel, so a recurring quality problem the user
 keeps re-explaining never surfaced as an incident.
 
-This miner reads recent USER turns from the shared chat log and, for the few
-unambiguous correction/frustration phrases, records a "chat_weakness" incident
-(reusing record_incident's dedup + fingerprint rollup). It is deliberately
-PRECISION-BIASED: a clean, satisfied transcript must yield ZERO incidents. We
-match only anchored phrases that a satisfied user would not say, never a bare
-keyword like "wrong" that fires on benign questions ("what went wrong with X?").
+This miner reads recent turns from the shared chat log and records a
+"chat_weakness" incident (reusing record_incident's dedup + fingerprint rollup)
+for a few unambiguous weakness signals drawn from TWO complementary sources:
+
+  - USER turns -- the user telling Argo, in plain words, that it got something
+    wrong ("no, that's not what i meant", "you misunderstood"); and a user
+    re-asking the SAME question in consecutive turns (a confused exchange).
+  - ARGO turns -- Argo's own text BLUFFING a completed action it may not have
+    taken ("i just opened the PR for you") or voicing an explicit failure
+    ("i couldn't fetch that page", "traceback", "i don't have access").
+
+It is deliberately PRECISION-BIASED: a clean, satisfied transcript must yield
+ZERO incidents. We match only anchored phrases a satisfied exchange would not
+contain, never a bare keyword like "wrong" that fires on benign questions
+("what went wrong with X?").
 
 Placement triad (the scheduled-behavior contract): this rides the same
 LOCAL_COMMAND as diagnose -- argo_diagnose.run_cli calls mine_chat_log() BEFORE
@@ -23,9 +32,15 @@ is gitignored and absent in a fresh Actions checkout), (2) reads the SAME
 volume-backed CHAT_LOG_PATH the live bot writes, and (3) feeds the SAME incident
 ledger diagnose consumes. No new scheduler wiring.
 
-A USER turn is any turn whose role is not "Argo": the webhook records user turns
-under the profile name (e.g. "Yiya"), not the literal "user". Stdlib + the
-shared-utils layer (argo_store/argo_memory/argo_incidents/argo_log).
+A USER turn is any turn whose role is not "Argo"; an ARGO turn is one whose role
+IS the literal "Argo" (argo_memory.record_many persists assistant turns as
+("Argo", reply)). The webhook records user turns under the profile name
+(e.g. "Yiya"), not the literal "user". Stdlib + the shared-utils layer
+(argo_store/argo_memory/argo_incidents/argo_log).
+
+Classification is deterministic regex v1. Nuanced/LLM-based classification (e.g.
+detecting a hedged or implicit bluff that no fixed phrase matches) is a deliberate
+follow-up, kept out of v1 so the miner stays pure, free, and hermetically testable.
 """
 
 import re
@@ -81,6 +96,25 @@ _SIGNALS = (
         r"|to\s+stop(?=\s+(?:do(?:ing)?|say(?:ing)?|that|it|this)\b|[.!?,]|$))", re.I)),
 )
 
+# Weakness signals mined from ARGO's OWN turns (the inverse role from _SIGNALS).
+# Same label-is-the-signature rollup discipline. Two classes:
+#   bluff -- Argo claiming it COMPLETED an action (sent/posted/opened/pushed/...).
+#     Argo has no execution harness for most of these, so a flat "i just opened
+#     the PR" is frequently a phantom claim; surfacing it lets diagnose() reason
+#     about a pattern of over-claiming. Kept narrow (anchored "i (just) <verb>")
+#     so a benign "i can open the PR if you want" never fires.
+#   failure -- Argo voicing an explicit error/inability. These are user-facing
+#     symptoms that may never reach the incident ledger via a code path (the model
+#     simply said it couldn't), so mining the text is the only way they surface.
+_ARGO_SIGNALS = (
+    ("argo_bluff", re.compile(
+        r"\bi\s+(?:just\s+)?(?:sent|posted|created|opened|pushed|fixed|merged)\b", re.I)),
+    ("argo_failure", re.compile(
+        r"\b(?:error|failed|exception|traceback"
+        r"|(?:couldn'?t|can'?t)\s+(?:fetch|read|access)"
+        r"|i\s+don'?t\s+have\s+access)\b", re.I)),
+)
+
 # Trim the excerpt kept as the incident sample (record_incident also caps it).
 _SAMPLE_CHARS = 200
 
@@ -103,6 +137,22 @@ def _is_user_turn(turn):
     under the profile name (e.g. 'Yiya'), so role == 'user' would miss them all."""
     role = (turn.get("role") or "").strip().lower()
     return role not in ("", "argo")
+
+
+def _is_argo_turn(turn):
+    """An ARGO turn is one the assistant authored. The webhook persists these with
+    the literal role 'Argo' (argo_memory.record_many -> ('Argo', reply)), so an
+    exact lowercase match is correct -- the inverse of _is_user_turn."""
+    return (turn.get("role") or "").strip().lower() == "argo"
+
+
+def _record(signature, sample):
+    """File one chat_weakness incident (label-keyed signature, non-keyed sample).
+    Returns 1 if record_incident accepted it, else 0 -- so callers just add the
+    result to their running count."""
+    sample = sample[:_SAMPLE_CHARS]
+    return 1 if argo_incidents.record_incident(
+        kind="chat_weakness", signature=signature, sample=sample) else 0
 
 
 def _read_watermark():
@@ -132,9 +182,11 @@ def _write_watermark(n):
 
 
 def mine_chat_log(scan_turns=SCAN_TURNS):
-    """Scan USER turns appended SINCE the last run for weakness signals and file each
+    """Scan turns appended SINCE the last run for weakness signals and file each
     distinct one as a 'chat_weakness' incident (dedup/fingerprint handled by
-    record_incident).
+    record_incident). Three signal sources: USER correction/frustration phrases
+    (_SIGNALS), ARGO self-bluff / explicit-failure phrases (_ARGO_SIGNALS), and a
+    confused exchange (the same user text repeated in consecutive user turns).
 
     Idempotent across runs: a high-watermark (the count of turns already mined,
     persisted to the volume-backed WATERMARK_PATH) gates the scan to turns appended
@@ -199,12 +251,50 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
             log.warning("chatmine: watermark advance failed; skipping this slice "
                         "to avoid re-counting on the next run")
             return recorded
+        # Confused-exchange detector state: the previous USER turn's normalized text,
+        # per chat_id (the log interleaves chats, so a "repeat" is only meaningful
+        # within one conversation). Cleared for a chat_id by any intervening Argo turn,
+        # so "ask X, Argo answers, ask X again" is NOT a confused re-ask -- only two
+        # consecutive user turns with the same text are. A duplicate straddling the
+        # watermark boundary (prior turn in an already-mined slice) is intentionally
+        # not caught: same benign under-count tradeoff the watermark design accepts.
+        last_user_text = {}
         for turn in turns:
-            if not isinstance(turn, dict) or not _is_user_turn(turn):
+            if not isinstance(turn, dict):
                 continue
             text = turn.get("text") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
+            chat_id = str(turn.get("chat_id") or "")
+
+            if _is_argo_turn(turn):
+                # An Argo turn breaks any user-repeat streak for this chat.
+                last_user_text.pop(chat_id, None)
+                seen_labels = set()
+                for label, pattern in _ARGO_SIGNALS:
+                    if label in seen_labels:
+                        continue  # one incident per signal-kind per turn
+                    m = pattern.search(text)
+                    if not m:
+                        continue
+                    seen_labels.add(label)
+                    recorded += _record(
+                        f"chat weakness: {label}",
+                        f"[{m.group(0).strip().lower()}] {text.strip()}")
+                continue
+
+            if not _is_user_turn(turn):
+                continue
+
+            # Confused exchange: this user turn repeats the immediately-preceding
+            # user turn (same chat, no Argo turn between). Normalize on stripped+
+            # lowercased text so trivial whitespace/case differences still count.
+            norm = " ".join(text.split()).lower()
+            if last_user_text.get(chat_id) == norm:
+                recorded += _record("chat weakness: confused_repeat",
+                                    f"[repeated question] {text.strip()}")
+            last_user_text[chat_id] = norm
+
             seen_labels = set()
             for label, pattern in _SIGNALS:
                 if label in seen_labels:
@@ -223,13 +313,8 @@ def mine_chat_log(scan_turns=SCAN_TURNS):
                 # accrues. The matched phrase + excerpt still ride along as a NON-keyed
                 # sample (record_incident stores samples without fingerprinting them), so
                 # the cluster stays informative without splitting.
-                signature = f"chat weakness: {label}"
-                phrase = m.group(0).strip().lower()
-                excerpt = text.strip()[:_SAMPLE_CHARS]
-                sample = f"[{phrase}] {excerpt}"[:_SAMPLE_CHARS]
-                if argo_incidents.record_incident(
-                        kind="chat_weakness", signature=signature, sample=sample):
-                    recorded += 1
+                recorded += _record(f"chat weakness: {label}",
+                                    f"[{m.group(0).strip().lower()}] {text.strip()}")
         if recorded:
             log.info("chatmine: filed %d chat_weakness incident(s)", recorded)
         return recorded
