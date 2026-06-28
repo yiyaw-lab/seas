@@ -9,9 +9,9 @@
 &nbsp;[![License](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
 &nbsp;[![Argo](https://img.shields.io/badge/Argo-live%20on%20Railway%20%2B%20Telegram-7d4fff.svg)](#argo--frontier-scout-live-on-railway--telegram)
 
-[![Modules](https://img.shields.io/badge/modules-42-8b5cf6.svg)](src/)
-&nbsp;[![Lines](https://img.shields.io/badge/lines-~13k-8b5cf6.svg)](src/)
-&nbsp;[![Tests](https://img.shields.io/badge/tests-594_passing-3fb950.svg)](tests/)
+[![Modules](https://img.shields.io/badge/modules-57-8b5cf6.svg)](src/)
+&nbsp;[![Lines](https://img.shields.io/badge/lines-~19k-8b5cf6.svg)](src/)
+&nbsp;[![Tests](https://img.shields.io/badge/tests-775_passing-3fb950.svg)](tests/)
 &nbsp;[![Deps](https://img.shields.io/badge/deps-10_stdlib_core-3fb950.svg)](requirements.txt)
 &nbsp;[![Loops](https://img.shields.io/badge/self--improvement_loops-3-7d4fff.svg)](#how-argo-improves-itself)
 
@@ -21,8 +21,8 @@
 
 | Stat | Value |
 |---|---|
-| **Code** | 42 modules · ~13,000 lines of Python 3.11 |
-| **Tests** | 594 · zero network · zero LLM · no real data files |
+| **Code** | 57 modules · ~19,000 lines of Python 3.11 |
+| **Tests** | 775 · zero network · zero LLM · no real data files |
 | **Dependencies** | 10 pinned, at the I/O edge — a **pure-stdlib core** (gate, world model, probes) |
 | **Self-improvement loops** | 3 — self-diagnosis · frontier-evolution · capability-gap (all human-gated) |
 | **Live** | Argo on Railway + Telegram, behind a human merge gate |
@@ -382,7 +382,7 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (594 tests total):
+passes after. New coverage (775 tests total):
 
 - **self-improvement loops** — self-diagnosis gates + proposal lifecycle
   (`test_diagnose.py`, `test_incidents.py`), the frontier-evolution funnel +
@@ -412,7 +412,7 @@ passes after. New coverage (594 tests total):
 ## Quickstart (what works at each key tier)
 
 ```
-PYTHONPATH=src python3 -m unittest discover -s tests   # 594 tests, no keys needed
+PYTHONPATH=src python3 -m unittest discover -s tests   # 775 tests, no keys needed
 ```
 
 | You have… | What runs |
