@@ -88,8 +88,14 @@ def _has_behavior(c):
     if isinstance(beh, dict) and any(str(v).strip() for v in beh.values()):
         return True
     iface = c.get("interface")
+    # An op is identified by `op` OR `name` -- mirror seasar_compile._normalize_interface,
+    # which accepts either, so verify run on a raw (pre-normalization) order does not fail
+    # this WARN on a valid name-keyed interface.
     return (isinstance(iface, list)
-            and any(isinstance(o, dict) and str(o.get("op", "")).strip() for o in iface))
+            and any(isinstance(o, dict)
+                    and (str(o.get("op", "") or "").strip()
+                         or str(o.get("name", "") or "").strip())
+                    for o in iface))
 
 
 def _wave_of(t):

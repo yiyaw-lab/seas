@@ -460,6 +460,10 @@ def _normalize_order(order):
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
         c["version"] = str(c.get("version", "") or "1.0.0")
+        # owner_task is matched against (stringified) task ids in the ripple analysis;
+        # stringify it here so an int owner_task never silently fails the comparison.
+        if c.get("owner_task") is not None and not isinstance(c["owner_task"], str):
+            c["owner_task"] = str(c["owner_task"])
         # Explicit consumer edges (the version-bump ripple); also auto-derived later.
         c["consumers"] = [str(x) for x in _as_list(c.get("consumers"))]
         # Behavior + language-neutral interface IR: the SEMANTICS a type signature omits.
@@ -538,6 +542,12 @@ def _normalize_order(order):
     order["orchestration"] = orch
     # per-task coercion.
     for t in order["tasks"]:
+        # id is the join key for every downstream id comparison (depends_on, consumers,
+        # owner_task, work-order task_ids -- all stringified). Stringify a present int id
+        # so those comparisons can't miss across str/int; leave an absent id absent so the
+        # tasks_have_ids check still catches it (str(None) would fabricate a truthy id).
+        if t.get("id") is not None and not isinstance(t["id"], str):
+            t["id"] = str(t["id"])
         t["files"] = [str(f) for f in _as_list(t.get("files"))]
         t["depends_on"] = [str(d) for d in _as_list(t.get("depends_on"))]
         t["wave"] = _wave_of(t)
@@ -824,9 +834,11 @@ def _print_costs_summary():
         print("cost ledger empty")
         return
     n = len(recs)
-    tot = sum(r.get("total_cost_usd", 0) for r in recs)
-    avg_in = sum(r.get("total_input_tokens", 0) for r in recs) // n
-    avg_out = sum(r.get("total_output_tokens", 0) for r in recs) // n
+    # `... or 0` (not `.get(k, 0)`): a partial/legacy line can carry an explicit JSON null,
+    # which .get returns as None and sum()/// then crash on -- the exact case --costs tolerates.
+    tot = sum(r.get("total_cost_usd") or 0 for r in recs)
+    avg_in = sum(r.get("total_input_tokens") or 0 for r in recs) // n
+    avg_out = sum(r.get("total_output_tokens") or 0 for r in recs) // n
     print(f"{n} build orders  |  total ${tot:.2f}  |  avg ${tot / n:.3f}/order")
     print(f"avg tokens: {avg_in} in / {avg_out} out  |  ledger: {COSTS_PATH}")
 
@@ -1680,18 +1692,21 @@ def _contract_consumers(order, c):
     the abstract. Derived from the contract's explicit `consumers` UNION every task that
     depends on its owner_task; the owner is never its own consumer. Returns (task_ids, agents),
     both sorted and deduped."""
-    tasks = {t.get("id"): t for t in (order.get("tasks") or [])
+    # Stringify every id at the comparison boundary: a model may emit int task ids while
+    # depends_on/consumers/owner_task land stringified (or vice versa), and a mixed str/int
+    # set both misses consumers AND crashes the final sorted(). One key type throughout.
+    tasks = {str(t.get("id")): t for t in (order.get("tasks") or [])
              if isinstance(t, dict) and t.get("id")}
-    owner = c.get("owner_task")
+    owner = str(c.get("owner_task")) if c.get("owner_task") is not None else None
     declared = {str(x) for x in (c.get("consumers") or []) if str(x) in tasks}
     derived = {tid for tid, t in tasks.items()
-               if owner and owner in (t.get("depends_on") or [])}
+               if owner and owner in [str(d) for d in (t.get("depends_on") or [])]}
     consumer_ids = sorted((declared | derived) - {owner})
     agent_of = {}
     for wo in (order.get("work_orders") or []):
         if isinstance(wo, dict) and wo.get("agent"):
             for tid in (wo.get("task_ids") or []):
-                agent_of[tid] = wo.get("agent")
+                agent_of[str(tid)] = wo.get("agent")
     agents = sorted({agent_of[t] for t in consumer_ids if t in agent_of})
     return consumer_ids, agents
 
@@ -2088,10 +2103,14 @@ def build_bundle(order):
             # The language-neutral IR: the seam's shape + semantics as structured data, so
             # the contract is codegen-/diff-/tooling-consumable independent of source_lang
             # (the literal `source` below is one realization of it).
+            # consumers = the SAME unioned blast radius the human docs route (declared
+            # UNION every task depending on owner_task), not the declared-only field, so
+            # the machine IR and CONTRACT_CHANGES.md/work-orders never disagree on ripple.
             put(f"{root}/contracts/{name}.contract.json", json.dumps({
                 "name": c.get("name"), "kind": c.get("kind"), "version": c.get("version"),
                 "owner_task": c.get("owner_task"), "source_lang": c.get("source_lang"),
-                "source_path": c.get("source_path"), "consumers": c.get("consumers") or [],
+                "source_path": c.get("source_path"),
+                "consumers": _contract_consumers(order, c)[0],
                 "behavior": c.get("behavior") or {}, "interface": c.get("interface") or [],
             }, indent=2) + "\n")
             # Contracts ARE source: emit the literal compilable file agents IMPORT.
