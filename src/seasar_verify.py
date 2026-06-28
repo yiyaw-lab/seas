@@ -89,7 +89,9 @@ def _has_behavior(c):
         return True
     iface = c.get("interface")
     return (isinstance(iface, list)
-            and any(isinstance(o, dict) and str(o.get("op", "")).strip() for o in iface))
+            and any(isinstance(o, dict)
+                    and str(o.get("op", "") or o.get("name", "")).strip()
+                    for o in iface))
 
 
 def _wave_of(t):

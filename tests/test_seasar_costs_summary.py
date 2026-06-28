@@ -50,6 +50,14 @@ class PrintCostsSummaryRobustness(unittest.TestCase):
         self.assertIn("2 build orders", out)
         self.assertIn("total $0.50", out)
 
+    def test_null_totals_degrade_to_zero(self):
+        sc.COSTS_PATH.write_text(json.dumps({"id": "o1", "total_cost_usd": None,
+                                             "total_input_tokens": None,
+                                             "total_output_tokens": None}) + "\n")
+        out = self._run()
+        self.assertIn("1 build orders", out)
+        self.assertIn("total $0.00", out)
+
     def test_all_lines_corrupt_reports_empty(self):
         sc.COSTS_PATH.write_text('{"broken\nalso-not-json\n')
         self.assertIn("cost ledger empty", self._run())

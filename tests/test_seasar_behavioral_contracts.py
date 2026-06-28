@@ -67,6 +67,10 @@ class VerifyTest(unittest.TestCase):
         res = verify_order(_sourced(interface=[{"op": "list", "returns": "Item[]"}]))
         self.assertTrue(_warn(res, "contracts_specify_behavior")["ok"])
 
+    def test_behavior_warn_passes_with_interface_name_alias(self):
+        res = verify_order(_sourced(interface=[{"name": "list", "returns": "Item[]"}]))
+        self.assertTrue(_warn(res, "contracts_specify_behavior")["ok"])
+
     def test_behavior_warn_folds_into_self_check(self):
         # A behaviorally-specified contract scores higher on the independent (self_check)
         # axis than a type-shape-only one.

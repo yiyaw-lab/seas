@@ -5,6 +5,7 @@ the contract's explicit `consumers` UNION every task depending on its owner_task
 """
 
 import io
+import json
 import unittest
 import zipfile
 
@@ -42,6 +43,19 @@ class ConsumerEdgeTest(unittest.TestCase):
         self.assertEqual(agents, ["agent-b"])         # both map to agent-b
         self.assertNotIn("T4", ids)                   # unrelated task is not a consumer
 
+    def test_numeric_ids_normalize_before_consumer_ripple(self):
+        order = {"tasks": [{"id": 1, "wave": 1, "files": ["src/a.py"]},
+                           {"id": 2, "wave": 2, "depends_on": [1], "files": ["src/b.py"]},
+                           {"id": "3", "wave": 2, "files": ["src/c.py"]}],
+                 "contracts": [{"name": "Api", "owner_task": 1, "source": "x = 1",
+                                "source_path": "src/a.py", "consumers": [3]}],
+                 "work_orders": [{"agent": "agent-b", "task_ids": [2, "3"]}]}
+        sc._normalize_order(order)
+        self.assertEqual([t["id"] for t in order["tasks"]], ["1", "2", "3"])
+        ids, agents = sc._contract_consumers(order, order["contracts"][0])
+        self.assertEqual(ids, ["2", "3"])
+        self.assertEqual(agents, ["agent-b"])
+
     def test_owner_never_self_consumes(self):
         order = {"tasks": [{"id": "T1", "depends_on": ["T1"]}],
                  "contracts": [{"name": "C", "owner_task": "T1", "consumers": ["T1"]}]}
@@ -75,6 +89,12 @@ class EmitTest(unittest.TestCase):
         # agent-c (T4) consumes nothing -> no consume section.
         packet_c = _bundle_file(order, "work-orders/agent-c.md")
         self.assertNotIn("Contracts you consume", packet_c)
+
+    def test_contract_ir_lists_full_consumer_ripple(self):
+        order = _order()
+        sc._normalize_order(order)
+        ir = json.loads(_bundle_file(order, "contracts/api.contract.json"))
+        self.assertEqual(ir["consumers"], ["T2", "T3"])
 
 
 class VerifyTest(unittest.TestCase):

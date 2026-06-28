@@ -459,6 +459,7 @@ def _normalize_order(order):
         c["source"] = str(c.get("source", "") or "")
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
+        c["owner_task"] = str(c.get("owner_task", "") or "")
         c["version"] = str(c.get("version", "") or "1.0.0")
         # Explicit consumer edges (the version-bump ripple); also auto-derived later.
         c["consumers"] = [str(x) for x in _as_list(c.get("consumers"))]
@@ -538,6 +539,7 @@ def _normalize_order(order):
     order["orchestration"] = orch
     # per-task coercion.
     for t in order["tasks"]:
+        t["id"] = str(t.get("id", "") or "")
         t["files"] = [str(f) for f in _as_list(t.get("files"))]
         t["depends_on"] = [str(d) for d in _as_list(t.get("depends_on"))]
         t["wave"] = _wave_of(t)
@@ -807,6 +809,9 @@ def _record_cost(order, stages, compile_ms):
 
 def _print_costs_summary():
     """Operator CLI: aggregate unit economics from the ledger."""
+    def num(v):
+        return v if isinstance(v, (int, float)) else 0
+
     if not COSTS_PATH.exists():
         print("no cost ledger yet")
         return
@@ -824,9 +829,9 @@ def _print_costs_summary():
         print("cost ledger empty")
         return
     n = len(recs)
-    tot = sum(r.get("total_cost_usd", 0) for r in recs)
-    avg_in = sum(r.get("total_input_tokens", 0) for r in recs) // n
-    avg_out = sum(r.get("total_output_tokens", 0) for r in recs) // n
+    tot = sum(num(r.get("total_cost_usd")) for r in recs)
+    avg_in = sum(num(r.get("total_input_tokens")) for r in recs) // n
+    avg_out = sum(num(r.get("total_output_tokens")) for r in recs) // n
     print(f"{n} build orders  |  total ${tot:.2f}  |  avg ${tot / n:.3f}/order")
     print(f"avg tokens: {avg_in} in / {avg_out} out  |  ledger: {COSTS_PATH}")
 
@@ -1680,18 +1685,18 @@ def _contract_consumers(order, c):
     the abstract. Derived from the contract's explicit `consumers` UNION every task that
     depends on its owner_task; the owner is never its own consumer. Returns (task_ids, agents),
     both sorted and deduped."""
-    tasks = {t.get("id"): t for t in (order.get("tasks") or [])
+    tasks = {str(t.get("id")): t for t in (order.get("tasks") or [])
              if isinstance(t, dict) and t.get("id")}
-    owner = c.get("owner_task")
+    owner = str(c.get("owner_task") or "")
     declared = {str(x) for x in (c.get("consumers") or []) if str(x) in tasks}
     derived = {tid for tid, t in tasks.items()
-               if owner and owner in (t.get("depends_on") or [])}
+               if owner and owner in {str(d) for d in (t.get("depends_on") or [])}}
     consumer_ids = sorted((declared | derived) - {owner})
     agent_of = {}
     for wo in (order.get("work_orders") or []):
         if isinstance(wo, dict) and wo.get("agent"):
             for tid in (wo.get("task_ids") or []):
-                agent_of[tid] = wo.get("agent")
+                agent_of[str(tid)] = wo.get("agent")
     agents = sorted({agent_of[t] for t in consumer_ids if t in agent_of})
     return consumer_ids, agents
 
@@ -2091,7 +2096,7 @@ def build_bundle(order):
             put(f"{root}/contracts/{name}.contract.json", json.dumps({
                 "name": c.get("name"), "kind": c.get("kind"), "version": c.get("version"),
                 "owner_task": c.get("owner_task"), "source_lang": c.get("source_lang"),
-                "source_path": c.get("source_path"), "consumers": c.get("consumers") or [],
+                "source_path": c.get("source_path"), "consumers": _contract_consumers(order, c)[0],
                 "behavior": c.get("behavior") or {}, "interface": c.get("interface") or [],
             }, indent=2) + "\n")
             # Contracts ARE source: emit the literal compilable file agents IMPORT.
