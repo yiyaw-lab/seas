@@ -37,6 +37,16 @@ _TEST_HINTS = ("vitest", "jest", "playwright", "pytest", "cypress", ".github/wor
 _ENV_HINTS = (".env.example", ".env.template", ".env.sample")
 _FIXTURE_RE = re.compile(r"fixture", re.I)
 
+# The RECOGNIZED behavioral aspects -- the runtime semantics a type signature omits.
+# Mirrors seasar_compile._BEHAVIOR_ASPECTS (kept local, not imported: seasar_compile
+# imports THIS module at load time, so importing back would be a circular import -- same
+# zero-coupling reason _wave_of is duplicated). _normalize_behavior keeps ONLY these keys,
+# so a contract whose behavior dict has only unrecognized keys carries no real spec; verify
+# must require at least one of these, or a raw order's junk-key behavior passes a check the
+# compiler would have emptied. If this list drifts, the cross-check in
+# tests/test_seasar_bugbot_fixes.py fails.
+_BEHAVIOR_ASPECTS = ("ordering", "idempotency", "errors", "pagination", "units")
+
 
 # --- defensive accessors -----------------------------------------------------
 
@@ -56,6 +66,29 @@ def _strs(v):
     if isinstance(v, list):
         return [x for x in v if isinstance(x, str)]
     return [v.strip()] if isinstance(v, str) and v.strip() else []
+
+
+def _str_ids(v):
+    """Coerce an ID-list field (depends_on / consumers / task_ids / waves) to a list of
+    STRINGIFIED non-empty ids. Unlike _strs (which drops non-string members -- right for a
+    files list), ids must stringify: a model may emit int task ids while the verify path
+    runs on a RAW (un-normalized) order, and a mixed str/int comparison silently drops a
+    real edge AND reports a phantom dangling one. Mirrors seasar_compile._normalize_order,
+    which stringifies every id, so verify on a raw order agrees with verify on a compiled
+    one. A bare scalar becomes a one-element list (never char-iterated)."""
+    if isinstance(v, list):
+        return [s for s in (str(x).strip() for x in v) if s]
+    s = str(v).strip() if v is not None else ""
+    return [s] if s else []
+
+
+def _str_id(v):
+    """Stringify a single id (owner_task / anchor_task) for comparison against the
+    stringified task-id set; None/empty -> None so an absent id never fabricates a hit."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
 
 
 def _source_parse_error(c):
@@ -85,7 +118,11 @@ def _has_behavior(c):
     a language-neutral interface IR. The exact place cross-agent semantic drift hides: two
     agents agree on the shape and silently disagree on the behavior."""
     beh = c.get("behavior")
-    if isinstance(beh, dict) and any(str(v).strip() for v in beh.values()):
+    # Require at least one RECOGNIZED aspect with a non-empty value -- a behavior dict of
+    # only unrecognized keys is junk the compiler's _normalize_behavior would drop, so it is
+    # NOT a real spec (verify must agree with the compiler on a raw, un-normalized order).
+    if isinstance(beh, dict) and any(str(beh.get(k, "") or "").strip()
+                                     for k in _BEHAVIOR_ASPECTS):
         return True
     iface = c.get("interface")
     # An op is identified by `op` OR `name` -- mirror seasar_compile._normalize_interface,
@@ -195,7 +232,12 @@ def verify_order(order):
                        "detail": "" if ok else str(detail)})
 
     tasks = _dicts(order, "tasks")
-    task_ids = [t.get("id") for t in tasks if t.get("id")]
+    # Stringify every id at the comparison boundary. verify_order runs on RAW orders too
+    # (the CLI gate verify-build-order.py loads order JSON and does NOT normalize), so a
+    # model that emits int task ids must still join to depends_on/consumers/owner_task,
+    # which may arrive as either str or int. Mirror seasar_compile._normalize_order: one
+    # key type (str) everywhere, so no edge is silently dropped and none phantom-dangles.
+    task_ids = [_str_id(t.get("id")) for t in tasks if _str_id(t.get("id")) is not None]
     task_id_set = set(task_ids)
 
     # ---- STRUCTURAL (ERROR) -- DAG integrity ----
@@ -227,20 +269,22 @@ def verify_order(order):
     add("wave_file_disjoint", not collisions, ERROR, "; ".join(collisions))
 
     dep_missing, dep_forward = [], []
-    wave_by_id = {t.get("id"): _wave_of(t) for t in tasks}
+    wave_by_id = {_str_id(t.get("id")): _wave_of(t) for t in tasks}
     for t in tasks:
         tw = _wave_of(t)
-        for d in _strs(t.get("depends_on")):
+        tid = _str_id(t.get("id"))
+        for d in _str_ids(t.get("depends_on")):
             if d not in task_id_set:
-                dep_missing.append(f"{t.get('id')}->{d}")
+                dep_missing.append(f"{tid}->{d}")
             elif wave_by_id.get(d, 0) >= tw:
-                dep_forward.append(f"{t.get('id')}(w{tw})->{d}(w{wave_by_id.get(d)})")
+                dep_forward.append(f"{tid}(w{tw})->{d}(w{wave_by_id.get(d)})")
     add("deps_exist", not dep_missing, ERROR, "dangling: " + "; ".join(dep_missing))
     add("deps_point_backward", not dep_forward, ERROR,
         "not earlier-wave: " + "; ".join(dep_forward))
 
     waves = (order.get("orchestration") or {}).get("waves") or []
-    flat = [tid for w in waves for tid in (w or []) if isinstance(tid, str)]
+    # wave members stringify too -- a raw order may list int ids in orchestration.waves.
+    flat = [s for w in waves for s in _str_ids(w)]
     add("waves_partition", sorted(flat) == sorted(task_ids), ERROR,
         "orchestration.waves does not list every task id exactly once")
     # Partition-by-set is not enough: the orchestrator schedules off orchestration.waves'
@@ -248,17 +292,20 @@ def verify_order(order):
     # every id appears once. Validate the actual schedule respects deps.
     pos = {}
     for i, w in enumerate(waves):
-        for tid in (w or []):
-            if isinstance(tid, str):
-                pos.setdefault(tid, i)
-    sched_forward = [f"{t.get('id')}<-{d}" for t in tasks for d in _strs(t.get("depends_on"))
-                     if pos.get(t.get("id")) is not None and pos.get(d) is not None
-                     and pos[d] >= pos[t.get("id")]]
+        for tid in _str_ids(w):
+            pos.setdefault(tid, i)
+    sched_forward = []
+    for t in tasks:
+        tid = _str_id(t.get("id"))
+        for d in _str_ids(t.get("depends_on")):
+            if pos.get(tid) is not None and pos.get(d) is not None and pos[d] >= pos[tid]:
+                sched_forward.append(f"{tid}<-{d}")
     add("waves_schedule_deps", not sched_forward, ERROR,
         "orchestration.waves schedules a task at/before a dependency: " + "; ".join(sched_forward))
 
     bad_owner = [c.get("name") for c in _dicts(order, "contracts")
-                 if c.get("owner_task") and c.get("owner_task") not in task_id_set]
+                 if _str_id(c.get("owner_task")) is not None
+                 and _str_id(c.get("owner_task")) not in task_id_set]
     add("contract_owner_exists", not bad_owner, ERROR,
         "owner_task not a task: " + ", ".join(map(str, bad_owner)))
 
@@ -288,9 +335,12 @@ def verify_order(order):
             "typed seam(s) with no behavioral spec or interface IR "
             "(semantic drift risk): " + ", ".join(map(str, no_beh)))
         # A declared consumer edge that points at no real task is a broken ripple: a
-        # version bump would route its re-verify signal to nobody.
+        # version bump would route its re-verify signal to nobody. Stringify both sides --
+        # _str_ids (not _strs) so an int consumer id on a raw order is COMPARED, not dropped
+        # (dropping would hide a real dangling edge AND a real valid one). Mirrors the
+        # round-1 seasar_compile._contract_consumers fix.
         bad_consumers = ["%s->%s" % (c.get("name"), x) for c in contracts
-                         for x in _strs(c.get("consumers")) if x not in task_id_set]
+                         for x in _str_ids(c.get("consumers")) if x not in task_id_set]
         add("consumers_are_tasks", not bad_consumers, WARN,
             "contract.consumers edge to a non-task (broken ripple): "
             + ", ".join(bad_consumers))
@@ -342,7 +392,7 @@ def verify_order(order):
     if decisions:
         all_files = {f for t in tasks for f in _strs(t.get("files"))}
         unrouted = [d.get("id") for d in decisions
-                    if d.get("anchor_task") not in task_id_set
+                    if _str_id(d.get("anchor_task")) not in task_id_set
                     and d.get("anchor_file") not in all_files]
         add("decisions_routed", not unrouted, WARN,
             "decision(s) anchored to no real task/file (routes to no agent): "

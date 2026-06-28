@@ -178,5 +178,78 @@ class Pr77BugbotFixesTest(unittest.TestCase):
             sc.COSTS_PATH = orig
 
 
+class Pr77Round2BugbotFixesTest(unittest.TestCase):
+    """Cursor Bugbot RE-REVIEW of PR #77: the SAME bug class, missed in round 1 on the
+    verify path. verify_order runs on RAW (un-normalized) JSON via the CLI gate
+    scripts/verify-build-order.py, so every id comparison there must stringify too."""
+
+    def test_verify_consumer_check_handles_int_ids_on_raw_order(self):  # #77r2-C
+        # RAW order (no _normalize_order) with INTEGER task ids. Pre-fix _strs(consumers)
+        # dropped the int members entirely, so the dangling consumer 99 went UNREPORTED and
+        # the valid int consumer 2 was silently dropped. Both sides must stringify.
+        order = {
+            "tasks": [{"id": 1, "wave": 1, "files": ["a.py"]},
+                      {"id": 2, "wave": 2, "files": ["b.py"], "depends_on": [1]}],
+            "contracts": [{"name": "api", "owner_task": 1, "source": "x=1",
+                           "source_lang": "python", "source_path": "c.py",
+                           "behavior": {"ordering": "fifo"},
+                           "consumers": [2, 99]}],  # 2 real (int), 99 dangling (int)
+            "orchestration": {"waves": [[1], [2]]},
+        }
+        checks = {c["name"]: c for c in sv.verify_order(order)["checks"]}
+        cons = checks["consumers_are_tasks"]
+        self.assertFalse(cons["ok"])           # dangling 99 must be flagged
+        self.assertIn("api->99", cons["detail"])
+        self.assertNotIn("api->2", cons["detail"])   # valid int consumer NOT flagged
+        # The other id-keyed checks must agree on the str/int boundary too (no phantoms).
+        self.assertTrue(checks["waves_partition"]["ok"])      # was phantom-False pre-fix
+        self.assertTrue(checks["contract_owner_exists"]["ok"])
+        self.assertTrue(checks["deps_exist"]["ok"])
+        self.assertTrue(checks["deps_point_backward"]["ok"])
+        self.assertTrue(checks["waves_schedule_deps"]["ok"])
+
+    def test_verify_owner_and_deps_flag_real_breaks_on_int_ids(self):  # #77r2-C
+        # Negative control: on a RAW int-id order with a GENUINELY broken owner + dep +
+        # consumer, every check must still FIRE (stringifying must not mask real breaks).
+        order = {
+            "tasks": [{"id": 1, "wave": 1, "files": ["a.py"]},
+                      {"id": 2, "wave": 2, "files": ["b.py"], "depends_on": [7]}],  # 7 dangling
+            "contracts": [{"name": "api", "owner_task": 9, "source": "x=1",  # 9 not a task
+                           "source_lang": "python", "source_path": "c.py",
+                           "behavior": {"ordering": "fifo"}, "consumers": [8]}],  # 8 dangling
+            "orchestration": {"waves": [[1], [2]]},
+        }
+        checks = {c["name"]: c for c in sv.verify_order(order)["checks"]}
+        self.assertFalse(checks["deps_exist"]["ok"])             # 2->7 dangling
+        self.assertFalse(checks["contract_owner_exists"]["ok"])  # owner 9 not a task
+        self.assertFalse(checks["consumers_are_tasks"]["ok"])    # consumer 8 dangling
+
+    def test_verify_junk_only_behavior_fails(self):  # #77r2-D
+        # A behavior dict with ONLY unrecognized keys carries no real spec (the compiler's
+        # _normalize_behavior would empty it). Pre-fix _has_behavior accepted any non-empty
+        # value -> verify passed a contract the compiler would mark spec-less.
+        order = {"tasks": [{"id": "T1", "wave": 1, "files": ["a.py"]}],
+                 "contracts": [{"name": "api", "owner_task": "T1", "source": "x=1",
+                                "source_lang": "python", "source_path": "c.py",
+                                "behavior": {"junk_key": "x", "another": "y"}}],
+                 "orchestration": {"waves": [["T1"]]}}
+        c = next(c for c in sv.verify_order(order)["checks"]
+                 if c["name"] == "contracts_specify_behavior")
+        self.assertFalse(c["ok"])
+        self.assertFalse(sv._has_behavior(order["contracts"][0]))
+
+    def test_verify_recognized_behavior_aspect_passes(self):  # #77r2-D positive control
+        for aspect in ("ordering", "idempotency", "errors", "pagination", "units"):
+            self.assertTrue(sv._has_behavior({"source": "x", "behavior": {aspect: "spec"}}),
+                            aspect)
+        # an empty-string recognized aspect is still no spec.
+        self.assertFalse(sv._has_behavior({"source": "x", "behavior": {"ordering": "  "}}))
+
+    def test_verify_behavior_aspects_match_compiler(self):  # #77r2-D drift guard
+        # The local mirror in seasar_verify must not drift from the canonical set in
+        # seasar_compile, or verify and the compiler would disagree on what is a real spec.
+        self.assertEqual(sv._BEHAVIOR_ASPECTS, sc._BEHAVIOR_ASPECTS)
+
+
 if __name__ == "__main__":
     unittest.main()
