@@ -1289,20 +1289,22 @@ def _md_work_order(wo, order=None):
     forbidden-contracts, and definition_of_done the buildability score rewards, so the
     executability the score grades actually reaches the agent who reads the packet."""
     order = order or {}
-    tasks_by_id = {t.get("id"): t for t in (order.get("tasks") or []) if t.get("id")}
-    my_ids = wo.get("task_ids") or []
+    tasks_by_id = {str(t.get("id")).strip(): t for t in (order.get("tasks") or [])
+                   if t.get("id")}
+    my_ids = [str(i).strip() for i in _as_list(wo.get("task_ids")) if str(i).strip()]
+    my_id_set = set(my_ids)
     my_tasks = [tasks_by_id[i] for i in my_ids if i in tasks_by_id]
     allowed = sorted({f for t in my_tasks for f in (t.get("files") or [])})
     # Contract files owned by OTHER tasks are forbidden -- propose a change, never edit.
     forbidden = sorted({
         c.get("source_path") for c in (order.get("contracts") or [])
-        if c.get("source_path") and c.get("owner_task") not in my_ids
+        if c.get("source_path") and str(c.get("owner_task")).strip() not in my_id_set
     })
     # Decisions this agent faces (anchored to its tasks or its files) -- it must RESOLVE
     # each, never guess; the SEASAR_DECIDE_ sentinel gate enforces it.
     allowed_set = set(allowed)
     my_decisions = [d for d in (order.get("decisions") or [])
-                    if d.get("anchor_task") in my_ids
+                    if str(d.get("anchor_task")).strip() in my_id_set
                     or (d.get("anchor_file") and d.get("anchor_file") in allowed_set)]
     out = [f"# Work order: {wo.get('agent', '')}\n",
            f"- **role:** {wo.get('role', '')}",

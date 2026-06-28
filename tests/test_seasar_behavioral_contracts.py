@@ -63,6 +63,10 @@ class VerifyTest(unittest.TestCase):
         res = verify_order(_sourced(behavior={"ordering": "stable, by created_at desc"}))
         self.assertTrue(_warn(res, "contracts_specify_behavior")["ok"])
 
+    def test_behavior_warn_ignores_junk_only_block(self):
+        res = verify_order(_sourced(behavior={"notes": "idempotent maybe", "bogus": "x"}))
+        self.assertFalse(_warn(res, "contracts_specify_behavior")["ok"])
+
     def test_behavior_warn_passes_with_interface(self):
         res = verify_order(_sourced(interface=[{"op": "list", "returns": "Item[]"}]))
         self.assertTrue(_warn(res, "contracts_specify_behavior")["ok"])

@@ -76,6 +76,15 @@ class EmitTest(unittest.TestCase):
         packet_c = _bundle_file(order, "work-orders/agent-c.md")
         self.assertNotIn("Contracts you consume", packet_c)
 
+    def test_consumer_agent_packet_handles_raw_int_ids(self):
+        order = {"tasks": [{"id": 1, "files": ["src/api.py"]},
+                           {"id": 2, "files": ["src/b.py"]}],
+                 "contracts": [{"name": "Api", "owner_task": 1, "source_path": "src/api.py",
+                                "consumers": [2]}]}
+        packet = sc._md_work_order({"agent": "agent-b", "task_ids": [2]}, order)
+        self.assertIn("Contracts you consume", packet)
+        self.assertIn("`Api`", packet)
+
 
 class VerifyTest(unittest.TestCase):
     def test_dangling_consumer_warns(self):
@@ -94,6 +103,23 @@ class VerifyTest(unittest.TestCase):
         res = verify_order(order)
         chk = next(c for c in res["checks"] if c["name"] == "consumers_are_tasks")
         self.assertTrue(chk["ok"])
+
+    def test_int_consumers_match_raw_int_task_ids(self):
+        order = {"tasks": [{"id": 1}, {"id": 2}],
+                 "contracts": [{"name": "C", "owner_task": 1, "source": "x=1",
+                                "source_path": "c.py", "consumers": ["2"]}]}
+        res = verify_order(order)
+        chk = next(c for c in res["checks"] if c["name"] == "consumers_are_tasks")
+        self.assertTrue(chk["ok"])
+
+    def test_int_dangling_consumer_warns(self):
+        order = {"tasks": [{"id": 1}],
+                 "contracts": [{"name": "C", "owner_task": 1, "source": "x=1",
+                                "source_path": "c.py", "consumers": [9]}]}
+        res = verify_order(order)
+        chk = next(c for c in res["checks"] if c["name"] == "consumers_are_tasks")
+        self.assertFalse(chk["ok"])
+        self.assertIn("C->9", chk["detail"])
 
 
 if __name__ == "__main__":

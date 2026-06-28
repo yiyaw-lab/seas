@@ -36,6 +36,7 @@ _TEST_HINTS = ("vitest", "jest", "playwright", "pytest", "cypress", ".github/wor
                "ci.yml", "ci.yaml", "test", "spec")
 _ENV_HINTS = (".env.example", ".env.template", ".env.sample")
 _FIXTURE_RE = re.compile(r"fixture", re.I)
+_BEHAVIOR_ASPECTS = ("ordering", "idempotency", "errors", "pagination", "units")
 
 
 # --- defensive accessors -----------------------------------------------------
@@ -48,13 +49,17 @@ def _nonempty(v):
     return bool(str(v or "").strip())
 
 
+def _id_str(v):
+    return str(v).strip() if v is not None else ""
+
+
 def _strs(v):
-    """Coerce a field that should be a list of strings. A list keeps its str members; a
-    bare non-empty string becomes a ONE-element list (so files="a.py" is the path "a.py" --
-    never char-iterated, and never dropped, so two same-wave tasks with the same scalar
-    still collide); anything else -> []."""
+    """Coerce a field that should be a list of strings. A list's non-empty members are
+    stringified; a bare non-empty string becomes a ONE-element list (so files="a.py" is
+    the path "a.py" -- never char-iterated, and never dropped, so two same-wave tasks
+    with the same scalar still collide); anything else -> []."""
     if isinstance(v, list):
-        return [x for x in v if isinstance(x, str)]
+        return [str(x).strip() for x in v if x is not None and str(x).strip()]
     return [v.strip()] if isinstance(v, str) and v.strip() else []
 
 
@@ -85,7 +90,8 @@ def _has_behavior(c):
     a language-neutral interface IR. The exact place cross-agent semantic drift hides: two
     agents agree on the shape and silently disagree on the behavior."""
     beh = c.get("behavior")
-    if isinstance(beh, dict) and any(str(v).strip() for v in beh.values()):
+    if isinstance(beh, dict) and any(str(beh.get(k, "") or "").strip()
+                                    for k in _BEHAVIOR_ASPECTS):
         return True
     iface = c.get("interface")
     # An op is identified by `op` OR `name` -- mirror seasar_compile._normalize_interface,
@@ -195,14 +201,14 @@ def verify_order(order):
                        "detail": "" if ok else str(detail)})
 
     tasks = _dicts(order, "tasks")
-    task_ids = [t.get("id") for t in tasks if t.get("id")]
+    task_ids = [_id_str(t.get("id")) for t in tasks if _id_str(t.get("id"))]
     task_id_set = set(task_ids)
 
     # ---- STRUCTURAL (ERROR) -- DAG integrity ----
     add("tasks_present", len(tasks) > 0, ERROR, "no tasks defined")
     # Every task needs a non-empty id, or it escapes the id-keyed checks below
     # (waves_partition / deps / owner) and rides along, scheduled into no wave.
-    add("tasks_have_ids", all(_nonempty(t.get("id")) for t in tasks), ERROR,
+    add("tasks_have_ids", all(_id_str(t.get("id")) for t in tasks), ERROR,
         "task(s) missing an id -- they escape every DAG check")
     seen_ids, dup_ids = set(), []
     for _i in task_ids:
@@ -227,7 +233,8 @@ def verify_order(order):
     add("wave_file_disjoint", not collisions, ERROR, "; ".join(collisions))
 
     dep_missing, dep_forward = [], []
-    wave_by_id = {t.get("id"): _wave_of(t) for t in tasks}
+    wave_by_id = {_id_str(t.get("id")): _wave_of(t) for t in tasks
+                  if _id_str(t.get("id"))}
     for t in tasks:
         tw = _wave_of(t)
         for d in _strs(t.get("depends_on")):
@@ -240,7 +247,7 @@ def verify_order(order):
         "not earlier-wave: " + "; ".join(dep_forward))
 
     waves = (order.get("orchestration") or {}).get("waves") or []
-    flat = [tid for w in waves for tid in (w or []) if isinstance(tid, str)]
+    flat = [tid for w in waves for tid in _strs(w)]
     add("waves_partition", sorted(flat) == sorted(task_ids), ERROR,
         "orchestration.waves does not list every task id exactly once")
     # Partition-by-set is not enough: the orchestrator schedules off orchestration.waves'
@@ -248,17 +255,17 @@ def verify_order(order):
     # every id appears once. Validate the actual schedule respects deps.
     pos = {}
     for i, w in enumerate(waves):
-        for tid in (w or []):
-            if isinstance(tid, str):
-                pos.setdefault(tid, i)
+        for tid in _strs(w):
+            pos.setdefault(tid, i)
     sched_forward = [f"{t.get('id')}<-{d}" for t in tasks for d in _strs(t.get("depends_on"))
-                     if pos.get(t.get("id")) is not None and pos.get(d) is not None
-                     and pos[d] >= pos[t.get("id")]]
+                     if pos.get(_id_str(t.get("id"))) is not None and pos.get(d) is not None
+                     and pos[d] >= pos[_id_str(t.get("id"))]]
     add("waves_schedule_deps", not sched_forward, ERROR,
         "orchestration.waves schedules a task at/before a dependency: " + "; ".join(sched_forward))
 
     bad_owner = [c.get("name") for c in _dicts(order, "contracts")
-                 if c.get("owner_task") and c.get("owner_task") not in task_id_set]
+                 if _id_str(c.get("owner_task"))
+                 and _id_str(c.get("owner_task")) not in task_id_set]
     add("contract_owner_exists", not bad_owner, ERROR,
         "owner_task not a task: " + ", ".join(map(str, bad_owner)))
 
@@ -342,7 +349,7 @@ def verify_order(order):
     if decisions:
         all_files = {f for t in tasks for f in _strs(t.get("files"))}
         unrouted = [d.get("id") for d in decisions
-                    if d.get("anchor_task") not in task_id_set
+                    if _id_str(d.get("anchor_task")) not in task_id_set
                     and d.get("anchor_file") not in all_files]
         add("decisions_routed", not unrouted, WARN,
             "decision(s) anchored to no real task/file (routes to no agent): "
