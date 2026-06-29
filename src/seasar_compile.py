@@ -221,7 +221,7 @@ _CAST_SCHEMA = """{
     "examples": [{ "input": "concrete input", "output": "concrete expected output" }]
   },
   "repo_scaffold": [{ "path": "src/api/server.ts", "purpose": "one line" }],
-  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)" }],
+  "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)", "consumers": ["task ids that IMPORT this seam -- a version bump re-verifies them; also auto-derived from depends_on(owner_task)"], "behavior": { "ordering": "result/event order guarantee, or 'unordered'", "idempotency": "which ops are safe to retry and on what key", "errors": "error model -- shape, codes, and what is thrown vs returned", "pagination": "cursor/offset scheme + page bounds, or 'none'", "units": "units + encodings (cents not dollars, RFC3339 UTC, ...)" }, "interface": [{ "op": "operationName", "params": [{ "name": "x", "type": "language-neutral type" }], "returns": "language-neutral type", "errors": ["NotFound", "..."] }] }],
   "tasks": [{
     "id": "T1", "title": "...", "wave": 1, "depends_on": [],
     "files": ["src/api/server.ts"], "agent_role": "Backend|Frontend|Schema|Infra|Tests",
@@ -268,6 +268,9 @@ HARD RULES FOR THE PLAN:
   across the whole plan so parallel agents never collide.
 - every contract is a typed seam between modules; set its `owner_task` to the task
   that defines it. Anything other tasks depend on should expose a contract.
+- a contract's `source` pins the SHAPE; its `behavior` + `interface` pin the SEMANTICS
+  (ordering, idempotency, errors, pagination, units). State them -- unstated behavior is
+  exactly where two agents agree on types and silently diverge at the seam.
 - `orchestration.waves` must list every task id EXACTLY ONCE, grouped by wave.
 - `agent_count` and the number of work_orders should match the fleet size ({agents}).
 - distribute tasks across work_orders so each agent owns a coherent slice.
@@ -383,6 +386,48 @@ def _merge_order(order):
     return out
 
 
+_BEHAVIOR_ASPECTS = ("ordering", "idempotency", "errors", "pagination", "units")
+
+
+def _normalize_behavior(raw):
+    """A contract's behavioral spec: the runtime semantics a type signature does NOT pin
+    down -- ordering, idempotency, error model, pagination, units. Keep only the recognized
+    aspects, stringified and non-empty; the exact seam where two agents agree on the shape
+    and silently disagree on the behavior."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k in _BEHAVIOR_ASPECTS:
+        v = str(raw.get(k, "") or "").strip()
+        if v:
+            out[k] = v
+    return out
+
+
+def _normalize_interface(raw):
+    """The language-neutral interface IR: each operation (name, params, returns, errors)
+    specified independent of source_lang, so the seam is pinned once and the literal
+    `source` is one realization of it. Defensive against model junk -- an op needs a name."""
+    if not isinstance(raw, list):
+        return []
+    ops = []
+    for o in raw:
+        if not isinstance(o, dict):
+            continue
+        name = str(o.get("op", "") or o.get("name", "") or "").strip()
+        if not name:
+            continue
+        params = []
+        for p in (o.get("params") or []):
+            if isinstance(p, dict) and str(p.get("name", "") or "").strip():
+                params.append({"name": str(p.get("name")).strip(),
+                               "type": str(p.get("type", "") or "").strip()})
+        ops.append({"op": name, "params": params,
+                    "returns": str(o.get("returns", "") or "").strip(),
+                    "errors": [str(e).strip() for e in _as_list(o.get("errors")) if str(e).strip()]})
+    return ops
+
+
 def _normalize_order(order):
     """Coerce the model's raw JSON into the shape the rest of the pipeline (stamp,
     bundle) and the frontend renderers ASSUME: every required array/object present
@@ -415,6 +460,15 @@ def _normalize_order(order):
         c["source_lang"] = str(c.get("source_lang", "") or "")
         c["source_path"] = str(c.get("source_path", "") or "")
         c["version"] = str(c.get("version", "") or "1.0.0")
+        # owner_task is matched against (stringified) task ids in the ripple analysis;
+        # stringify it here so an int owner_task never silently fails the comparison.
+        if c.get("owner_task") is not None and not isinstance(c["owner_task"], str):
+            c["owner_task"] = str(c["owner_task"])
+        # Explicit consumer edges (the version-bump ripple); also auto-derived later.
+        c["consumers"] = [str(x) for x in _as_list(c.get("consumers"))]
+        # Behavior + language-neutral interface IR: the SEMANTICS a type signature omits.
+        c["behavior"] = _normalize_behavior(c.get("behavior"))
+        c["interface"] = _normalize_interface(c.get("interface"))
     # fixtures: the wave-0 golden corpus every test runs against.
     for f in order["fixtures"]:
         f["path"] = str(f.get("path", "") or "")
@@ -488,6 +542,12 @@ def _normalize_order(order):
     order["orchestration"] = orch
     # per-task coercion.
     for t in order["tasks"]:
+        # id is the join key for every downstream id comparison (depends_on, consumers,
+        # owner_task, work-order task_ids -- all stringified). Stringify a present int id
+        # so those comparisons can't miss across str/int; leave an absent id absent so the
+        # tasks_have_ids check still catches it (str(None) would fabricate a truthy id).
+        if t.get("id") is not None and not isinstance(t["id"], str):
+            t["id"] = str(t["id"])
         t["files"] = [str(f) for f in _as_list(t.get("files"))]
         t["depends_on"] = [str(d) for d in _as_list(t.get("depends_on"))]
         t["wave"] = _wave_of(t)
@@ -760,14 +820,25 @@ def _print_costs_summary():
     if not COSTS_PATH.exists():
         print("no cost ledger yet")
         return
-    recs = [json.loads(l) for l in COSTS_PATH.read_text().splitlines() if l.strip()]
+    recs = []
+    for line in COSTS_PATH.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a truncated line from a mid-write crash: skip it, never crash the summary
+        if isinstance(rec, dict):
+            recs.append(rec)
     if not recs:
         print("cost ledger empty")
         return
     n = len(recs)
-    tot = sum(r["total_cost_usd"] for r in recs)
-    avg_in = sum(r["total_input_tokens"] for r in recs) // n
-    avg_out = sum(r["total_output_tokens"] for r in recs) // n
+    # `... or 0` (not `.get(k, 0)`): a partial/legacy line can carry an explicit JSON null,
+    # which .get returns as None and sum()/// then crash on -- the exact case --costs tolerates.
+    tot = sum(r.get("total_cost_usd") or 0 for r in recs)
+    avg_in = sum(r.get("total_input_tokens") or 0 for r in recs) // n
+    avg_out = sum(r.get("total_output_tokens") or 0 for r in recs) // n
     print(f"{n} build orders  |  total ${tot:.2f}  |  avg ${tot / n:.3f}/order")
     print(f"avg tokens: {avg_in} in / {avg_out} out  |  ledger: {COSTS_PATH}")
 
@@ -1115,6 +1186,7 @@ Build context for autonomous coding agents on this Build Order.
 - Before you hand off, run the emitted gates: `assert-no-sentinel.py`, `check-ownership.py --agent "<you>"`, `check-contract-freeze.py`, `check-contracts-compile.py` (CI runs them too).
 - Resolve your DECISIONS.md items, then `python3 scripts/assert-no-sentinel.py` -- it fails while any sentinel survives.
 - Blocking-gate tests are pre-authored in `tests/gates/` -- run them, do NOT rewrite them (you cannot grade your own work).
+- `python3 scripts/selftest-gates.py` proves the gates have teeth (each fires on a broken fixture); if you weaken a gate it goes red -- do not "fix" it by neutering the gate.
 - `python3 scripts/check-ownership.py --agent "<your agent>" <changed files>` -- stay in your lane (one writer per file).
 - CI (`.github/workflows/seasar-gate.yml`) runs build-order + forced-stop + ownership + project verify as a REQUIRED check; a red gate blocks merge.
 - Build proceeds in waves; wait for the previous wave's gates before starting.
@@ -1182,7 +1254,27 @@ def _md_contract(c):
         out.append(f"- **source file:** `{c.get('source_path')}`")
     if c.get("source_lang"):
         out.append(f"- **language:** {c.get('source_lang')}")
+    if c.get("version"):
+        out.append(f"- **version:** {c.get('version')}")
     out.append(f"\n## Rationale\n{c.get('detail', '')}")
+    beh = c.get("behavior") or {}
+    if beh:
+        out.append("\n## Behavior (runtime semantics -- a type signature does not pin these down)")
+        for k in _BEHAVIOR_ASPECTS:
+            if beh.get(k):
+                out.append(f"- **{k}:** {beh[k]}")
+    iface = c.get("interface") or []
+    if iface:
+        out.append("\n## Interface (language-neutral IR -- `source` is one realization)")
+        for o in iface:
+            params = ", ".join((f"{p.get('name', '')}: {p['type']}" if p.get("type")
+                                else p.get("name", "")) for p in (o.get("params") or []))
+            sig = f"- `{o.get('op', '')}({params})`"
+            if o.get("returns"):
+                sig += f" -> {o['returns']}"
+            out.append(sig)
+            if o.get("errors"):
+                out.append(f"  - errors: {', '.join(o['errors'])}")
     src = c.get("source") or ""
     if src.strip():
         out.append(f"\n## Source (canonical -- IMPORT this, do not re-derive)\n"
@@ -1223,6 +1315,16 @@ def _md_work_order(wo, order=None):
     out.append("- Any file not in Allowed above.")
     out += [f"- `{p}` (a contract owned by another task -- propose a change, never edit)"
             for p in forbidden]
+    # The consumer-edge ripple, routed to this agent: contracts its tasks import, so a
+    # version bump on one is its signal to re-verify (not a silent break at the seam).
+    consumed = [c for c in (order.get("contracts") or [])
+                if any(i in _contract_consumers(order, c)[0] for i in my_ids)]
+    if consumed:
+        out.append("\n## Contracts you consume (re-verify if their version bumps)")
+        for c in consumed:
+            out.append("- `%s` v%s (owner %s) -- file `%s`"
+                       % (c.get("name", ""), c.get("version", "1.0.0"),
+                          c.get("owner_task", ""), c.get("source_path", "")))
     if my_decisions:
         out.append("\n## Decisions you must RESOLVE (no silent guesses)")
         for d in my_decisions:
@@ -1555,6 +1657,8 @@ jobs:
           python3 scripts/check-contract-freeze.py < /tmp/seasar_changed.txt
       - name: Contract source compiles (substance prober)
         run: python3 scripts/check-contracts-compile.py
+      - name: Gates have teeth (negative control -- no tautology gate)
+        run: python3 scripts/selftest-gates.py
       - name: Project verify (typecheck + tests + gate predicates)
         run: |
           if [ -f package.json ]; then
@@ -1582,6 +1686,31 @@ def _md_merge_order(order):
     return "\n".join(lines) + "\n"
 
 
+def _contract_consumers(order, c):
+    """The consumer-edge ripple for one contract: the consuming tasks (and their agents),
+    so a semver bump's blast radius is explicit and ROUTED -- not 'consumers re-verify' in
+    the abstract. Derived from the contract's explicit `consumers` UNION every task that
+    depends on its owner_task; the owner is never its own consumer. Returns (task_ids, agents),
+    both sorted and deduped."""
+    # Stringify every id at the comparison boundary: a model may emit int task ids while
+    # depends_on/consumers/owner_task land stringified (or vice versa), and a mixed str/int
+    # set both misses consumers AND crashes the final sorted(). One key type throughout.
+    tasks = {str(t.get("id")): t for t in (order.get("tasks") or [])
+             if isinstance(t, dict) and t.get("id")}
+    owner = str(c.get("owner_task")) if c.get("owner_task") is not None else None
+    declared = {str(x) for x in (c.get("consumers") or []) if str(x) in tasks}
+    derived = {tid for tid, t in tasks.items()
+               if owner and owner in [str(d) for d in (t.get("depends_on") or [])]}
+    consumer_ids = sorted((declared | derived) - {owner})
+    agent_of = {}
+    for wo in (order.get("work_orders") or []):
+        if isinstance(wo, dict) and wo.get("agent"):
+            for tid in (wo.get("task_ids") or []):
+                agent_of[str(tid)] = wo.get("agent")
+    agents = sorted({agent_of[t] for t in consumer_ids if t in agent_of})
+    return consumer_ids, agents
+
+
 def _md_contract_changes(order):
     """CONTRACT_CHANGES.md -- the async contract-change-request (CCR) ledger. Contracts are
     frozen and single-owner; a downstream agent that needs a change does NOT edit the file
@@ -1596,11 +1725,18 @@ def _md_contract_changes(order):
            "the build.\n",
            "## Open requests",
            "<!-- one per line: `CCR <contract-name>: <task> needs <field/behavior> -- <why>` -->\n",
-           "## Frozen contracts (owner / version)"]
+           "## Frozen contracts (owner / version / consumer ripple)"]
     for c in contracts:
         out.append("- `%s` -- owner %s, v%s, file `%s`"
                    % (c.get("name", ""), c.get("owner_task", "?"),
                       c.get("version", "1.0.0"), c.get("source_path", "")))
+        cons_ids, cons_agents = _contract_consumers(order, c)
+        if cons_ids:
+            who = ", ".join(cons_agents) if cons_agents else "(unassigned)"
+            out.append("  - on a version bump, re-verify: %s (tasks %s)"
+                       % (who, ", ".join(cons_ids)))
+        else:
+            out.append("  - no downstream consumers (leaf seam)")
     if not contracts:
         out.append("- (none)")
     return "\n".join(out) + "\n"
@@ -1732,6 +1868,158 @@ if __name__ == "__main__":
 '''
 
 
+# The negative control, emitted into every bundle: prove the OTHER gates have teeth.
+# A gate that cannot fail is decoration; this runs each one against a deliberately
+# broken fixture (must exit nonzero) AND a clean one (must exit 0), so a tautology gate
+# -- e.g. one quietly reduced to `exit 0` -- is caught at build time, not trusted on faith.
+_SELFTEST_GATES = r'''#!/usr/bin/env python3
+"""selftest-gates -- the negative control: prove the emitted gates have TEETH.
+
+A gate that cannot fail is not a gate, it is decoration. For every enforcement gate this
+bundle ships, run it against a deliberately BROKEN fixture (expect a nonzero exit -- the
+gate FIRES) and against a CLEAN fixture (expect exit 0 -- it passes legitimate work). If
+any gate fails to fire on its broken fixture, THIS script fails the build, so a tautology
+gate (e.g. one quietly reduced to `exit 0`) is caught here rather than trusted on faith.
+Run in CI alongside the gates: `python3 scripts/selftest-gates.py`.
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+# Assembled at runtime so this file does not itself contain a literal decision sentinel
+# (assert-no-sentinel walks the whole repo and would otherwise flag this script as one).
+_MARK = "SEASAR_" + "DECIDE_" + "D1"
+
+
+def _run(script, root, argv=(), stdin=None):
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, script), *argv],
+        input=stdin, capture_output=True, text=True,
+        env=dict(os.environ, SEASAR_ROOT=root), cwd=root,
+    )
+
+
+def _write(root, rel, data):
+    p = os.path.join(root, rel)
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(data)
+
+
+def _sentinel_broken(root):
+    _write(root, "build-order.json", json.dumps({"decisions": [{"id": "D1"}]}))
+    _write(root, "notes.txt", "open question -- " + _MARK + "\n")
+
+
+def _sentinel_clean(root):
+    _write(root, "build-order.json", json.dumps({"decisions": [{"id": "D1"}]}))
+    _write(root, "DECISIONS.md", "RESOLVED_D1: picked option A\n")
+
+
+def _compile_broken(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [
+        {"name": "C", "source_lang": "python", "source_path": "c.py", "source": "def ("}]}))
+    _write(root, "c.py", "def (\n")
+
+
+def _compile_clean(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [
+        {"name": "C", "source_lang": "python", "source_path": "c.py", "source": "x = 1\n"}]}))
+    _write(root, "c.py", "x = 1\n")
+
+
+_ORDER_2LANE = {
+    "tasks": [{"id": "T1", "files": ["a.py"]}, {"id": "T2", "files": ["b.py"]}],
+    "work_orders": [{"agent": "A", "task_ids": ["T1"]}, {"agent": "B", "task_ids": ["T2"]}],
+}
+
+
+def _ownership(root):
+    _write(root, "build-order.json", json.dumps(_ORDER_2LANE))
+
+
+def _freeze_broken(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [{"name": "C", "source_path": "c.py"}]}))
+    _write(root, "CONTRACT_CHANGES.md", "# Contract changes\n")
+
+
+def _freeze_clean(root):
+    _write(root, "build-order.json", json.dumps({"contracts": [{"name": "C", "source_path": "c.py"}]}))
+    _write(root, "CONTRACT_CHANGES.md", "# Contract changes\n\nCCR C: bumped to v2\n")
+
+
+# (label, script, broken-spec, clean-spec); each spec = (build_fn, argv, stdin).
+CASES = [
+    ("assert-no-sentinel (forced stop)", "assert-no-sentinel.py",
+     (_sentinel_broken, (), None), (_sentinel_clean, (), None)),
+    ("check-contracts-compile (substance prober)", "check-contracts-compile.py",
+     (_compile_broken, (), None), (_compile_clean, (), None)),
+    ("check-ownership --lanes (one writer per file)", "check-ownership.py",
+     (_ownership, ("--lanes",), "a.py\nb.py\n"), (_ownership, ("--lanes",), "a.py\n")),
+    ("check-contract-freeze (no silent contract change)", "check-contract-freeze.py",
+     (_freeze_broken, (), "c.py\n"), (_freeze_clean, (), "c.py\n")),
+]
+
+
+def _check(label, script, broken, clean):
+    problems = []
+    for kind, spec, expect_fail in (("broken", broken, True), ("clean", clean, False)):
+        build_fn, argv, stdin = spec
+        with tempfile.TemporaryDirectory() as root:
+            build_fn(root)
+            r = _run(script, root, argv, stdin)
+        fired = r.returncode != 0
+        if fired != expect_fail:
+            want = "FAIL (nonzero)" if expect_fail else "PASS (zero)"
+            problems.append("  %s on the %s fixture: expected %s, got exit %d -- %s"
+                            % (script, kind, want, r.returncode,
+                               (r.stdout + r.stderr).strip().replace("\n", " ")[:300]))
+    return problems
+
+
+def main():
+    missing = [s for _, s, _, _ in CASES if not os.path.exists(os.path.join(HERE, s))]
+    if missing:
+        print("selftest-gates: gate script(s) missing from scripts/: "
+              + ", ".join(sorted(set(missing))), file=sys.stderr)
+        return 1
+    # Coverage completeness: every emitted enforcement gate (assert-*/check-*) must have a
+    # negative-control CASE, or a future gate could ship with NO teeth-check while this
+    # script stays green -- exactly the blind spot the negative control exists to prevent.
+    covered = {s for _, s, _, _ in CASES}
+    emitted = {os.path.basename(p) for pat in ("assert-*.py", "check-*.py")
+               for p in glob.glob(os.path.join(HERE, pat))}
+    uncovered = sorted(emitted - covered)
+    if uncovered:
+        print("selftest-gates: emitted gate(s) with NO negative-control coverage "
+              "(add a CASES entry): " + ", ".join(uncovered), file=sys.stderr)
+        return 1
+    all_problems = []
+    for label, script, broken, clean in CASES:
+        probs = _check(label, script, broken, clean)
+        print("[%s] %s" % ("TEETH" if not probs else "NO TEETH", label))
+        all_problems.extend(probs)
+    if all_problems:
+        print("\nGATE SELF-TEST FAILED -- a gate did not behave as a gate:")
+        for p in all_problems:
+            print(p)
+        return 1
+    print("\nOK: all %d gates fire on broken input and pass clean input (negative control)."
+          % len(CASES))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
 def _safe_bundle_path(raw):
     """Normalize a model-generated path for the bundle zip; return None if it would
     escape the root (Zip-Slip). Cross-platform: backslashes are normalized first so a
@@ -1804,12 +2092,27 @@ def build_bundle(order):
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
         put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
         put(f"{root}/scripts/check-contracts-compile.py", _CHECK_CONTRACTS_COMPILE)
+        # The negative control: a gate that ships proving the OTHER gates have teeth.
+        put(f"{root}/scripts/selftest-gates.py", _SELFTEST_GATES)
         put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
         put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
+            # The language-neutral IR: the seam's shape + semantics as structured data, so
+            # the contract is codegen-/diff-/tooling-consumable independent of source_lang
+            # (the literal `source` below is one realization of it).
+            # consumers = the SAME unioned blast radius the human docs route (declared
+            # UNION every task depending on owner_task), not the declared-only field, so
+            # the machine IR and CONTRACT_CHANGES.md/work-orders never disagree on ripple.
+            put(f"{root}/contracts/{name}.contract.json", json.dumps({
+                "name": c.get("name"), "kind": c.get("kind"), "version": c.get("version"),
+                "owner_task": c.get("owner_task"), "source_lang": c.get("source_lang"),
+                "source_path": c.get("source_path"),
+                "consumers": _contract_consumers(order, c)[0],
+                "behavior": c.get("behavior") or {}, "interface": c.get("interface") or [],
+            }, indent=2) + "\n")
             # Contracts ARE source: emit the literal compilable file agents IMPORT.
             src = c.get("source") or ""
             sp = _safe_bundle_path(c.get("source_path"))
