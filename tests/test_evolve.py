@@ -100,6 +100,9 @@ class FunnelGateTest(EvolveBase):
 
     def test_seed_bypasses_fetch_and_mapper(self):
         ev.ensure_seeds()
+        # Pin the seed to the plain-nudge funnel this test is named for: minor
+        # levers now auto-draft (AutoDraftMinorTest covers that path directly).
+        ev._update_lever("EV-001", magnitude="major")
         with mock.patch.object(ev, "_collect_new",
                                side_effect=AssertionError("fetch must not run")), \
              mock.patch.object(ev, "_map_levers",
