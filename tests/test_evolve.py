@@ -11,6 +11,7 @@ Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -587,6 +588,48 @@ class AutoDraftMinorTest(EvolveBase):
         self.assertEqual(ev._peek_pending(), "EV-920")
         self.assertTrue(lever["nudge_delivered"])
 
+    def test_auto_draft_send_holds_gate_until_delivered(self):
+        # The drafted nudge and the SKIP gate must be ordered: a user reply cannot
+        # clear the staged lever while Telegram delivery is still in flight.
+        self._lever(id="EV-937", feature="race_auto", magnitude="minor", status="new")
+        send_started = threading.Event()
+        finish_send = threading.Event()
+        decline_started = threading.Event()
+        decline_done = threading.Event()
+        decline_reply = []
+
+        def blocking_send(text):
+            send_started.set()
+            finish_send.wait(2)
+            return True
+
+        def run_decline():
+            decline_started.set()
+            decline_reply.append(ev.decline_pending())
+            decline_done.set()
+
+        with mock.patch.object(ev, "_send", side_effect=blocking_send), \
+             mock.patch.object(ev, "_propose", return_value=(
+                 "Drafted a fix and opened http://pr/312 for your review.",
+                 {"pr_number": 312, "url": "http://pr/312"})):
+            offer_thread = threading.Thread(target=lambda: ev._offer("EV-937"))
+            decline_thread = threading.Thread(target=run_decline)
+            try:
+                offer_thread.start()
+                self.assertTrue(send_started.wait(1))
+                decline_thread.start()
+                self.assertTrue(decline_started.wait(1))
+                decline_waited = not decline_done.wait(0.05)
+            finally:
+                finish_send.set()
+                offer_thread.join(1)
+                if decline_thread.ident is not None:
+                    decline_thread.join(1)
+        self.assertTrue(decline_waited)
+        self.assertEqual(len(decline_reply), 1)
+        self.assertIn("Dropped", decline_reply[0])
+        self.assertEqual(ev.get_lever("EV-937")["status"], "rejected")
+
     def test_auto_draft_claims_the_lever_like_accept_pending(self):
         # Bugbot #87 HIGH: _offer_auto_draft called _run_accept without setting
         # claimed_at / registering the active claim the way accept_pending does.
@@ -866,6 +909,45 @@ class AutoDraftMinorTest(EvolveBase):
         lever = ev.get_lever("EV-935")
         self.assertEqual(lever["status"], "rejected")
         self.assertIsNotNone(lever["muted_until"])
+
+    def test_redelivered_nudge_send_holds_gate_until_delivered(self):
+        self._lever(id="EV-938", feature="race_redeliver", magnitude="minor",
+                    status="pr_open", pr_number=313, pr_url="http://pr/313",
+                    auto_drafted=True)
+        send_started = threading.Event()
+        finish_send = threading.Event()
+        decline_started = threading.Event()
+        decline_done = threading.Event()
+        decline_reply = []
+
+        def blocking_send(text):
+            send_started.set()
+            finish_send.wait(2)
+            return True
+
+        def run_decline():
+            decline_started.set()
+            decline_reply.append(ev.decline_pending())
+            decline_done.set()
+
+        with mock.patch.object(ev, "_send", side_effect=blocking_send):
+            redeliver_thread = threading.Thread(target=ev._redeliver_stranded_nudges)
+            decline_thread = threading.Thread(target=run_decline)
+            try:
+                redeliver_thread.start()
+                self.assertTrue(send_started.wait(1))
+                decline_thread.start()
+                self.assertTrue(decline_started.wait(1))
+                decline_waited = not decline_done.wait(0.05)
+            finally:
+                finish_send.set()
+                redeliver_thread.join(1)
+                if decline_thread.ident is not None:
+                    decline_thread.join(1)
+        self.assertTrue(decline_waited)
+        self.assertEqual(len(decline_reply), 1)
+        self.assertIn("Dropped", decline_reply[0])
+        self.assertEqual(ev.get_lever("EV-938")["status"], "rejected")
 
     def test_stranded_auto_draft_nudge_is_redelivered_next_scan(self):
         # Bugbot #87 MED: a PR opened but the nudge send failed -- the owner must

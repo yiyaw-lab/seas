@@ -462,15 +462,17 @@ def _offer_auto_draft(lever_id, lever):
         # to find. Staging a pr_open lever also lets a stray EVOLVE reach it
         # (accept_pending's pr_open branch replies with the existing link instead
         # of drafting again) instead of "Nothing staged to evolve."
-        _stage(lever_id)
-        sent = _send(_drafted_nudge_text(lever, info.get("url", "(no url)")))
-        if not sent:
-            log.warning("evolve: auto-draft nudge delivery failed for %s "
-                        "(PR #%s already open)", lever_id, info.get("pr_number"))
-            _update_lever(lever_id, nudge_delivered=False)
-            return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
-        _record_nudge()
-        _update_lever(lever_id, nudge_delivered=True)
+        with _GATE_LOCK:
+            _stage(lever_id)
+            sent = _send(_drafted_nudge_text(lever, info.get("url", "(no url)")))
+            if not sent:
+                log.warning("evolve: auto-draft nudge delivery failed for %s "
+                            "(PR #%s already open)", lever_id, info.get("pr_number"))
+                _update_lever(lever_id, nudge_delivered=False)
+                return {"acted": False, "reason": "nudge delivery failed",
+                        "lever": lever_id}
+            _record_nudge()
+            _update_lever(lever_id, nudge_delivered=True)
         log.info("evolve: auto-drafted + nudged %s (%s) -> PR #%s",
                  lever_id, lever.get("feature"), info.get("pr_number"))
         return {"acted": True, "lever": lever_id, "feature": lever.get("feature"),
@@ -550,7 +552,7 @@ def _redeliver_stranded_nudges():
 
     The nudge promises "reply SKIP to drop it", so the lever must hold the
     staging slot when the send goes out (the crash window can predate
-    _offer_auto_draft's own _stage). Staged under the gate lock, and NEVER by
+    _offer_auto_draft's own _stage). Staged/sent under the gate lock, and NEVER by
     clobbering a different staged lever -- the slot holds one conversation, and
     a SKIP after this send would decline whatever is staged; if another lever
     owns the slot, the whole redelivery defers to a later scan (nudge_delivered
@@ -566,14 +568,14 @@ def _redeliver_stranded_nudges():
                              "(%s holds the staging slot)", lid, staged)
                     continue
                 _stage(lid)
-            url = l.get("pr_url") or "(no url)"
-            if _send(_drafted_nudge_text(l, url)):
-                _update_lever(lid, nudge_delivered=True)
-                log.info("evolve: redelivered stranded auto-draft nudge for %s",
-                         lid)
-            else:
-                log.warning("evolve: auto-draft nudge redelivery failed again for %s",
-                            lid)
+                url = l.get("pr_url") or "(no url)"
+                if _send(_drafted_nudge_text(l, url)):
+                    _update_lever(lid, nudge_delivered=True)
+                    log.info("evolve: redelivered stranded auto-draft nudge for %s",
+                             lid)
+                else:
+                    log.warning("evolve: auto-draft nudge redelivery failed again for %s",
+                                lid)
 
 
 def _match_item(items, source_title):
