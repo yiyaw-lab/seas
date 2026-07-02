@@ -47,6 +47,12 @@ class EvolveBase(unittest.TestCase):
         self.enterContext(mock.patch.object(argo_watch, "SEEN_PATH", base / "watch_seen.json"))
         self.sent = []
         self.enterContext(mock.patch.object(ev, "_send", lambda t: self.sent.append(t) or True))
+        # Hermetic default for minor levers' auto-draft path (_offer -> _run_accept
+        # -> _propose): a clean, deterministic failure so no test that isn't
+        # exercising propose behavior itself touches the network/model. Tests that
+        # care about the propose outcome override this inside their own `with`.
+        self.enterContext(mock.patch.object(
+            ev, "_propose", lambda payload: ("no propose stub for this test", None)))
 
     def _lever(self, **over):
         entry = {
@@ -94,6 +100,9 @@ class FunnelGateTest(EvolveBase):
 
     def test_seed_bypasses_fetch_and_mapper(self):
         ev.ensure_seeds()
+        # Pin the seed to the plain-nudge funnel this test is named for: minor
+        # levers now auto-draft (AutoDraftMinorTest covers that path directly).
+        ev._update_lever("EV-001", magnitude="major")
         with mock.patch.object(ev, "_collect_new",
                                side_effect=AssertionError("fetch must not run")), \
              mock.patch.object(ev, "_map_levers",
@@ -518,6 +527,142 @@ class GateCommandsTest(EvolveBase):
             ev.accept_pending()
         self.assertEqual(membership, [True])      # shielded while working
         self.assertNotIn("EV-911", ev._ACTIVE_CLAIMS)  # released after
+
+
+class AutoDraftMinorTest(EvolveBase):
+    """Low-risk (magnitude 'minor') levers skip the EVOLVE/SKIP ask: _offer drafts
+    the PR itself (draft=True) and nudges with the link -- human veto is closing or
+    reviewing the draft, not answering a permission question. Higher-risk (major or
+    missing magnitude) levers are untouched: same EVOLVE/SKIP ask as always."""
+
+    def test_minor_lever_auto_drafts_and_nudges_the_link_no_evolve_ask(self):
+        self._lever(id="EV-920", feature="auto_one", magnitude="minor", status="new")
+        captured = {}
+
+        def fake_propose(payload):
+            captured.update(payload)
+            return ("Drafted a fix and opened http://pr/301 for your review.",
+                    {"pr_number": 301, "url": "http://pr/301"})
+
+        with mock.patch.object(ev, "_propose", side_effect=fake_propose):
+            res = ev._offer("EV-920")
+        self.assertTrue(res["acted"])
+        self.assertTrue(res["auto_drafted"])
+        self.assertEqual(res["pr_number"], 301)
+        self.assertTrue(captured["draft"])           # draft=True reached the payload
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("http://pr/301", self.sent[0])  # the link, not a permission ask
+        self.assertNotIn("EVOLVE", self.sent[0])
+        self.assertIn("SKIP", self.sent[0])            # veto path still named
+        lever = ev.get_lever("EV-920")
+        self.assertEqual(lever["status"], "pr_open")
+        self.assertEqual(lever["pr_number"], 301)
+        self.assertTrue(lever["auto_drafted"])
+        self.assertFalse(ev.has_pending())              # nothing staged; no ask pending
+
+    def test_major_lever_never_auto_drafts_nudge_unchanged(self):
+        self._lever(id="EV-921", feature="big_one", magnitude="major", status="new")
+        with mock.patch.object(ev, "_propose",
+                               side_effect=AssertionError("major must not auto-propose")), \
+             mock.patch.object(ev, "_rehearse_lever",
+                               side_effect=AssertionError("major must not rehearse "
+                                                          "before EVOLVE")):
+            res = ev._offer("EV-921")
+        self.assertTrue(res["acted"])
+        self.assertNotIn("auto_drafted", res)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("EVOLVE", self.sent[0])
+        self.assertIn("SKIP", self.sent[0])
+        self.assertNotIn("drafted this one for you", self.sent[0])
+        lever = ev.get_lever("EV-921")
+        self.assertEqual(lever["status"], "nudged")
+        self.assertIsNone(lever["pr_number"])
+        self.assertTrue(ev.has_pending())               # staged for the manual gate
+        self.assertEqual(ev._peek_pending(), "EV-921")
+
+    def test_missing_magnitude_behaves_like_today_no_auto_draft(self):
+        # magnitude absent (not "minor"): must take the plain-nudge path, same as a
+        # major lever -- only an explicit "minor" earns the auto-draft.
+        self._lever(id="EV-922", feature="unlabeled_one", status="new")
+        data = ev._load_ledger()
+        lever = next(l for l in data["levers"] if l["id"] == "EV-922")
+        del lever["magnitude"]
+        ev._save_ledger(data)
+        with mock.patch.object(ev, "_propose",
+                               side_effect=AssertionError("must not auto-propose")):
+            res = ev._offer("EV-922")
+        self.assertTrue(res["acted"])
+        self.assertNotIn("auto_drafted", res)
+        self.assertIn("EVOLVE", self.sent[0])
+        self.assertEqual(ev.get_lever("EV-922")["status"], "nudged")
+
+    def test_minor_lever_propose_failure_falls_back_to_evolve_ask_with_blocker(self):
+        self._lever(id="EV-923", feature="flaky_one", magnitude="minor", status="new")
+        blocker = "branch already exists"
+        with mock.patch.object(ev, "_propose", return_value=(
+                f"I drafted edits but they didn't resolve cleanly: {blocker}", None)):
+            res = ev._offer("EV-923")
+        self.assertTrue(res["acted"])
+        self.assertFalse(res["auto_drafted"])
+        self.assertEqual(res["fail_reason"],
+                         f"I drafted edits but they didn't resolve cleanly: {blocker}")
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("EVOLVE", self.sent[0])            # fallback ask still offered
+        self.assertIn("SKIP", self.sent[0])
+        self.assertIn(blocker, self.sent[0])              # names the blocker
+        lever = ev.get_lever("EV-923")
+        # Left actionable via the manual path: nudged + staged, not "failed"/muted --
+        # that penalty is for a user-initiated EVOLVE that fails, not an unsolicited
+        # auto-draft attempt the user never asked for.
+        self.assertEqual(lever["status"], "nudged")
+        self.assertIsNone(lever["muted_until"])
+        self.assertIn(blocker, lever["fail_reason"])
+        self.assertTrue(ev.has_pending())
+        self.assertEqual(ev._peek_pending(), "EV-923")
+        # The manual path still works from here: EVOLVE retries the propose.
+        with mock.patch.object(ev, "_propose", return_value=(
+                "Drafted a fix and opened http://pr/302 for your review.",
+                {"pr_number": 302, "url": "http://pr/302"})):
+            text = ev.accept_pending()
+        self.assertIn("http://pr/302", text)
+        self.assertEqual(ev.get_lever("EV-923")["status"], "pr_open")
+
+    def test_ledger_records_auto_drafted_true_on_success(self):
+        self._lever(id="EV-924", feature="ledger_one", magnitude="minor", status="new")
+        with mock.patch.object(ev, "_propose", return_value=(
+                "Drafted a fix and opened http://pr/303 for your review.",
+                {"pr_number": 303, "url": "http://pr/303"})):
+            ev._offer("EV-924")
+        lever = ev.get_lever("EV-924")
+        self.assertIs(lever["auto_drafted"], True)
+        self.assertEqual(lever["pr_number"], 303)
+        self.assertEqual(lever["status"], "pr_open")
+
+    def test_ledger_records_auto_drafted_false_on_manual_accept(self):
+        # A manual EVOLVE (major lever, or a minor lever retried after a failed
+        # auto-draft) must not be mistaken for an auto-drafted one downstream.
+        self._lever(id="EV-925", feature="manual_one", magnitude="major", status="nudged")
+        ev._stage("EV-925")
+        with mock.patch.object(ev, "_rehearse_lever", return_value=("PROCEED", "ok")), \
+             mock.patch.object(ev, "_propose", return_value=(
+                 "Drafted a fix and opened http://pr/304 for your review.",
+                 {"pr_number": 304, "url": "http://pr/304"})):
+            ev.accept_pending()
+        lever = ev.get_lever("EV-925")
+        self.assertIs(lever["auto_drafted"], False)
+
+    def test_scan_funnel_routes_a_minor_seed_through_auto_draft(self):
+        # The task's real entry point: scan() -> _offer(), not a direct _offer call.
+        ev.ensure_seeds()  # first seed (structured_outputs) is magnitude "minor"
+        with mock.patch.object(ev, "_propose", return_value=(
+                "Drafted a fix and opened http://pr/305 for your review.",
+                {"pr_number": 305, "url": "http://pr/305"})):
+            res = ev.scan()
+        self.assertTrue(res["acted"])
+        self.assertTrue(res["auto_drafted"])
+        self.assertIn("http://pr/305", self.sent[0])
+        self.assertNotIn("EVOLVE", self.sent[0])
+        self.assertFalse(ev.has_pending())
 
 
 class SyncOutcomesTest(EvolveBase):
