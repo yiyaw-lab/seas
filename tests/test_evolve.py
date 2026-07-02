@@ -782,8 +782,54 @@ class AutoDraftMinorTest(EvolveBase):
             text = ev.accept_pending()
         self.assertIn("already drafted", text)
         self.assertIn("http://pr/307", text)
-        self.assertFalse(ev.has_pending())
+        # Still staged (Bugbot #88): the reply just re-offered SKIP, so the
+        # EVOLVE detour must not have consumed the staging slot.
+        self.assertTrue(ev.has_pending())
         self.assertEqual(ev.get_lever("EV-930")["status"], "pr_open")
+
+    def test_evolve_then_skip_after_auto_draft_still_declines(self):
+        # Bugbot #88: accept_pending's peek-clear consumed the staging slot BEFORE
+        # the pr_open early return -- so an EVOLVE followed by SKIP found nothing
+        # staged, contradicting both the drafted nudge and the "already drafted"
+        # reply (which explicitly re-offers SKIP). The pr_open branch must leave
+        # the lever staged.
+        self._lever(id="EV-933", feature="evolve_then_skip", magnitude="minor",
+                    status="new")
+        with mock.patch.object(ev, "_propose", return_value=(
+                "Drafted a fix and opened http://pr/309 for your review.",
+                {"pr_number": 309, "url": "http://pr/309"})):
+            ev._offer("EV-933")
+        text = ev.accept_pending()
+        self.assertIn("already drafted", text)
+        self.assertTrue(ev.has_pending())               # staging survived EVOLVE
+        text = ev.decline_pending()
+        self.assertIn("Dropped", text)
+        self.assertFalse(ev.has_pending())
+        lever = ev.get_lever("EV-933")
+        self.assertEqual(lever["status"], "rejected")
+        self.assertIsNotNone(lever["muted_until"])
+
+    def test_unset_nudge_delivered_counts_as_stranded(self):
+        # Bugbot #88: the redelivery sweep matched only nudge_delivered == False;
+        # a crash/restart between the PR opening and the first send attempt leaves
+        # the field UNSET -- same stranding, never redelivered. Absent must count
+        # as stranded; only an explicit True (a confirmed send) excludes a lever.
+        self._lever(id="EV-934", feature="crash_before_send", magnitude="minor",
+                    status="pr_open", pr_number=310, pr_url="http://pr/310",
+                    auto_drafted=True)  # no nudge_delivered key at all
+        # Nothing is staged here (the crash can predate _stage), so the funnel
+        # runs through its gates; an empty fetch keeps the scan otherwise inert.
+        with mock.patch.object(ev, "_collect_new", return_value=[]), \
+             mock.patch.object(ev, "_map_levers",
+                               side_effect=AssertionError("mapper must not run")):
+            ev.scan()
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("http://pr/310", self.sent[0])
+        self.assertIs(ev.get_lever("EV-934")["nudge_delivered"], True)
+        # Redelivered ONCE: a second scan must not re-send a delivered nudge.
+        with mock.patch.object(ev, "_collect_new", return_value=[]):
+            ev.scan()
+        self.assertEqual(len(self.sent), 1)
 
     def test_stranded_auto_draft_nudge_is_redelivered_next_scan(self):
         # Bugbot #87 MED: a PR opened but the nudge send failed -- the owner must

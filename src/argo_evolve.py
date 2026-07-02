@@ -538,15 +538,18 @@ def _sweep_stale_claims():
 def _redeliver_stranded_nudges():
     """An auto-drafted lever whose 'i drafted this one for you' nudge failed to
     send (Telegram outage right after a successful draft) is left pr_open with
-    nudge_delivered False -- the PR exists, but the owner was never told. Re-send
-    on every scan until it lands; free (no model call, no budget draw -- this is
-    redelivery of an already-decided nudge, not a new one) and cheap (an empty
-    ledger scan on every other run). No new scheduler wiring: rides whichever
-    funnel (frontier or gaps) happens to run next, mirroring the stale-claim
-    sweep's placement right before the gates."""
+    nudge_delivered False -- the PR exists, but the owner was never told. A crash
+    or restart BETWEEN the PR opening and the first send attempt leaves the field
+    unset entirely, which is the same stranding, so absent counts as stranded
+    too: only an explicit True (set on a confirmed send) excludes a lever.
+    Re-send on every scan until it lands; free (no model call, no budget draw --
+    this is redelivery of an already-decided nudge, not a new one) and cheap (an
+    empty ledger scan on every other run). No new scheduler wiring: rides
+    whichever funnel (frontier or gaps) happens to run next, mirroring the
+    stale-claim sweep's placement right before the gates."""
     for l in _load_ledger()["levers"]:
         if (l.get("status") == "pr_open" and l.get("auto_drafted")
-                and l.get("nudge_delivered") is False):
+                and not l.get("nudge_delivered")):
             url = l.get("pr_url") or "(no url)"
             if _send(_drafted_nudge_text(l, url)):
                 _update_lever(l["id"], nudge_delivered=True)
@@ -893,7 +896,13 @@ def accept_pending():
         if lever.get("status") == "pr_open":
             # An auto-drafted lever is staged so SKIP can drop it, but EVOLVE
             # landing on it must NOT re-run _run_accept -- the PR already exists;
-            # doing so again would open a duplicate. Reply with the existing link.
+            # doing so again would open a duplicate. Reply with the existing link,
+            # and RE-STAGE the lever (the peek-clear above already consumed the
+            # slot): this reply and the drafted nudge both promise SKIP works, so
+            # the staging must survive the EVOLVE detour. Safe under the gate
+            # lock, and it can't clobber anyone else -- this lever WAS the staged
+            # one a moment ago.
+            _stage(lid)
             link = lever.get("pr_url") or f"(PR #{lever.get('pr_number')})"
             return (f"already drafted: {link} -- reply SKIP if you want me to drop "
                     "it, otherwise just review it.")
