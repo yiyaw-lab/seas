@@ -394,9 +394,19 @@ def _nudge_text(lever):
               "i can't merge anything myself.")
 
 
+def _drafted_nudge_text(lever, url):
+    return (f"i drafted this one for you (draft PR, safe to close): {url} -- "
+            f"{lever.get('feature')}: {lever.get('lever')} "
+            f"expected benefit: {lever.get('expected_benefit')} "
+            "reply SKIP to drop it.")
+
+
 def _offer(lever_id):
-    """Stage one lever behind the EVOLVE/SKIP gate and send the nudge. Seeds the
-    self-belief at nudge time (low confidence; it must earn its way up)."""
+    """Stage one lever behind the EVOLVE/SKIP gate and send the nudge -- unless it's
+    a low-risk (magnitude 'minor') lever, in which case draft the PR myself and wake
+    the owner to a reviewable link instead of a permission question (human veto =
+    closing/reviewing the draft). Seeds the self-belief at nudge time (low
+    confidence; it must earn its way up)."""
     lever = get_lever(lever_id)
     if lever is None:
         return {"acted": False, "reason": "lever missing"}
@@ -407,6 +417,9 @@ def _offer(lever_id):
     # Persist the belief id before the send so a delivery-failure retry reuses it
     # instead of minting a duplicate belief.
     _update_lever(lever_id, self_belief_id=bid)
+    lever["self_belief_id"] = bid
+    if lever.get("magnitude") == "minor":
+        return _offer_auto_draft(lever_id, lever)
     sent = _send(_nudge_text(lever))
     if not sent:
         log.warning("evolve: nudge delivery failed for %s; will retry", lever_id)
@@ -418,6 +431,49 @@ def _offer(lever_id):
     _update_lever(lever_id, status="nudged", nudged_at=_now_iso())
     log.info("evolve: staged + nudged %s (%s)", lever_id, lever.get("feature"))
     return {"acted": True, "lever": lever_id, "feature": lever.get("feature")}
+
+
+def _offer_auto_draft(lever_id, lever):
+    """The low-risk path: draft the PR through the same accept machinery EVOLVE
+    uses (draft=True), then nudge with the link instead of asking permission. A
+    failed draft falls back to today's plain EVOLVE/SKIP ask, with the blocker
+    named, and leaves the lever nudged/staged so the manual path still works --
+    _run_accept's own failure marking (status 'failed' + a week's mute) is for the
+    user-initiated retry case, so it's undone here before re-staging."""
+    text, info = _run_accept(lever_id, lever, draft=True, return_info=True)
+    if info:
+        sent = _send(_drafted_nudge_text(lever, info.get("url", "(no url)")))
+        if not sent:
+            log.warning("evolve: auto-draft nudge delivery failed for %s "
+                        "(PR #%s already open)", lever_id, info.get("pr_number"))
+            return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
+        _record_nudge()
+        log.info("evolve: auto-drafted + nudged %s (%s) -> PR #%s",
+                 lever_id, lever.get("feature"), info.get("pr_number"))
+        return {"acted": True, "lever": lever_id, "feature": lever.get("feature"),
+                "auto_drafted": True, "pr_number": info.get("pr_number")}
+    # Draft failed: _run_accept already recorded fail_reason on the lever (and set
+    # status="failed" + a week's mute -- that penalty is for a user-initiated EVOLVE
+    # that fails). Fall back to the normal ask so a human can still say EVOLVE; the
+    # status/nudged_at update below overwrites "failed", and muted_until=None undoes
+    # the mute so the funnel doesn't skip this feature for a week over an auto-draft
+    # attempt the user never asked for.
+    fail_reason = (get_lever(lever_id) or {}).get("fail_reason") or text or "unknown error"
+    nudge = _nudge_text(lever) + f" (i tried to draft it myself first but hit: {fail_reason})"
+    sent = _send(nudge)
+    if not sent:
+        log.warning("evolve: nudge delivery failed for %s; will retry", lever_id)
+        # nudge-ready (not "failed") so the next scan's GATE 3 retries the send --
+        # mirrors the non-auto delivery-failure branch above.
+        _update_lever(lever_id, status="nudge-ready", muted_until=None)
+        return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
+    _stage(lever_id)
+    _record_nudge()
+    _update_lever(lever_id, status="nudged", muted_until=None, nudged_at=_now_iso())
+    log.info("evolve: staged + nudged %s (%s) after a failed auto-draft",
+             lever_id, lever.get("feature"))
+    return {"acted": True, "lever": lever_id, "feature": lever.get("feature"),
+            "auto_drafted": False, "fail_reason": fail_reason}
 
 
 # --- the scan funnel (free gates before the paid one) ---------------------------
@@ -797,10 +853,17 @@ def accept_pending():
         _ACTIVE_CLAIMS.discard(lid)
 
 
-def _run_accept(lid, lever):
+def _run_accept(lid, lever, draft=False, return_info=False):
     """The slow half of EVOLVE (rehearse, belief + prediction, propose). Runs
     outside the gate lock; _ACTIVE_CLAIMS shields the claim from the stale sweep
-    for however long this takes."""
+    for however long this takes. draft=True (the auto-draft path for low-risk
+    levers -- see _offer) opens the PR as a GitHub draft instead of a normal PR;
+    everything else about the path is identical. With return_info=True, returns
+    (text, info_or_None) so the caller learns the PR url directly, mirroring
+    _run_propose_fix's own return_info seam; default False keeps accept_pending's
+    plain-string contract (webhook texts it straight to the user) unchanged."""
+    def _done(text, info=None):
+        return (text, info) if return_info else text
     # Major levers must survive the debate first -- the same gate user projects get.
     if lever.get("magnitude") == "major":
         verdict, notes = _rehearse_lever(lever)
@@ -808,8 +871,8 @@ def _run_accept(lid, lever):
             # Infrastructure failure: put it back exactly as staged so EVOLVE retries.
             _update_lever(lid, status="nudged")
             _stage(lid)
-            return (f"I couldn't run the rehearsal ({notes}). The lever is still "
-                    "staged; reply EVOLVE to retry.")
+            return _done(f"I couldn't run the rehearsal ({notes}). The lever is still "
+                        "staged; reply EVOLVE to retry.")
         _update_lever(lid, rehearse={"verdict": verdict, "notes": notes[:500]})
         if verdict == "KILL":
             _update_lever(lid, status="killed",
@@ -818,8 +881,8 @@ def _run_accept(lid, lever):
             if bid:
                 argo_self.add_evidence(bid, f"rehearsal killed it: {notes[:160]}",
                                        supports=False)
-            return ("I argued with myself about it first and the judge said no. "
-                    f"{notes[:300]} Dropping it for a couple of months.")
+            return _done("I argued with myself about it first and the judge said no. "
+                        f"{notes[:300]} Dropping it for a couple of months.")
     # Adopted: earn a world-model belief, and a dated prediction when scorable.
     wm_id = world_model.add_belief(
         f"Adopting {lever.get('feature')} improves Argo: "
@@ -848,6 +911,7 @@ def _run_accept(lid, lever):
         "belief_id": lever.get("self_belief_id"),
         "incident_key": None,  # not failure-driven; safe for verify/confirm as-is
         "kind": "evolution",
+        "draft": draft,
     }
     try:
         text, info = _propose(payload)
@@ -861,11 +925,11 @@ def _run_accept(lid, lever):
         # this is a ledger field, not a log.
         _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED),
                       fail_reason=(text or "propose returned no PR info")[:300])
-        return text or ("I tried to draft the upgrade PR but hit an error before "
-                        "it opened. I'll let this one rest a week.")
+        return _done(text or ("I tried to draft the upgrade PR but hit an error before "
+                              "it opened. I'll let this one rest a week."))
     _ensure_proposal_row(info, lever.get("self_belief_id"))
-    _update_lever(lid, status="pr_open", pr_number=info["pr_number"])
-    return text
+    _update_lever(lid, status="pr_open", pr_number=info["pr_number"], auto_drafted=draft)
+    return _done(text, info)
 
 
 def _ensure_proposal_row(info, belief_id):
