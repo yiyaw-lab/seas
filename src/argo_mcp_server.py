@@ -1868,6 +1868,41 @@ def _read_base_file(path):
         return None
 
 
+# Total character budget for the files shown to the authoring model, divided across
+# however many suspected files there are (see _budget_files_for_prompt). Replaces a
+# global post-json.dumps truncation that silently cut off whichever files landed last
+# in the dict -- their tails were invisible to the model, so any 'old' anchor it drafted
+# against them matched 0 times in _resolve_edits. A per-file split means EVERY suspected
+# file gets shown, even if truncated, and a truncation is a visible marker, not silence.
+AUTHOR_FILES_CHAR_BUDGET = 30_000
+
+
+def _budget_files_for_prompt(current, total_budget=AUTHOR_FILES_CHAR_BUDGET):
+    """Split total_budget evenly across current's files (path -> content), truncating
+    any file whose content exceeds its share with an explicit '...[truncated]' marker
+    -- the model must never author an edit against a silently-invisible tail. Logs when
+    any file is cut, so the anchor-drift failure mode is visible in the operator console
+    instead of only showing up later as an anchor-miss. Returns a NEW dict; current is
+    untouched."""
+    if not current:
+        return current
+    per_file = max(total_budget // len(current), 1)
+    marker = "\n...[truncated]"
+    out = {}
+    truncated = []
+    for path, content in current.items():
+        if len(content) > per_file:
+            cut = max(per_file - len(marker), 0)
+            out[path] = content[:cut] + marker
+            truncated.append(path)
+        else:
+            out[path] = content
+    if truncated:
+        log.warning("author_fix: truncated %d/%d file(s) to fit the prompt budget: %s",
+                    len(truncated), len(current), ", ".join(truncated))
+    return out
+
+
 def _author_fix_edits(payload):
     """Premium model call: given the diagnosis + the current contents of the suspected files,
     draft a list of {path, old?, new} SURGICAL edits INCLUDING a tests/test_*.py reproduction.
@@ -1896,9 +1931,10 @@ def _author_fix_edits(payload):
         prov = observe.provider_for(model)
         if not prov or not os.environ.get(prov["key_env"]):
             return None
+    budgeted = _budget_files_for_prompt(current)
     prompt = _AUTHOR_EDITS_PROMPT.format(
         diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
-        files=json.dumps(current, indent=2)[:30000] or "(no current files)")
+        files=json.dumps(budgeted, indent=2) or "(no current files)")
     messages = [{"role": "user", "content": prompt}]
     for attempt in range(2):
         try:
@@ -1930,6 +1966,13 @@ def _author_fix_edits(payload):
     return None
 
 
+def _is_anchor_miss(err):
+    """True if a _resolve_edits error is the anchor-drift class (the drafted 'old' text
+    matched zero or more-than-one times against the current file) -- the failure this
+    retries, as opposed to a shape/size/path refusal a retry can't fix."""
+    return bool(err) and ("was not found in" in err or "appears" in err and "times in" in err)
+
+
 def _run_propose_fix(payload, return_info=False):
     """FIX/EVOLVE path: draft the fix as SURGICAL edits, resolve them against the current
     base, run them through the propose gate + open the PR, and record the PR in the proposal
@@ -1937,15 +1980,25 @@ def _run_propose_fix(payload, return_info=False):
     whole-file replacement) means a change to an existing module can't rewrite code it didn't
     name -- no same-file collateral (PR #30 / Finding_043). Honest acks only -- proposed and
     pending review, never 'fixed.' With return_info=True, returns (text, info_or_None) so the
-    caller learns the PR number directly instead of re-joining through the proposals ledger."""
+    caller learns the PR number directly instead of re-joining through the proposals ledger.
+
+    On an ANCHOR-MISS (the drafted 'old' text matched 0 or >1 times -- the anchor-drift
+    failure mode from a truncated/stale view of the file), retries ONCE: re-author fresh
+    against the current base and re-resolve, before giving up. Any other _resolve_edits
+    error (shape, size, path refusal) fails immediately -- a retry can't fix those."""
     def _done(text, info=None):
         return (text, info) if return_info else text
-    edits = _author_fix_edits(payload)
-    if not edits:
-        return _done("I couldn't draft a fix I trust for that one (no small, testable "
-                     "change). I'll leave it for you rather than open a shaky PR.")
-    files, err = _resolve_edits(edits)
-    if err:
+    for attempt in range(2):
+        edits = _author_fix_edits(payload)
+        if not edits:
+            return _done("I couldn't draft a fix I trust for that one (no small, testable "
+                         "change). I'll leave it for you rather than open a shaky PR.")
+        files, err = _resolve_edits(edits)
+        if not err:
+            break
+        if attempt == 0 and _is_anchor_miss(err):
+            log.info("propose_fix: anchor miss (%s); retrying once against fresh content", err)
+            continue
         return _done("I drafted edits but they didn't resolve cleanly against the current "
                      f"code, so I didn't open a PR: {err}")
     # Same gate -> open seam as _propose_edit_impl (the byte cap is on the edit, not the
