@@ -439,15 +439,38 @@ def _offer_auto_draft(lever_id, lever):
     failed draft falls back to today's plain EVOLVE/SKIP ask, with the blocker
     named, and leaves the lever nudged/staged so the manual path still works --
     _run_accept's own failure marking (status 'failed' + a week's mute) is for the
-    user-initiated retry case, so it's undone here before re-staging."""
-    text, info = _run_accept(lever_id, lever, draft=True, return_info=True)
+    user-initiated retry case, so it's undone here before re-staging.
+
+    Mirrors accept_pending's claim discipline: flip status to 'evolving' with a
+    claimed_at lease + register the active claim BEFORE _run_accept, and always
+    release the claim after. Without this, a process restart mid-draft leaves
+    status 'accepted' with no claim timestamp -- _sweep_stale_claims's stuck-claim
+    check requires BOTH status in (evolving, accepted) AND a stale claimed_at, so
+    an unclaimed 'accepted' lever never matches and just sits there; the real
+    hazard is the next scan's GATE 3 (or a fresh auto-draft eligibility check)
+    treating the untouched-looking lever as fair game again -- a second auto-draft
+    of the same feature, and a duplicate PR."""
+    _update_lever(lever_id, status="evolving", claimed_at=_now_iso())
+    _ACTIVE_CLAIMS.add(lever_id)
+    try:
+        text, info = _run_accept(lever_id, lever, draft=True, return_info=True)
+    finally:
+        _ACTIVE_CLAIMS.discard(lever_id)
     if info:
+        # Stage it: _drafted_nudge_text promises "reply SKIP to drop it", which is
+        # a dead promise unless something is actually staged for decline_pending
+        # to find. Staging a pr_open lever also lets a stray EVOLVE reach it
+        # (accept_pending's pr_open branch replies with the existing link instead
+        # of drafting again) instead of "Nothing staged to evolve."
+        _stage(lever_id)
         sent = _send(_drafted_nudge_text(lever, info.get("url", "(no url)")))
         if not sent:
             log.warning("evolve: auto-draft nudge delivery failed for %s "
                         "(PR #%s already open)", lever_id, info.get("pr_number"))
+            _update_lever(lever_id, nudge_delivered=False)
             return {"acted": False, "reason": "nudge delivery failed", "lever": lever_id}
         _record_nudge()
+        _update_lever(lever_id, nudge_delivered=True)
         log.info("evolve: auto-drafted + nudged %s (%s) -> PR #%s",
                  lever_id, lever.get("feature"), info.get("pr_number"))
         return {"acted": True, "lever": lever_id, "feature": lever.get("feature"),
@@ -512,6 +535,47 @@ def _sweep_stale_claims():
             _save_ledger(data)
 
 
+def _redeliver_stranded_nudges():
+    """An auto-drafted lever whose 'i drafted this one for you' nudge failed to
+    send (Telegram outage right after a successful draft) is left pr_open with
+    nudge_delivered False -- the PR exists, but the owner was never told. A crash
+    or restart BETWEEN the PR opening and the first send attempt leaves the field
+    unset entirely, which is the same stranding, so absent counts as stranded
+    too: only an explicit True (set on a confirmed send) excludes a lever.
+    Re-send on every scan until it lands; free (no model call, no budget draw --
+    this is redelivery of an already-decided nudge, not a new one) and cheap (an
+    empty ledger scan on every other run). No new scheduler wiring: rides
+    whichever funnel (frontier or gaps) happens to run next, mirroring the
+    stale-claim sweep's placement right before the gates.
+
+    The nudge promises "reply SKIP to drop it", so the lever must hold the
+    staging slot when the send goes out (the crash window can predate
+    _offer_auto_draft's own _stage). Staged under the gate lock, and NEVER by
+    clobbering a different staged lever -- the slot holds one conversation, and
+    a SKIP after this send would decline whatever is staged; if another lever
+    owns the slot, the whole redelivery defers to a later scan (nudge_delivered
+    stays unset, so it keeps retrying until the slot frees up)."""
+    for l in _load_ledger()["levers"]:
+        if (l.get("status") == "pr_open" and l.get("auto_drafted")
+                and not l.get("nudge_delivered")):
+            lid = l["id"]
+            with _GATE_LOCK:
+                staged = _peek_pending()
+                if staged is not None and staged != lid:
+                    log.info("evolve: deferring stranded-nudge redelivery for %s "
+                             "(%s holds the staging slot)", lid, staged)
+                    continue
+                _stage(lid)
+            url = l.get("pr_url") or "(no url)"
+            if _send(_drafted_nudge_text(l, url)):
+                _update_lever(lid, nudge_delivered=True)
+                log.info("evolve: redelivered stranded auto-draft nudge for %s",
+                         lid)
+            else:
+                log.warning("evolve: auto-draft nudge redelivery failed again for %s",
+                            lid)
+
+
 def _match_item(items, source_title):
     """Link the mapper's source_title back to ONE feed item: exact normalized
     match first, containment only when it's unambiguous. A short partial title
@@ -531,6 +595,8 @@ def scan():
     scheduler). Gate order keeps every free check ahead of the one paid call."""
     # Recover claims orphaned by a crash before the gates run (see the sweep).
     _sweep_stale_claims()
+    # Retry any auto-draft nudge that failed to send after its PR already opened.
+    _redeliver_stranded_nudges()
     # GATE 1: one staged lever at a time -- the webhook gate must resolve it first.
     if has_pending():
         return {"acted": False, "reason": "pending lever awaiting EVOLVE/SKIP"}
@@ -708,6 +774,9 @@ def scan_gaps():
     raises out to the scheduler."""
     # Recover claims orphaned by a crash before the gates run (shared with scan()).
     _sweep_stale_claims()
+    # Retry any auto-draft nudge that failed to send after its PR already opened
+    # (shared with scan(): either funnel redelivers whichever lever is stranded).
+    _redeliver_stranded_nudges()
     # GATE 1: one staged lever at a time -- shared with the frontier funnel, so a
     # frontier lever awaiting EVOLVE/SKIP also blocks the gap funnel (and vice versa).
     if has_pending():
@@ -840,6 +909,19 @@ def accept_pending():
         if lever is None:
             return ("I lost track of that lever (the staging outlived the ledger). "
                     "I'll re-flag it if it still matters.")
+        if lever.get("status") == "pr_open":
+            # An auto-drafted lever is staged so SKIP can drop it, but EVOLVE
+            # landing on it must NOT re-run _run_accept -- the PR already exists;
+            # doing so again would open a duplicate. Reply with the existing link,
+            # and RE-STAGE the lever (the peek-clear above already consumed the
+            # slot): this reply and the drafted nudge both promise SKIP works, so
+            # the staging must survive the EVOLVE detour. Safe under the gate
+            # lock, and it can't clobber anyone else -- this lever WAS the staged
+            # one a moment ago.
+            _stage(lid)
+            link = lever.get("pr_url") or f"(PR #{lever.get('pr_number')})"
+            return (f"already drafted: {link} -- reply SKIP if you want me to drop "
+                    "it, otherwise just review it.")
         if lever.get("status") != "nudged":
             return (f"That lever is already {lever.get('status')}; nothing left "
                     "for me to do here.")
@@ -884,13 +966,19 @@ def _run_accept(lid, lever, draft=False, return_info=False):
             return _done("I argued with myself about it first and the judge said no. "
                         f"{notes[:300]} Dropping it for a couple of months.")
     # Adopted: earn a world-model belief, and a dated prediction when scorable.
-    wm_id = world_model.add_belief(
+    # Reuse an id already on the lever instead of minting a new one every call --
+    # an auto-draft failure followed by a later manual EVOLVE (or a GATE-3 retry)
+    # re-enters this function for the same lever, and world_model.add_belief /
+    # argo_predictions.record are not both idempotent (the belief store dedupes
+    # by exact claim text; the predictions store does not, so a naive retry would
+    # mint a second prediction for the same lever every time).
+    wm_id = lever.get("world_belief_id") or world_model.add_belief(
         f"Adopting {lever.get('feature')} improves Argo: "
         f"{lever.get('expected_benefit', '')}",
         source_finding=f"evolution:{lid}")
-    pred_id = None
+    pred_id = lever.get("prediction_id")
     spec = lever.get("prediction_spec")
-    if isinstance(spec, dict) and isinstance(spec.get("metric"), dict):
+    if pred_id is None and isinstance(spec, dict) and isinstance(spec.get("metric"), dict):
         pred_id = argo_predictions.record(
             wm_id, spec.get("text", ""), spec["metric"],
             int(spec.get("days", 14)), source=f"evolution:{lid}")
@@ -928,7 +1016,8 @@ def _run_accept(lid, lever, draft=False, return_info=False):
         return _done(text or ("I tried to draft the upgrade PR but hit an error before "
                               "it opened. I'll let this one rest a week."))
     _ensure_proposal_row(info, lever.get("self_belief_id"))
-    _update_lever(lid, status="pr_open", pr_number=info["pr_number"], auto_drafted=draft)
+    _update_lever(lid, status="pr_open", pr_number=info["pr_number"],
+                  pr_url=info.get("url"), auto_drafted=draft)
     return _done(text, info)
 
 

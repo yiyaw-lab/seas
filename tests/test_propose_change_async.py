@@ -19,11 +19,14 @@ Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 """
 
 import json
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import argo_incidents
 import argo_mcp_server as srv
 
 
@@ -122,6 +125,37 @@ class ProposeChangeAsyncTest(unittest.TestCase):
         # a thread crash from SystemExit escaping would not raise here (daemon
         # threads don't propagate), but log.error must have been reached; the
         # real regression this guards is a silent hang, which `done` firing rules out.
+
+    def test_send_returns_false_is_logged_and_recorded_as_incident(self):
+        # Bugbot #86: try_send_message can return False WITHOUT raising (missing
+        # creds, empty text) -- the prior code ignored the return value entirely,
+        # so the user silently never got the PR link/blocker and nothing was
+        # recorded for the diagnose loop to see. Must both log.error and record
+        # a delivery_failure incident.
+        base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(argo_incidents, "INCIDENTS_PATH",
+                                            base / "inc.json"))
+        done = threading.Event()
+
+        def failing_send(text):
+            done.set()
+            return False
+
+        with self.assertLogs("argo_mcp_server", level="ERROR") as logs, \
+             mock.patch.object(srv, "_propose_change_impl",
+                               return_value=("Opened PR for review: http://pr/1", {})), \
+             mock.patch("send_telegram.try_send_message", side_effect=failing_send):
+            reply = srv.propose_change("t", "d", json.dumps({"src/x.py": "x"}))
+            self.assertIn("On it", reply)
+            _wait(done, 5.0)
+            # record_incident writes synchronously right after the send call, on
+            # the same background thread, before the thread has anywhere else to
+            # go -- give it a moment to land before asserting the ledger.
+            time.sleep(0.05)
+        self.assertTrue(any("not delivered" in m for m in logs.output))
+        clusters = argo_incidents._load()
+        kinds = [c.get("kind") for c in clusters.values()]
+        self.assertIn("delivery_failure", kinds)
 
 
 if __name__ == "__main__":

@@ -147,6 +147,13 @@ class CircuitBreaker:
             except ImportError:
                 ModelRefusal = ()
             if isinstance(exc, ModelRefusal):
+                # Defensive net, not a live path: on the current Anthropic call
+                # sites a refusal is an HTTP-200 "success" as far as fn() is
+                # concerned -- argo_observe._check_refusal raises ModelRefusal at
+                # the response-unpack site AFTER _guarded() (and this call) has
+                # already returned, so fn() itself never raises it today. This
+                # branch only fires if a future call path raises ModelRefusal
+                # from inside a breaker-wrapped callable.
                 raise
             # Only retry-eligible (transient) failures count toward opening. A
             # permanent error -- a billing 400, an auth failure -- fails fast and
