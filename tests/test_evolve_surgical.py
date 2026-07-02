@@ -40,7 +40,7 @@ class EvolveSurgicalAuthoringTest(unittest.TestCase):
              "new": "import x\ndef test_x():\n    assert True\n"}]
         opened = {}
 
-        def fake_open(title, description, files):
+        def fake_open(title, description, files, draft=False):
             opened["files"] = files
             return True, {"pr_number": 5, "url": "http://pr/5", "head_sha": "s",
                           "branch": "argo/x"}

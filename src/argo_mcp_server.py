@@ -1444,10 +1444,11 @@ def _proposal_gate(files):
     return None
 
 
-def _open_pr(title, description, files):
+def _open_pr(title, description, files, draft=False):
     """Create a NEW branch, write the files, open a PR. Returns (ok, info) where info on
     success is {pr_number, url, head_sha, branch}, else (False, error_string). Never
-    touches the default branch."""
+    touches the default branch. draft=True opens the PR as a GitHub draft (adds
+    "draft": true to the create body only when set) -- default behavior is unchanged."""
     import base64
     import re as _re
     from datetime import datetime, timezone
@@ -1477,25 +1478,28 @@ def _open_pr(title, description, files):
             return False, f"Couldn't write '{path}': {resw}"
     prbody = (f"{description}\n\n---\n*Proposed by Argo (self-create, propose-only). "
               f"Review and merge to deploy; Argo cannot merge this itself.*")
-    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls",
-                       {"title": title, "head": branch, "base": PROPOSE_BASE, "body": prbody})
+    pr_body = {"title": title, "head": branch, "base": PROPOSE_BASE, "body": prbody}
+    if draft:
+        pr_body["draft"] = True
+    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls", pr_body)
     if not ok:
         return False, f"Branch + files created ({branch}), but opening the PR failed: {pr}"
     return True, {"pr_number": pr.get("number"), "url": pr.get("html_url", "(no url)"),
                   "head_sha": pr.get("head", {}).get("sha"), "branch": branch}
 
 
-def _gate_and_open(title, description, files, validate=_validate_paths_and_count):
+def _gate_and_open(title, description, files, validate=_validate_paths_and_count, draft=False):
     """Shared tail of every propose path: run the size/path validator + the repro-wiring gate,
     then open the PR. Returns (True, info) on success, or (False, error_string) on a gate
     refusal OR an _open_pr failure -- so the self-fix path can never drift from the
     propose_change / propose_edit tools' gate. The whole-file path passes
     validate=_validate_files (per-file byte cap); the edit paths take the default
-    _validate_paths_and_count (the cap is on the edit, not the resolved file)."""
+    _validate_paths_and_count (the cap is on the edit, not the resolved file). draft is
+    passed straight through to _open_pr; default False, unchanged behavior."""
     err = validate(files) or _proposal_gate(files)
     if err:
         return False, err
-    return _open_pr(title, description, files)
+    return _open_pr(title, description, files, draft=draft)
 
 
 def _propose_change_impl(title, description, files_json):
@@ -2003,8 +2007,11 @@ def _run_propose_fix(payload, return_info=False):
                      f"code, so I didn't open a PR: {err}")
     # Same gate -> open seam as _propose_edit_impl (the byte cap is on the edit, not the
     # resolved file), so the self-fix path can never drift from the propose_edit tool's gate.
+    # draft is plumbing for a follow-up feature (no caller sets it yet): default False,
+    # so today's behavior is unchanged.
     ok, info = _gate_and_open(payload.get("title", "Argo self-fix"),
-                              payload.get("description", ""), files)
+                              payload.get("description", ""), files,
+                              draft=bool(payload.get("draft", False)))
     if not ok:
         return _done(f"I drafted a fix but couldn't open a clean PR for it (it failed a "
                      f"safety check or the PR write): {info}")
