@@ -96,6 +96,46 @@ class LoadSaveSeenTest(unittest.TestCase):
         self.assertEqual(list(kept), ["id3", "id4", "id5"])  # newest 3
 
 
+class WatchPlacementSummaryTest(unittest.TestCase):
+    """main()'s closing seen-store summary print must not crash when SEEN_PATH is
+    on a persistent volume OUTSIDE the repo root -- that's the CORRECT production
+    placement (SEEN_PATH=/data/... , ROOT=/app), not the bad one. Regression for a
+    verified-live Railway crash: SEEN_PATH.relative_to(ROOT) raises ValueError
+    whenever SEEN_PATH isn't a subpath of ROOT, which is exactly the volume case,
+    so watch's summary print (and, when this runs inside the scheduler's
+    try/except, the whole `watch` schedule entry) blew up on every run.
+
+    Everything except the seen-store save/print tail is mocked so this stays a
+    pure unit test: no network, no LLM, no real data/*.json. new_items is forced
+    empty so collect_new/judge short-circuit and main() falls straight through to
+    the seen-store update + summary print -- the crash site -- without touching
+    a feed or the judge model.
+    """
+
+    def setUp(self):
+        # A tmp dir is never under the repo ROOT, so this reproduces the volume
+        # placement (SEEN_PATH outside ROOT) that crashed in production.
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.tmp / "argo_seen.json"
+        self.enterContext(mock.patch.object(watch, "SEEN_PATH", self.path))
+        self.assertFalse(
+            self.path.is_relative_to(watch.ROOT),
+            "test setup bug: tmp path must be outside ROOT to reproduce the crash")
+
+    def test_summary_print_does_not_raise_when_seen_path_outside_root(self):
+        with mock.patch.object(watch, "load_seen", return_value={}), \
+             mock.patch.object(watch, "collect_new", return_value=[]), \
+             mock.patch.object(watch, "collect_grok", return_value=[]), \
+             mock.patch.object(watch, "judge", return_value=[]), \
+             mock.patch.object(watch.sys, "argv", ["argo_watch.py"]):
+            watch.main()  # must not raise ValueError
+
+        # The real side effect: the seen-store save must actually have happened
+        # (this exercises the genuine save_seen call, not a mock of it).
+        self.assertEqual(watch.load_seen(), {})
+        self.assertTrue(self.path.exists())
+
+
 class AttemptsGatingTest(unittest.TestCase):
     """collect_new's eligibility predicate: attempts < MAX_ATTEMPTS is eligible.
 

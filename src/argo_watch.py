@@ -346,8 +346,15 @@ def main():
             seen[iid] = seen.get(iid, 0) + 1
             skipped += 1
     save_seen(seen)
+    # SEEN_PATH sits under ROOT only in the ephemeral-checkout case (bad: data is
+    # lost on redeploy); on the volume (SEEN_PATH=/data/..., ROOT=/app) it never
+    # is, and that's the CORRECT placement -- relative_to would raise ValueError
+    # there, which used to crash this print (and the scheduler's `watch` entry)
+    # on every run. is_relative_to never raises, so show the relative path in the
+    # bad case and the plain absolute path (no warning) in the good one.
+    shown = SEEN_PATH.relative_to(ROOT) if SEEN_PATH.is_relative_to(ROOT) else SEEN_PATH
     print(f"\nSeen-store: settled {alerted} alerted, bumped {skipped} un-alerted "
-          f"({SEEN_PATH.relative_to(ROOT)}).")
+          f"({shown}).")
 
     print("\n✅ Watch complete.\n")
 
