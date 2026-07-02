@@ -408,6 +408,42 @@ class GateCommandsTest(EvolveBase):
         self.assertEqual(lever["status"], "failed")
         self.assertIsNotNone(lever["muted_until"])
 
+    def test_accept_propose_failure_records_fail_reason(self):
+        # Previously a failed lever carried ONLY status="failed" -- the operator had
+        # no way to see WHY without digging through logs at the time it happened.
+        # _run_accept must now stash the exact blocker text on the lever itself.
+        self._lever(id="EV-907", feature="whyfail", magnitude="minor", status="nudged")
+        ev._stage("EV-907")
+        blocker = ("I drafted a fix but couldn't open a clean PR for it (it failed a "
+                   "safety check or the PR write): branch already exists")
+        with mock.patch.object(ev, "_propose", return_value=(blocker, None)):
+            ev.accept_pending()
+        lever = ev.get_lever("EV-907")
+        self.assertEqual(lever["status"], "failed")
+        self.assertEqual(lever["fail_reason"], blocker[:300])
+
+    def test_accept_propose_failure_records_fail_reason_on_exception(self):
+        # _propose can raise outright (an infra failure before it even returns text);
+        # the exception's own message must still land in fail_reason, not a blank field.
+        self._lever(id="EV-908", feature="whyfail2", magnitude="minor", status="nudged")
+        ev._stage("EV-908")
+        with mock.patch.object(ev, "_propose",
+                               side_effect=RuntimeError("gh token expired")):
+            text = ev.accept_pending()
+        lever = ev.get_lever("EV-908")
+        self.assertEqual(lever["status"], "failed")
+        self.assertIn("gh token expired", lever["fail_reason"])
+        self.assertIn("gh token expired", text)
+
+    def test_fail_reason_is_capped_small(self):
+        self._lever(id="EV-909", feature="whyfail3", magnitude="minor", status="nudged")
+        ev._stage("EV-909")
+        huge = "x" * 5000
+        with mock.patch.object(ev, "_propose", return_value=(huge, None)):
+            ev.accept_pending()
+        lever = ev.get_lever("EV-909")
+        self.assertEqual(len(lever["fail_reason"]), 300)
+
     def test_accept_tracks_pr_even_if_ledger_append_failed(self):
         self._lever(id="EV-904", feature="lucky", magnitude="minor", status="nudged")
         ev._stage("EV-904")

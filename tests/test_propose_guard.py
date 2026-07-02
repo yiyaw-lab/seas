@@ -109,7 +109,7 @@ class ProposalGateTest(unittest.TestCase):
     def test_accepts_wired_symbol_with_relevant_repro(self):
         opened = {}
 
-        def fake_open(title, description, files):
+        def fake_open(title, description, files, draft=False):
             opened["files"] = files
             return True, {"pr_number": 7, "url": "http://pr/7",
                           "head_sha": "abc123", "branch": "argo/x"}
@@ -315,7 +315,7 @@ class ProposeEditTest(unittest.TestCase):
                  "def test_x():\n    assert argo_paths.X == 2\n")
         opened = {}
 
-        def fake_open(title, description, files):
+        def fake_open(title, description, files, draft=False):
             opened["files"] = files
             return True, {"pr_number": 9, "url": "http://pr/9",
                           "head_sha": "abc", "branch": "argo/y"}

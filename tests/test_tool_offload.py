@@ -7,8 +7,10 @@ transport -- the Anthropic MCP connector then reports "Error while communicating
 with MCP server" and the work (the PR, the project) silently never lands. The fix:
 with_deadline now returns an ASYNC wrapper that offloads the body to a worker thread
 under a wall-clock cap. These lock it in -- the decorator yields a coroutine, keeps
-the loop live while the body blocks, caps overruns with a relayable string, and the
-network/model tools are all async (none left blocking the loop).
+the loop live while the body blocks, caps overruns with a relayable string, and most
+network/model tools are async (not left blocking the loop). propose_change is the one
+deliberate exception -- see HeavyToolsAreAsyncTest's docstring below for why a bounded
+deadline isn't the right shape for it.
 
 Pure: bodies are stubbed; no network/GitHub/model.
 Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
@@ -73,10 +75,20 @@ class WithDeadlineOffloadTest(unittest.TestCase):
 
 class HeavyToolsAreAsyncTest(unittest.TestCase):
     """The tools doing network or model work must be coroutines so FastMCP awaits
-    them off-loop instead of running them inline on the event loop."""
+    them off-loop instead of running them inline on the event loop.
+
+    propose_change is a deliberate EXCEPTION, not an oversight: with_deadline's
+    bounded-wait-then-abandon model still blocks the tool call for up to `seconds`,
+    and the authoring model (claude-fable-5, thinking always on) routinely exceeds
+    even a generous deadline -- the abandoned worker thread keeps running to
+    completion, but its outcome was never delivered to the MCP client (the "300s of
+    silence, no PR logged" incident). So propose_change is now a genuinely
+    SYNCHRONOUS tool function that spawns its own daemon thread and returns an
+    immediate ack; the real outcome is delivered later via Telegram, not through the
+    tool's return value at all. See test_propose_change_async.py for that contract."""
 
     HEAVY = [
-        "propose_change", "new_project", "project_too_complex", "add_project",
+        "new_project", "project_too_complex", "add_project",
         "recommend_project", "scaffold_project", "rehearse_project",
         "run_reflection", "web_fetch", "study_url", "verify_feed",
         "github_read_file", "github_list", "get_webhook_health",
@@ -87,12 +99,15 @@ class HeavyToolsAreAsyncTest(unittest.TestCase):
         for name in self.HEAVY:
             self.assertTrue(asyncio.iscoroutinefunction(getattr(m, name)), name)
 
-    def test_propose_change_offloads_impl_and_returns_text(self):
+    def test_propose_change_is_sync_and_fires_a_background_thread(self):
+        # NOT a coroutine function -- see the class docstring for why.
+        self.assertFalse(asyncio.iscoroutinefunction(m.propose_change))
         with mock.patch.object(
                 m, "_propose_change_impl",
-                lambda *a: ("Opened PR for review: http://example/pr/1", {"n": 1})):
-            out = asyncio.run(m.propose_change("title", "desc", "{}"))
-        self.assertEqual(out, "Opened PR for review: http://example/pr/1")
+                lambda *a: ("Opened PR for review: http://example/pr/1", {"n": 1})), \
+             mock.patch("send_telegram.try_send_message", return_value=True):
+            out = m.propose_change("title", "desc", '{"src/x.py": "content"}')
+        self.assertIn("On it", out)
 
 
 if __name__ == "__main__":

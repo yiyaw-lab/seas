@@ -1444,10 +1444,11 @@ def _proposal_gate(files):
     return None
 
 
-def _open_pr(title, description, files):
+def _open_pr(title, description, files, draft=False):
     """Create a NEW branch, write the files, open a PR. Returns (ok, info) where info on
     success is {pr_number, url, head_sha, branch}, else (False, error_string). Never
-    touches the default branch."""
+    touches the default branch. draft=True opens the PR as a GitHub draft (adds
+    "draft": true to the create body only when set) -- default behavior is unchanged."""
     import base64
     import re as _re
     from datetime import datetime, timezone
@@ -1477,25 +1478,28 @@ def _open_pr(title, description, files):
             return False, f"Couldn't write '{path}': {resw}"
     prbody = (f"{description}\n\n---\n*Proposed by Argo (self-create, propose-only). "
               f"Review and merge to deploy; Argo cannot merge this itself.*")
-    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls",
-                       {"title": title, "head": branch, "base": PROPOSE_BASE, "body": prbody})
+    pr_body = {"title": title, "head": branch, "base": PROPOSE_BASE, "body": prbody}
+    if draft:
+        pr_body["draft"] = True
+    ok, pr = _gh_write("POST", f"/repos/{PROPOSE_REPO}/pulls", pr_body)
     if not ok:
         return False, f"Branch + files created ({branch}), but opening the PR failed: {pr}"
     return True, {"pr_number": pr.get("number"), "url": pr.get("html_url", "(no url)"),
                   "head_sha": pr.get("head", {}).get("sha"), "branch": branch}
 
 
-def _gate_and_open(title, description, files, validate=_validate_paths_and_count):
+def _gate_and_open(title, description, files, validate=_validate_paths_and_count, draft=False):
     """Shared tail of every propose path: run the size/path validator + the repro-wiring gate,
     then open the PR. Returns (True, info) on success, or (False, error_string) on a gate
     refusal OR an _open_pr failure -- so the self-fix path can never drift from the
     propose_change / propose_edit tools' gate. The whole-file path passes
     validate=_validate_files (per-file byte cap); the edit paths take the default
-    _validate_paths_and_count (the cap is on the edit, not the resolved file)."""
+    _validate_paths_and_count (the cap is on the edit, not the resolved file). draft is
+    passed straight through to _open_pr; default False, unchanged behavior."""
     err = validate(files) or _proposal_gate(files)
     if err:
         return False, err
-    return _open_pr(title, description, files)
+    return _open_pr(title, description, files, draft=draft)
 
 
 def _propose_change_impl(title, description, files_json):
@@ -1512,8 +1516,27 @@ def _propose_change_impl(title, description, files_json):
     return f"Opened PR for review: {info['url']}", info
 
 
+def _propose_change_background(title, description, files_json):
+    """Worker for the propose_change tool's daemon thread: run the full synchronous
+    gate + PR chain, then deliver the outcome over Telegram -- the same fire-and-forget
+    idiom as argo_webhook._safe_handle. Catches (Exception, SystemExit) so a Telegram
+    delivery failure (send_telegram.fail() -> sys.exit(1)) can't silently kill the
+    thread; a dead thread with no except net is exactly the "300s of silence" bug this
+    is replacing, so it must never happen again even when send itself is what breaks."""
+    import send_telegram
+    try:
+        text, _info = _propose_change_impl(title, description, files_json)
+    except (Exception, SystemExit) as exc:
+        log.error("propose_change (async): background draft failed", exc_info=True)
+        text = (f"I hit an error drafting that PR and couldn't finish: "
+                f"{type(exc).__name__}: {exc}")
+    try:
+        send_telegram.try_send_message(text)
+    except (Exception, SystemExit):
+        log.error("propose_change (async): could not deliver outcome", exc_info=True)
+
+
 @mcp.tool()
-@with_deadline(120)  # chains 5+ GitHub calls; offloaded off-loop by the decorator
 def propose_change(title: str, description: str, files_json: str) -> str:
     """Propose a new capability or fix by opening a GitHub PR for human review.
     Argo NEVER merges or deploys this itself — it drafts; a human approves.
@@ -1528,10 +1551,20 @@ def propose_change(title: str, description: str, files_json: str) -> str:
     A fix proposal MUST include a reproduction test under tests/ (tests/test_*.py) that
     fails before and passes after; proposals whose new code is never called are refused.
 
-    Returns the PR URL on success. Opens against a NEW branch only; cannot touch
-    the default branch."""
-    text, _info = _propose_change_impl(title, description, files_json)
-    return text
+    Drafting a PR chains 5+ GitHub calls plus a model call and can run long, especially
+    now that the authoring model always thinks -- far past what the MCP client's fixed
+    300s CallToolRequest budget allows. So this tool validates cheaply, hands the actual
+    draft-and-open work to a background thread, and returns immediately; the PR link (or
+    the exact blocker) is texted separately when the draft finishes."""
+    try:
+        files = json.loads(files_json)
+        assert isinstance(files, dict) and files
+    except Exception:
+        return "files_json must be a non-empty JSON object of {path: contents}."
+    threading.Thread(target=_propose_change_background,
+                     args=(title, description, files_json), daemon=True).start()
+    return ("On it — drafting the PR now; I'll text you the link or the exact "
+            "blocker in a few minutes.")
 
 
 def _resolve_edits(edits):
@@ -1839,6 +1872,41 @@ def _read_base_file(path):
         return None
 
 
+# Total character budget for the files shown to the authoring model, divided across
+# however many suspected files there are (see _budget_files_for_prompt). Replaces a
+# global post-json.dumps truncation that silently cut off whichever files landed last
+# in the dict -- their tails were invisible to the model, so any 'old' anchor it drafted
+# against them matched 0 times in _resolve_edits. A per-file split means EVERY suspected
+# file gets shown, even if truncated, and a truncation is a visible marker, not silence.
+AUTHOR_FILES_CHAR_BUDGET = 30_000
+
+
+def _budget_files_for_prompt(current, total_budget=AUTHOR_FILES_CHAR_BUDGET):
+    """Split total_budget evenly across current's files (path -> content), truncating
+    any file whose content exceeds its share with an explicit '...[truncated]' marker
+    -- the model must never author an edit against a silently-invisible tail. Logs when
+    any file is cut, so the anchor-drift failure mode is visible in the operator console
+    instead of only showing up later as an anchor-miss. Returns a NEW dict; current is
+    untouched."""
+    if not current:
+        return current
+    per_file = max(total_budget // len(current), 1)
+    marker = "\n...[truncated]"
+    out = {}
+    truncated = []
+    for path, content in current.items():
+        if len(content) > per_file:
+            cut = max(per_file - len(marker), 0)
+            out[path] = content[:cut] + marker
+            truncated.append(path)
+        else:
+            out[path] = content
+    if truncated:
+        log.warning("author_fix: truncated %d/%d file(s) to fit the prompt budget: %s",
+                    len(truncated), len(current), ", ".join(truncated))
+    return out
+
+
 def _author_fix_edits(payload):
     """Premium model call: given the diagnosis + the current contents of the suspected files,
     draft a list of {path, old?, new} SURGICAL edits INCLUDING a tests/test_*.py reproduction.
@@ -1867,9 +1935,10 @@ def _author_fix_edits(payload):
         prov = observe.provider_for(model)
         if not prov or not os.environ.get(prov["key_env"]):
             return None
+    budgeted = _budget_files_for_prompt(current)
     prompt = _AUTHOR_EDITS_PROMPT.format(
         diagnosis=payload.get("description", ""), suggestion=payload.get("suggestion", ""),
-        files=json.dumps(current, indent=2)[:30000] or "(no current files)")
+        files=json.dumps(budgeted, indent=2) or "(no current files)")
     messages = [{"role": "user", "content": prompt}]
     for attempt in range(2):
         try:
@@ -1901,6 +1970,13 @@ def _author_fix_edits(payload):
     return None
 
 
+def _is_anchor_miss(err):
+    """True if a _resolve_edits error is the anchor-drift class (the drafted 'old' text
+    matched zero or more-than-one times against the current file) -- the failure this
+    retries, as opposed to a shape/size/path refusal a retry can't fix."""
+    return bool(err) and ("was not found in" in err or "appears" in err and "times in" in err)
+
+
 def _run_propose_fix(payload, return_info=False):
     """FIX/EVOLVE path: draft the fix as SURGICAL edits, resolve them against the current
     base, run them through the propose gate + open the PR, and record the PR in the proposal
@@ -1908,21 +1984,34 @@ def _run_propose_fix(payload, return_info=False):
     whole-file replacement) means a change to an existing module can't rewrite code it didn't
     name -- no same-file collateral (PR #30 / Finding_043). Honest acks only -- proposed and
     pending review, never 'fixed.' With return_info=True, returns (text, info_or_None) so the
-    caller learns the PR number directly instead of re-joining through the proposals ledger."""
+    caller learns the PR number directly instead of re-joining through the proposals ledger.
+
+    On an ANCHOR-MISS (the drafted 'old' text matched 0 or >1 times -- the anchor-drift
+    failure mode from a truncated/stale view of the file), retries ONCE: re-author fresh
+    against the current base and re-resolve, before giving up. Any other _resolve_edits
+    error (shape, size, path refusal) fails immediately -- a retry can't fix those."""
     def _done(text, info=None):
         return (text, info) if return_info else text
-    edits = _author_fix_edits(payload)
-    if not edits:
-        return _done("I couldn't draft a fix I trust for that one (no small, testable "
-                     "change). I'll leave it for you rather than open a shaky PR.")
-    files, err = _resolve_edits(edits)
-    if err:
+    for attempt in range(2):
+        edits = _author_fix_edits(payload)
+        if not edits:
+            return _done("I couldn't draft a fix I trust for that one (no small, testable "
+                         "change). I'll leave it for you rather than open a shaky PR.")
+        files, err = _resolve_edits(edits)
+        if not err:
+            break
+        if attempt == 0 and _is_anchor_miss(err):
+            log.info("propose_fix: anchor miss (%s); retrying once against fresh content", err)
+            continue
         return _done("I drafted edits but they didn't resolve cleanly against the current "
                      f"code, so I didn't open a PR: {err}")
     # Same gate -> open seam as _propose_edit_impl (the byte cap is on the edit, not the
     # resolved file), so the self-fix path can never drift from the propose_edit tool's gate.
+    # draft is plumbing for a follow-up feature (no caller sets it yet): default False,
+    # so today's behavior is unchanged.
     ok, info = _gate_and_open(payload.get("title", "Argo self-fix"),
-                              payload.get("description", ""), files)
+                              payload.get("description", ""), files,
+                              draft=bool(payload.get("draft", False)))
     if not ok:
         return _done(f"I drafted a fix but couldn't open a clean PR for it (it failed a "
                      f"safety check or the PR write): {info}")
