@@ -238,22 +238,31 @@ def _guarded(provider, do_call, label):
     return run()
 
 
+class ModelRefusal(RuntimeError):
+    """Raised by _check_refusal on a model-level refusal. A dedicated subclass
+    (not a bare RuntimeError) so CircuitBreaker.call can recognize a refusal as
+    a per-request content outcome and exempt it from provider-failure
+    accounting (see argo_guard.CircuitBreaker.call) without string-matching the
+    message."""
+
+
 def _check_refusal(response, label):
     """Guard against a model-level refusal (HTTP 200, stop_reason == 'refusal',
     content empty or partial) -- seen on claude-fable-5. Every Anthropic
     response-unpack site calls this immediately after _guarded() returns and
     before touching response.content, so a refusal surfaces as a clear
-    RuntimeError instead of silently degrading to an empty "".join(...) (or, on
-    a stricter unpack, an IndexError). Raising here routes the failure through
-    the same `except Exception` model-failure path every other call-site error
-    already takes (see argo_webhook._llm_reply's last_error handling) -- no new
-    exception type, no new catch site needed.
+    RuntimeError (ModelRefusal) instead of silently degrading to an empty
+    "".join(...) (or, on a stricter unpack, an IndexError). Raising here routes
+    the failure through the same `except Exception` model-failure path every
+    other call-site error already takes (see argo_webhook._llm_reply's
+    last_error handling) -- ModelRefusal is-a RuntimeError, so no new catch site
+    is needed anywhere that only expects RuntimeError.
 
     A no-op for every normal stop_reason (end_turn, max_tokens, tool_use, ...),
     so this changes nothing about existing behavior."""
     if getattr(response, "stop_reason", None) == "refusal":
         log.warning("model refused: %s", label)
-        raise RuntimeError(f"model refused: {label}")
+        raise ModelRefusal(f"model refused: {label}")
 
 
 def _call_openai(job, model, temperature=1.0):
@@ -335,8 +344,12 @@ def _call_anthropic(job, model, temperature=1.0):
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
-    _check_refusal(response, f"anthropic/{model}")
+    # Record usage BEFORE the refusal check: a refusal is an HTTP-200 response
+    # that can still bill partial output, and response.usage is present on it --
+    # recording after a raise would skip the ledger row entirely and undercount
+    # spend exactly when a premium model refuses.
     argo_cost.record_usage(response, model, "anthropic", f"anthropic/{model}")
+    _check_refusal(response, f"anthropic/{model}")
     return "".join(
         block.text for block in response.content if block.type == "text"
     )
@@ -372,8 +385,9 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"vision/{model}")
-    _check_refusal(response, f"vision/{model}")
+    # Record usage before the refusal check -- see _call_anthropic for why.
     argo_cost.record_usage(response, model, "anthropic", f"vision/{model}")
+    _check_refusal(response, f"vision/{model}")
     return "".join(b.text for b in response.content if b.type == "text")
 
 
@@ -490,8 +504,9 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
 
     # Same guardrails as the other model calls: daily budget + breaker + retry.
     response = _guarded("anthropic", do_call, f"chat/{model}")
-    _check_refusal(response, f"chat/{model}")
+    # Record usage before the refusal check -- see _call_anthropic for why.
     argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
+    _check_refusal(response, f"chat/{model}")
 
     # Telemetry: log every tool the connector fired (name on use, ok/error on
     # result) and collect the fired names. A bare error-only log hid the most
