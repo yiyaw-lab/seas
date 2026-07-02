@@ -22,6 +22,7 @@ documented failure mode.
 import json
 import os
 import random
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,22 @@ DAILY_CALL_CAP = 500      # hard ceiling on model calls per UTC day (all of Argo
 # cost budget well under 500 calls. Estimated via argo_cost.cost_today_usd() (a
 # $/MTok table applied to recorded token counts), not a billing-accurate figure.
 DAILY_COST_CAP_USD = float(os.environ.get("ARGO_DAILY_COST_CAP", "20.0"))
+
+# Serializes DailyBudget.check_and_increment()'s read-check-increment across
+# concurrent webhook threads (module-level, not per-instance: today's process
+# uses one DailyBudget, and a module lock also covers the pathological case of
+# two instances racing the same on-disk state/ledger). Without it, N threads can
+# all read cost_today_usd()/state below the cap before any of their usage lands
+# in the ledger (the ledger write happens later, inside the actual model call),
+# so the cap can overshoot. This lock only serializes the check+file-count bump
+# here; it does NOT reserve spend ahead of the call, so the residual overshoot
+# bound is: (in-flight premium calls already past this check) x (max single-call
+# cost) -- calls that passed the gate before their own usage row was written.
+# Widening this to a true reservation would need the ledger write itself gated
+# on a matching reservation release; not done here to keep the fix minimal and
+# consistent with the rest of the module (see argo_cost._write_lock for the
+# analogous ledger-side lock).
+_budget_lock = threading.Lock()
 
 
 def _is_transient(exc):
@@ -117,6 +134,20 @@ class CircuitBreaker:
         try:
             result = fn()
         except Exception as exc:
+            # A model refusal (argo_observe.ModelRefusal) is a per-request content
+            # outcome -- the provider answered fine -- not a provider outage. Late
+            # import: argo_observe sits above argo_guard (it imports guard, not the
+            # reverse), so importing at call time avoids a cycle. Re-raise WITHOUT
+            # touching failures/opened_at in either direction: it must not open the
+            # breaker (4 borderline asks in a row would fail-fast every Anthropic
+            # call for 60s) and must not silently reset an in-progress failure
+            # streak either (a refusal is not evidence the provider recovered).
+            try:
+                from argo_observe import ModelRefusal
+            except ImportError:
+                ModelRefusal = ()
+            if isinstance(exc, ModelRefusal):
+                raise
             # Only retry-eligible (transient) failures count toward opening. A
             # permanent error -- a billing 400, an auth failure -- fails fast and
             # propagates, but must NOT advance the breaker: a half-open probe can
@@ -199,17 +230,21 @@ class DailyBudget:
                 f"(spent ${spent:.2f})")
 
     def check_and_increment(self):
-        today = self._today()
-        self._check_cost(today)
-        state = self._load()
-        if state.get("day") != today:
-            state = {"day": today, "count": 0}  # new day -> reset
-        if state["count"] >= self.cap:
-            log.warning("daily budget exhausted: %d call cap reached for %s",
-                        self.cap, today)
-            raise self.BudgetExceeded(
-                f"daily call cap of {self.cap} reached for {today}")
-        state["count"] += 1
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(state))
-        return state["count"]
+        # Hold the module lock across the whole read-check-increment so
+        # concurrent webhook threads serialize instead of all reading the same
+        # under-cap state before any of their usage lands (see _budget_lock).
+        with _budget_lock:
+            today = self._today()
+            self._check_cost(today)
+            state = self._load()
+            if state.get("day") != today:
+                state = {"day": today, "count": 0}  # new day -> reset
+            if state["count"] >= self.cap:
+                log.warning("daily budget exhausted: %d call cap reached for %s",
+                            self.cap, today)
+                raise self.BudgetExceeded(
+                    f"daily call cap of {self.cap} reached for {today}")
+            state["count"] += 1
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(state))
+            return state["count"]
