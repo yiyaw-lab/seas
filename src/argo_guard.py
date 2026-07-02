@@ -134,6 +134,20 @@ class CircuitBreaker:
         try:
             result = fn()
         except Exception as exc:
+            # A model refusal (argo_observe.ModelRefusal) is a per-request content
+            # outcome -- the provider answered fine -- not a provider outage. Late
+            # import: argo_observe sits above argo_guard (it imports guard, not the
+            # reverse), so importing at call time avoids a cycle. Re-raise WITHOUT
+            # touching failures/opened_at in either direction: it must not open the
+            # breaker (4 borderline asks in a row would fail-fast every Anthropic
+            # call for 60s) and must not silently reset an in-progress failure
+            # streak either (a refusal is not evidence the provider recovered).
+            try:
+                from argo_observe import ModelRefusal
+            except ImportError:
+                ModelRefusal = ()
+            if isinstance(exc, ModelRefusal):
+                raise
             # Only retry-eligible (transient) failures count toward opening. A
             # permanent error -- a billing 400, an auth failure -- fails fast and
             # propagates, but must NOT advance the breaker: a half-open probe can
