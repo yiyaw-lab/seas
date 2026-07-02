@@ -315,6 +315,16 @@ MAX_DIAL_UP = 0.40
 # act_on_rate already returns 0.0 on an empty store).
 MIN_PUSHES_FOR_DIALUP = 5
 
+# The dial-up must reflect RECENT engagement, not all-time history: once enough
+# lifetime rows accrue, an old cold spell (or a push kind like "watch" that
+# rarely draws a reply by nature) keeps the bar dialed up FOREVER, since old
+# rows never leave the denominator and there's no opposing "act on it" signal
+# that brings it back down. Only rows within this window feed the dial-up calc
+# (act_on_rate() itself stays all-time -- it's also used as a lifetime stat in
+# the PROACTIVE status reply). 14 days gives a real user several days to react
+# without one quiet week permanently starving the bar.
+DIALUP_LOOKBACK_SECONDS = 14 * 24 * 3600
+
 
 def _clamp01(x):
     return 0.0 if x < 0 else 1.0 if x > 1 else x
@@ -343,16 +353,24 @@ def set_threshold(value):
 
 
 def effective_threshold():
-    """The base threshold plus the auto-dial-up term for a low act-on-rate.
+    """The base threshold plus the auto-dial-up term for a low RECENT act-on-rate.
 
-    dial_up = MAX_DIAL_UP * (1 - act_on_rate), applied ONLY once enough pushes
-    exist (>= MIN_PUSHES_FOR_DIALUP) for the rate to be meaningful -- the cold-
-    start guard. Result clamped to [0, 1]."""
+    dial_up = MAX_DIAL_UP * (1 - recent_rate), applied ONLY once enough pushes
+    were recorded within DIALUP_LOOKBACK_SECONDS (>= MIN_PUSHES_FOR_DIALUP) for
+    that rate to be meaningful -- both the original cold-start guard AND a
+    staleness guard. Rows older than the lookback window don't count toward
+    either the numerator or the denominator, so a dial-up earned during a past
+    quiet spell can't sit above base forever once that feedback goes stale --
+    it decays back to base as old rows age out, the same way it originally
+    ramped up. Result clamped to [0, 1]."""
     base = get_threshold()
-    rows = _load()
-    if len(rows) < MIN_PUSHES_FOR_DIALUP:
-        return base  # cold start: trust the base, don't amplify an unmeasured signal
-    rate = act_on_rate()
+    now = time.time()
+    recent = [r for r in _load()
+              if isinstance(r.get("ts"), (int, float))
+              and now - r["ts"] <= DIALUP_LOOKBACK_SECONDS]
+    if len(recent) < MIN_PUSHES_FOR_DIALUP:
+        return base  # cold start / stale feedback: trust the base, don't amplify
+    rate = sum(1 for r in recent if r.get("linked")) / len(recent)
     dial_up = MAX_DIAL_UP * (1.0 - rate)
     return _clamp01(base + dial_up)
 
