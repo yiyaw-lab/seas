@@ -1531,9 +1531,19 @@ def _propose_change_background(title, description, files_json):
         text = (f"I hit an error drafting that PR and couldn't finish: "
                 f"{type(exc).__name__}: {exc}")
     try:
-        send_telegram.try_send_message(text)
+        delivered = send_telegram.try_send_message(text)
     except (Exception, SystemExit):
         log.error("propose_change (async): could not deliver outcome", exc_info=True)
+        delivered = False
+    if not delivered:
+        # try_send_message returns False on failure without raising (missing
+        # creds, empty text, or an HTTP/URL error it already logged itself) --
+        # so the caller must check the return, not just guard against a raise.
+        # No secrets in the log line; the PR link/blocker text is not sensitive.
+        log.error("propose_change (async): outcome not delivered to Telegram: %s", text)
+        import argo_incidents
+        argo_incidents.record_incident("delivery_failure",
+                                       "propose_change: outcome not delivered", text)
 
 
 @mcp.tool()
