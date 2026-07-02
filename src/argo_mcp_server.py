@@ -1512,8 +1512,27 @@ def _propose_change_impl(title, description, files_json):
     return f"Opened PR for review: {info['url']}", info
 
 
+def _propose_change_background(title, description, files_json):
+    """Worker for the propose_change tool's daemon thread: run the full synchronous
+    gate + PR chain, then deliver the outcome over Telegram -- the same fire-and-forget
+    idiom as argo_webhook._safe_handle. Catches (Exception, SystemExit) so a Telegram
+    delivery failure (send_telegram.fail() -> sys.exit(1)) can't silently kill the
+    thread; a dead thread with no except net is exactly the "300s of silence" bug this
+    is replacing, so it must never happen again even when send itself is what breaks."""
+    import send_telegram
+    try:
+        text, _info = _propose_change_impl(title, description, files_json)
+    except (Exception, SystemExit) as exc:
+        log.error("propose_change (async): background draft failed", exc_info=True)
+        text = (f"I hit an error drafting that PR and couldn't finish: "
+                f"{type(exc).__name__}: {exc}")
+    try:
+        send_telegram.try_send_message(text)
+    except (Exception, SystemExit):
+        log.error("propose_change (async): could not deliver outcome", exc_info=True)
+
+
 @mcp.tool()
-@with_deadline(120)  # chains 5+ GitHub calls; offloaded off-loop by the decorator
 def propose_change(title: str, description: str, files_json: str) -> str:
     """Propose a new capability or fix by opening a GitHub PR for human review.
     Argo NEVER merges or deploys this itself — it drafts; a human approves.
@@ -1528,10 +1547,20 @@ def propose_change(title: str, description: str, files_json: str) -> str:
     A fix proposal MUST include a reproduction test under tests/ (tests/test_*.py) that
     fails before and passes after; proposals whose new code is never called are refused.
 
-    Returns the PR URL on success. Opens against a NEW branch only; cannot touch
-    the default branch."""
-    text, _info = _propose_change_impl(title, description, files_json)
-    return text
+    Drafting a PR chains 5+ GitHub calls plus a model call and can run long, especially
+    now that the authoring model always thinks -- far past what the MCP client's fixed
+    300s CallToolRequest budget allows. So this tool validates cheaply, hands the actual
+    draft-and-open work to a background thread, and returns immediately; the PR link (or
+    the exact blocker) is texted separately when the draft finishes."""
+    try:
+        files = json.loads(files_json)
+        assert isinstance(files, dict) and files
+    except Exception:
+        return "files_json must be a non-empty JSON object of {path: contents}."
+    threading.Thread(target=_propose_change_background,
+                     args=(title, description, files_json), daemon=True).start()
+    return ("On it — drafting the PR now; I'll text you the link or the exact "
+            "blocker in a few minutes.")
 
 
 def _resolve_edits(edits):
