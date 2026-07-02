@@ -7,9 +7,12 @@ Three small, well-tested primitives, kept in one auditable place:
     (429 / 5xx / timeouts / connection). Never retries auth/4xx-client errors.
   - CircuitBreaker: per-dependency breaker; opens after N consecutive failures,
     half-opens after a cooldown to probe recovery. Stops hammering a dead dep.
-  - DailyBudget: a hard per-day counter (calls and/or a cost proxy) persisted to
-    disk, so a runaway loop can't rack up cost across restarts. This is the
-    guard that prevents the $437 / 27M-token class of failure.
+  - DailyBudget: a hard per-day call-count ceiling (persisted to disk, so a
+    runaway loop can't rack up calls across restarts) PLUS a hard per-day
+    estimated-cost ceiling (DAILY_COST_CAP_USD, read live off argo_cost's
+    ledger). This is the guard that prevents the $437 / 27M-token class of
+    failure -- and, since a premium model can blow a cost budget well under the
+    call-count cap, the DAILY_COST_CAP_USD half specifically.
 
 Pure stdlib. No new deps. Used by argo_observe (LLM calls) and argo_webhook
 (per-day cap). Hard caps are non-negotiable: uncapped retry/recovery is itself a
@@ -17,6 +20,7 @@ documented failure mode.
 """
 
 import json
+import os
 import random
 import time
 from datetime import datetime, timezone
@@ -35,6 +39,11 @@ MAX_DELAY = 20.0
 BREAKER_THRESHOLD = 4     # consecutive failures before opening
 BREAKER_COOLDOWN = 60.0   # seconds before a half-open probe
 DAILY_CALL_CAP = 500      # hard ceiling on model calls per UTC day (all of Argo)
+# Hard ceiling on ESTIMATED model spend per UTC day (all of Argo), independent of
+# the flat call-count cap above -- a premium model (e.g. claude-fable-5) can blow a
+# cost budget well under 500 calls. Estimated via argo_cost.cost_today_usd() (a
+# $/MTok table applied to recorded token counts), not a billing-accurate figure.
+DAILY_COST_CAP_USD = float(os.environ.get("ARGO_DAILY_COST_CAP", "20.0"))
 
 
 def _is_transient(exc):
@@ -144,16 +153,25 @@ class CircuitBreaker:
 
 
 class DailyBudget:
-    """Hard per-UTC-day call ceiling, persisted so it survives restarts. Call
-    check_and_increment() before a model call; it raises BudgetExceeded at the
-    cap. This is the last line of defence against a runaway loop."""
+    """Hard per-UTC-day call ceiling (+ an estimated-cost ceiling), persisted so
+    the call count survives restarts. Call check_and_increment() before a model
+    call; it raises BudgetExceeded at either cap. This is the last line of
+    defence against a runaway loop -- or a premium model that blows a cost
+    budget well under the call-count cap.
+
+    The cost check is a live read of argo_cost.cost_today_usd() (today's
+    estimated spend across every model, from the same ledger every model call
+    already writes to via argo_cost.record_usage) rather than its own persisted
+    counter: the ledger IS the source of truth for spend, so a second counter
+    would just be a second, driftable copy of the same number."""
 
     class BudgetExceeded(RuntimeError):
         pass
 
-    def __init__(self, path=None, cap=DAILY_CALL_CAP):
+    def __init__(self, path=None, cap=DAILY_CALL_CAP, cost_cap=DAILY_COST_CAP_USD):
         self.path = Path(path) if path else (ROOT / "data" / "argo_budget.json")
         self.cap = cap
+        self.cost_cap = cost_cap
 
     def _load(self):
         if self.path.exists():
@@ -166,9 +184,24 @@ class DailyBudget:
     def _today(self):
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    def _check_cost(self, today):
+        # Late import: argo_cost is a peer low-level dep (both sit under
+        # argo_observe); importing at call time, not module load, avoids any
+        # import-order fragility between the two and keeps this cheap when the
+        # ledger is empty/missing (cost_today_usd degrades to 0.0, never raises).
+        import argo_cost
+        spent = argo_cost.cost_today_usd()
+        if spent >= self.cost_cap:
+            log.warning("daily budget exhausted: $%.2f cost cap reached for %s "
+                        "(spent $%.2f)", self.cost_cap, today, spent)
+            raise self.BudgetExceeded(
+                f"daily cost cap of ${self.cost_cap:.2f} reached for {today} "
+                f"(spent ${spent:.2f})")
+
     def check_and_increment(self):
-        state = self._load()
         today = self._today()
+        self._check_cost(today)
+        state = self._load()
         if state.get("day") != today:
             state = {"day": today, "count": 0}  # new day -> reset
         if state["count"] >= self.cap:
