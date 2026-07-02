@@ -546,18 +546,34 @@ def _redeliver_stranded_nudges():
     this is redelivery of an already-decided nudge, not a new one) and cheap (an
     empty ledger scan on every other run). No new scheduler wiring: rides
     whichever funnel (frontier or gaps) happens to run next, mirroring the
-    stale-claim sweep's placement right before the gates."""
+    stale-claim sweep's placement right before the gates.
+
+    The nudge promises "reply SKIP to drop it", so the lever must hold the
+    staging slot when the send goes out (the crash window can predate
+    _offer_auto_draft's own _stage). Staged under the gate lock, and NEVER by
+    clobbering a different staged lever -- the slot holds one conversation, and
+    a SKIP after this send would decline whatever is staged; if another lever
+    owns the slot, the whole redelivery defers to a later scan (nudge_delivered
+    stays unset, so it keeps retrying until the slot frees up)."""
     for l in _load_ledger()["levers"]:
         if (l.get("status") == "pr_open" and l.get("auto_drafted")
                 and not l.get("nudge_delivered")):
+            lid = l["id"]
+            with _GATE_LOCK:
+                staged = _peek_pending()
+                if staged is not None and staged != lid:
+                    log.info("evolve: deferring stranded-nudge redelivery for %s "
+                             "(%s holds the staging slot)", lid, staged)
+                    continue
+                _stage(lid)
             url = l.get("pr_url") or "(no url)"
             if _send(_drafted_nudge_text(l, url)):
-                _update_lever(l["id"], nudge_delivered=True)
+                _update_lever(lid, nudge_delivered=True)
                 log.info("evolve: redelivered stranded auto-draft nudge for %s",
-                         l["id"])
+                         lid)
             else:
                 log.warning("evolve: auto-draft nudge redelivery failed again for %s",
-                            l["id"])
+                            lid)
 
 
 def _match_item(items, source_title):

@@ -831,6 +831,42 @@ class AutoDraftMinorTest(EvolveBase):
             ev.scan()
         self.assertEqual(len(self.sent), 1)
 
+    def test_redelivered_nudge_stages_the_lever_so_skip_works(self):
+        # Bugbot #88 round 2 (same class as the accept_pending staging fix):
+        # redelivery sends _drafted_nudge_text -- which promises SKIP -- but never
+        # staged the lever, so after a crash between persisting pr_open and
+        # _offer_auto_draft's _stage, decline_pending found nothing to decline.
+        # Redelivery must stage the lever with the send; and it must NEVER clobber
+        # a DIFFERENT staged lever (a SKIP after the send would decline whatever
+        # holds the slot), deferring the whole redelivery instead.
+        self._lever(id="EV-935", feature="crashed_unstaged", magnitude="minor",
+                    status="pr_open", pr_number=311, pr_url="http://pr/311",
+                    auto_drafted=True)  # crash state: no nudge_delivered, unstaged
+        # Phase 1: another lever owns the staging slot -- redelivery must defer
+        # entirely (no send, flag untouched, the other staging intact).
+        self._lever(id="EV-936", feature="other_conversation", magnitude="major",
+                    status="nudged", nudged_at=_iso(datetime.now(timezone.utc)))
+        ev._stage("EV-936")
+        with mock.patch.object(ev, "_collect_new", return_value=[]):
+            ev.scan()
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("nudge_delivered", ev.get_lever("EV-935"))
+        self.assertEqual(ev._peek_pending(), "EV-936")
+        # Phase 2: the slot frees up (user resolves the other lever); the next
+        # scan stages + redelivers, and SKIP now really drops the drafted lever.
+        ev.decline_pending()
+        with mock.patch.object(ev, "_collect_new", return_value=[]):
+            ev.scan()
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("http://pr/311", self.sent[0])
+        self.assertIs(ev.get_lever("EV-935")["nudge_delivered"], True)
+        self.assertEqual(ev._peek_pending(), "EV-935")
+        text = ev.decline_pending()
+        self.assertIn("Dropped", text)
+        lever = ev.get_lever("EV-935")
+        self.assertEqual(lever["status"], "rejected")
+        self.assertIsNotNone(lever["muted_until"])
+
     def test_stranded_auto_draft_nudge_is_redelivered_next_scan(self):
         # Bugbot #87 MED: a PR opened but the nudge send failed -- the owner must
         # never learn nothing. First send fails: flag False, budget unconsumed.
