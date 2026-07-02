@@ -1,9 +1,10 @@
 """Temperature-guard tests — the tripwire-outage area.
 
 Locks the fix for the bug that 400'd the watch judge on every run: a model that
-rejects a custom `temperature` (claude-opus-4-8 outright; gpt-5/o-series accept only
-the default) must have the param OMITTED, not sent as 0. Pure: the SDKs are faked in
-sys.modules and the budget/breaker guard is bypassed, so no network or real key.
+rejects a custom `temperature` (claude-opus-4-8 and claude-fable-5 outright;
+gpt-5/o-series accept only the default) must have the param OMITTED, not sent as 0.
+Pure: the SDKs are faked in sys.modules and the budget/breaker guard is bypassed, so
+no network or real key.
 
 Run from the repo root:  PYTHONPATH=src python3 -m unittest discover -s tests
 """
@@ -21,7 +22,8 @@ import argo_observe as observe
 class RejectsTemperatureTest(unittest.TestCase):
     def test_reasoning_models_reject(self):
         for m in ["gpt-5", "gpt-5-mini", "o1", "o3-mini", "o4",
-                  "claude-opus-4-8", "claude-opus-4-8-20260101"]:
+                  "claude-opus-4-8", "claude-opus-4-8-20260101",
+                  "claude-fable-5", "claude-fable-5-20260201"]:
             self.assertTrue(observe._rejects_temperature(m), m)
 
     def test_standard_models_accept(self):
@@ -85,6 +87,11 @@ class CallOmitsTemperatureTest(unittest.TestCase):
     def test_anthropic_opus_omits_temperature(self):
         captured = {}
         self._run_anthropic("claude-opus-4-8", captured)
+        self.assertNotIn("temperature", captured)
+
+    def test_anthropic_fable_omits_temperature(self):
+        captured = {}
+        self._run_anthropic("claude-fable-5", captured)
         self.assertNotIn("temperature", captured)
 
     def test_anthropic_sonnet_keeps_temperature(self):

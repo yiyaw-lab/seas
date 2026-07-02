@@ -289,9 +289,20 @@ def _repo_files():
 
 
 def _resolve_model():
+    """First candidate wins that has a live key for its provider. ARGO_EVOLVE_MODEL
+    is checked first so self-upgrade authoring (the mapper calls below) can be
+    pinned to a premium/frontier tier (e.g. claude-fable-5) independently of the
+    routine-tier ARGO_CHAT_MODEL that watch/diagnose/self ride -- evolve is
+    already a low-volume, once-a-day call, so a premium model here doesn't move
+    the cost floor the way it would on the chat hot path. ARGO_CHAT_MODEL_PREMIUM
+    is the existing webhook/rehearse premium-escalation env (see argo_webhook.
+    CHAT_MODEL_PREMIUM); reusing it means one env flip upgrades both without a
+    third knob. Falls through to the routine default, unchanged from before."""
     import argo_observe as observe
-    candidates = ([os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"]
-                  + observe.resolve_models())
+    premium = os.environ.get("ARGO_EVOLVE_MODEL") or os.environ.get("ARGO_CHAT_MODEL_PREMIUM")
+    candidates = ([premium] if premium else []) + \
+        [os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"] + \
+        observe.resolve_models()
     for m in candidates:
         p = observe.provider_for(m)
         if p and os.environ.get(p["key_env"]):

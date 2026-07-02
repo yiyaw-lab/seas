@@ -26,12 +26,19 @@ the whole normalize+append in a try/except that logs (exc_info=True) and swallow
 is a missed measurement, never a failed call. Callers therefore need no extra
 guard of their own.
 
+Also backs argo_guard's DAILY_COST_CAP_USD: estimate_cost_usd() prices a row via
+PRICING_USD_PER_MTOK (a $/MTok table, matched by model prefix) and cost_today_usd()
+sums today's rows -- an estimate from raw token counts, not a billing-accurate
+reconciliation, but enough to stop a runaway premium-model loop before the call
+count cap alone would.
+
 Backed by the volume-capable ARGO_COST_LEDGER_PATH (see argo_paths); stdlib + the
 shared argo_store I/O and argo_log only.
 """
 
 import threading
 import time
+from datetime import datetime, timezone
 
 import argo_paths
 import argo_store
@@ -43,6 +50,56 @@ log = get_logger(__name__)
 # tmp)); record_usage/summarize read this global at call time so the override
 # bites -- never read argo_paths.COST_LEDGER_PATH directly inside a helper.
 LEDGER_PATH = argo_paths.COST_LEDGER_PATH
+
+# $/MTok (million tokens), input/output, for the models Argo actually calls.
+# Matched by prefix (a dated alias like claude-opus-4-8-20260101 still prices as
+# claude-opus-4-8) against the FIRST matching entry, so order matters: put more
+# specific prefixes before their shorter overlapping ones if that ever applies.
+# Used only for the daily cost cap (argo_guard.DAILY_COST_CAP_USD) -- an estimate
+# from raw token counts, not a billing-accurate reconciliation.
+PRICING_USD_PER_MTOK = (
+    ("claude-fable-5", (10.0, 50.0)),
+    ("claude-opus-4-8", (5.0, 25.0)),
+    ("claude-opus", (5.0, 25.0)),
+    ("claude-sonnet", (3.0, 15.0)),
+    ("claude-haiku", (1.0, 5.0)),
+    ("gpt-5", (10.0, 30.0)),
+    ("gpt-4o", (2.5, 10.0)),
+    ("gpt-4.1", (2.0, 8.0)),
+    ("gpt-4", (2.5, 10.0)),
+    ("o1", (15.0, 60.0)),
+    ("o3", (10.0, 40.0)),
+    ("o4", (10.0, 40.0)),
+    ("grok", (3.0, 15.0)),
+)
+_DEFAULT_PRICE_USD_PER_MTOK = (3.0, 15.0)  # unknown model: price like sonnet
+
+
+def price_for(model):
+    """(input_$/MTok, output_$/MTok) for `model`, matched by prefix. Unknown
+    models default to the sonnet rate rather than 0 -- an unrecognized model
+    still costs real money, and pricing it at 0 would let it bypass the cap."""
+    for prefix, price in PRICING_USD_PER_MTOK:
+        if model and model.startswith(prefix):
+            return price
+    return _DEFAULT_PRICE_USD_PER_MTOK
+
+
+def estimate_cost_usd(row):
+    """Estimate one ledger row's cost in USD from its token counts. Cache-read
+    tokens are billed at the input rate (Anthropic prices them well below a fresh
+    input token, but this estimate stays conservative -- see PRICING_USD_PER_MTOK's
+    docstring -- rather than risk under-counting toward the cap); cache-creation
+    tokens are billed at the input rate too (roughly what providers charge for the
+    write). Returns 0.0 for a malformed row rather than raising."""
+    try:
+        in_price, out_price = price_for(row.get("model"))
+        input_tok = (row.get("input_tokens", 0) + row.get("cache_read_tokens", 0)
+                     + row.get("cache_creation_tokens", 0))
+        output_tok = row.get("output_tokens", 0)
+        return (input_tok / 1_000_000) * in_price + (output_tok / 1_000_000) * out_price
+    except (TypeError, AttributeError):
+        return 0.0
 
 # Serializes the read-modify-write of record_usage(). Argo's model calls fan out
 # across the webhook's background chat threads (each turn can make several), so an
@@ -153,6 +210,24 @@ def _load():
     """Return the ledger as a list (empty on missing/corrupt/wrong-shape)."""
     rows = argo_store.load_json(LEDGER_PATH, [])
     return rows if isinstance(rows, list) else []
+
+
+def cost_today_usd(now=None):
+    """Estimated USD spend for the current UTC day, summed over the ledger via
+    estimate_cost_usd(). Backs argo_guard's DAILY_COST_CAP_USD check -- called
+    once per _guarded() call, so it stays O(ledger size); the ledger is Argo's
+    normal daily volume, not unbounded. `now` is injectable for tests."""
+    day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    total = 0.0
+    for r in _load():
+        ts = r.get("ts")
+        if not isinstance(ts, (int, float)):
+            continue
+        row_day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        if row_day != day:
+            continue
+        total += estimate_cost_usd(r)
+    return total
 
 
 def summarize(by="model"):
