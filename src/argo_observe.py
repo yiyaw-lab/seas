@@ -238,6 +238,24 @@ def _guarded(provider, do_call, label):
     return run()
 
 
+def _check_refusal(response, label):
+    """Guard against a model-level refusal (HTTP 200, stop_reason == 'refusal',
+    content empty or partial) -- seen on claude-fable-5. Every Anthropic
+    response-unpack site calls this immediately after _guarded() returns and
+    before touching response.content, so a refusal surfaces as a clear
+    RuntimeError instead of silently degrading to an empty "".join(...) (or, on
+    a stricter unpack, an IndexError). Raising here routes the failure through
+    the same `except Exception` model-failure path every other call-site error
+    already takes (see argo_webhook._llm_reply's last_error handling) -- no new
+    exception type, no new catch site needed.
+
+    A no-op for every normal stop_reason (end_turn, max_tokens, tool_use, ...),
+    so this changes nothing about existing behavior."""
+    if getattr(response, "stop_reason", None) == "refusal":
+        log.warning("model refused: %s", label)
+        raise RuntimeError(f"model refused: {label}")
+
+
 def _call_openai(job, model, temperature=1.0):
     from openai import OpenAI  # lazy: no-key path needs no SDK
 
@@ -317,6 +335,7 @@ def _call_anthropic(job, model, temperature=1.0):
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"anthropic/{model}")
+    _check_refusal(response, f"anthropic/{model}")
     argo_cost.record_usage(response, model, "anthropic", f"anthropic/{model}")
     return "".join(
         block.text for block in response.content if block.type == "text"
@@ -353,6 +372,7 @@ def describe_image(image_bytes, media_type, prompt, model=None, system=None,
         return client.messages.create(**kwargs)
 
     response = _guarded("anthropic", do_call, f"vision/{model}")
+    _check_refusal(response, f"vision/{model}")
     argo_cost.record_usage(response, model, "anthropic", f"vision/{model}")
     return "".join(b.text for b in response.content if b.type == "text")
 
@@ -364,12 +384,13 @@ MCP_BETA = "mcp-client-2025-11-20"
 
 
 # Models that reject a custom `temperature` (the API 400s) -> we OMIT the param and
-# take the model default. claude-opus-4-8 rejects it outright; OpenAI reasoning models
-# (gpt-5, o1/o3/o4) accept ONLY the default (1), so passing 0 fails the same way.
-# Matched by prefix so a dated alias (claude-opus-4-8-20xxxxxx, gpt-5-mini) is covered.
-# Do NOT add gpt-4o / gpt-4.1 -- those accept a custom temperature (the watch judge
-# relies on temperature=0 there).
-_TEMPERATURE_REJECTING_PREFIXES = ("claude-opus-4-8", "gpt-5", "o1", "o3", "o4")
+# take the model default. claude-opus-4-8 and claude-fable-5 reject it outright;
+# OpenAI reasoning models (gpt-5, o1/o3/o4) accept ONLY the default (1), so passing 0
+# fails the same way. Matched by prefix so a dated alias (claude-opus-4-8-20xxxxxx,
+# gpt-5-mini) is covered. Do NOT add gpt-4o / gpt-4.1 -- those accept a custom
+# temperature (the watch judge relies on temperature=0 there).
+_TEMPERATURE_REJECTING_PREFIXES = ("claude-opus-4-8", "claude-fable-5", "gpt-5",
+                                   "o1", "o3", "o4")
 
 
 def _rejects_temperature(model):
@@ -469,6 +490,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
 
     # Same guardrails as the other model calls: daily budget + breaker + retry.
     response = _guarded("anthropic", do_call, f"chat/{model}")
+    _check_refusal(response, f"chat/{model}")
     argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
 
     # Telemetry: log every tool the connector fired (name on use, ok/error on
