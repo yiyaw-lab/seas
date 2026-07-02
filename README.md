@@ -11,7 +11,7 @@
 
 [![Modules](https://img.shields.io/badge/modules-57-8b5cf6.svg)](src/)
 &nbsp;[![Lines](https://img.shields.io/badge/lines-~19k-8b5cf6.svg)](src/)
-&nbsp;[![Tests](https://img.shields.io/badge/tests-775_passing-3fb950.svg)](tests/)
+&nbsp;[![Tests](https://img.shields.io/badge/tests-885_passing-3fb950.svg)](tests/)
 &nbsp;[![Deps](https://img.shields.io/badge/deps-10_stdlib_core-3fb950.svg)](requirements.txt)
 &nbsp;[![Loops](https://img.shields.io/badge/self--improvement_loops-3-7d4fff.svg)](#how-argo-improves-itself)
 
@@ -22,7 +22,7 @@
 | Stat | Value |
 |---|---|
 | **Code** | 57 modules · ~19,000 lines of Python 3.11 |
-| **Tests** | 775 · zero network · zero LLM · no real data files |
+| **Tests** | 885 · zero network · zero LLM · no real data files |
 | **Dependencies** | 10 pinned, at the I/O edge — a **pure-stdlib core** (gate, world model, probes) |
 | **Self-improvement loops** | 3 — self-diagnosis · frontier-evolution · capability-gap (all human-gated) |
 | **Live** | Argo on Railway + Telegram, behind a human merge gate |
@@ -210,6 +210,9 @@ deliberate human gate.
 - **Self-create** — `propose_change` opens a GitHub PR so Argo can draft a new
   capability (feed, tool, schedule) for your review. It never self-merges.
   New feeds and schedules are data Argo can propose; workflows require a human.
+  The chat tool replies instantly and drafts in the background — Argo texts the
+  PR link (or the exact blocker) when the work lands, instead of holding the
+  turn open until it times out.
 
 ### How Argo improves itself
 
@@ -229,7 +232,11 @@ assertion never.
   lever: *"X shipped — I could adopt it in Y. EVOLVE or SKIP."* EVOLVE stress-tests
   a major lever through Argo's own adversaries (a KILL is final), drafts a real PR,
   and records a **dated prediction** that reality scores later — so an adopted
-  upgrade has to prove itself, not just sound good.
+  upgrade has to prove itself, not just sound good. Low-risk (minor) levers skip
+  the permission ask: Argo opens a **draft PR** itself and the daily text carries
+  the link — reply SKIP (or close the draft) to veto; merging stays yours. A
+  failed draft records its `fail_reason` on the lever, so a stalled upgrade is
+  diagnosable instead of silent.
 - **Capability-gap proposer** (the inward twin) — same lever ledger, same
   EVOLVE/SKIP gate, but the signal is Argo's *own* gaps: the honest "not used" list
   in its stack manifest plus its unresolved self-beliefs. It proposes the upgrades
@@ -350,7 +357,7 @@ experiments/  SEAS-00x experiment cards
 |---|---|---|
 | `argo-schedule.yml` | Hourly (UTC) — the dispatcher | Runs `argo_scheduled.py`; fires whatever is due per `data/schedule.json` with a 3-hour grace window. Drives the project and tripwire deliveries below. |
 | `seas-friday-telegram.yml` | **Fridays 15:00 UTC** (via hourly runner) | Generates a fresh weekly project bet and sends it to Telegram. |
-| `argo-watch.yml` | **Daily 14:00 / 19:00 / 00:00 UTC** (via hourly runner) | Tripwire sweep — fetches feeds, judges new items, sends up to 3 frontier alerts. |
+| `argo-watch.yml` | Manual only (`workflow_dispatch`) | Tripwire sweep, manual trigger. The scheduled sweep runs in the webhook's in-process `local_loop` on Railway (daily 00:00 UTC window, 15-min poll) — moved off the throttled Actions cron so it shares a filesystem with its seen-store and the F6 push gate. |
 | `tests.yml` | Every push / PR | Runs the unit suite (read-only, never commits). |
 | `seas-findings.yml` | Manual (`workflow_dispatch`) | Runs the SEAS V3 pipeline; commits findings + beliefs + probes + source bundles. |
 
@@ -382,7 +389,7 @@ Tests are pure — no network, no LLM, no real `data/*.json`. They override the
 module-level path constants (`SEEN_PATH`, `PROJECTS_LOG`, `SCHEDULE_PATH` /
 `STATE_PATH`, `CHAT_LOG_PATH`, `TASTE_PATH`) to a temp dir. Rule: a bug fix in
 any of those areas must add or extend a test that fails before the fix and
-passes after. New coverage (775 tests total):
+passes after. New coverage (885 tests total):
 
 - **self-improvement loops** — self-diagnosis gates + proposal lifecycle
   (`test_diagnose.py`, `test_incidents.py`), the frontier-evolution funnel +
@@ -412,7 +419,7 @@ passes after. New coverage (775 tests total):
 ## Quickstart (what works at each key tier)
 
 ```
-PYTHONPATH=src python3 -m unittest discover -s tests   # 775 tests, no keys needed
+PYTHONPATH=src python3 -m unittest discover -s tests   # 885 tests, no keys needed
 ```
 
 | You have… | What runs |
@@ -430,6 +437,9 @@ Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude (primary chat model) |
 | `OPENAI_API_KEY` | gpt-4o fallback |
+| `XAI_API_KEY` | Grok live-search tripwire source (with `ARGO_GROK_SOURCE=1`; RSS-only without it) |
+| `ARGO_CHAT_MODEL_PREMIUM` | premium-tier model for escalated chat, the rehearse judge, and evolve authoring (default `claude-opus-4-8`; set `claude-fable-5` for the Fable brain — needs org data retention ≥30 days) |
+| `ARGO_DAILY_COST_CAP` | daily USD spend ceiling across all model calls, enforced from the cost ledger alongside the flat 500-call cap (default `20`) |
 | `TELEGRAM_BOT_TOKEN` | bot identity |
 | `TELEGRAM_CHAT_ID` | your chat |
 | `WEBHOOK_URL` | public Railway URL (self-registers webhook on boot) |
