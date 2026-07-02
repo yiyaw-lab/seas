@@ -851,11 +851,16 @@ def _run_accept(lid, lever):
     }
     try:
         text, info = _propose(payload)
-    except Exception:
+    except Exception as exc:
         log.error("evolve: propose failed for %s", lid, exc_info=True)
-        text, info = None, None
+        text, info = f"{type(exc).__name__}: {exc}", None
     if not info:
-        _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED))
+        # Record WHY it failed on the lever itself -- previously only status="failed"
+        # was set, so a failed lever carried no failure reason and the only trace was
+        # whatever scrolled past in the operator console at the time. Capped small:
+        # this is a ledger field, not a log.
+        _update_lever(lid, status="failed", muted_until=_mute_until(MUTE_DAYS_FAILED),
+                      fail_reason=(text or "propose returned no PR info")[:300])
         return text or ("I tried to draft the upgrade PR but hit an error before "
                         "it opened. I'll let this one rest a week.")
     _ensure_proposal_row(info, lever.get("self_belief_id"))
