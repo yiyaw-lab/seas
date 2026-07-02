@@ -701,7 +701,7 @@ def recommend_project() -> str:
         import taste_signals
         taste = taste_signals.format_for_prompt()
     except Exception:
-        pass
+        log.debug("taste_signals unavailable, omitting taste block", exc_info=True)
 
     name = profile.name()
     poss = profile.pronoun("possessive").capitalize()  # Her / His / Their
