@@ -22,6 +22,7 @@ dir. Run from the repo root: PYTHONPATH=src python3 -m unittest discover -s test
 """
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -40,10 +41,14 @@ class _PushTmp(unittest.TestCase):
         self.enterContext(mock.patch.object(argo_pushes, "PUSHES_PATH", self.pushes))
         self.enterContext(mock.patch.object(argo_pushes, "PROACTIVE_PATH", self.proactive))
 
-    def _seed_history(self, total, linked):
+    def _seed_history(self, total, linked, ts_base=None):
         """Write `total` push rows, `linked` of them acted-on, so act_on_rate is a
-        known low/high value and the cold-start floor is cleared."""
-        rows = [{"id": i + 1, "ts": 1_000_000 + i, "kind": "watch",
+        known low/high value and the cold-start floor is cleared. Timestamps default
+        to "just now" (within the dial-up lookback window) so the dial-up applies;
+        pass an old ts_base to simulate STALE feedback outside the window."""
+        if ts_base is None:
+            ts_base = time.time() - 60  # recent: well inside DIALUP_LOOKBACK_SECONDS
+        rows = [{"id": i + 1, "ts": ts_base + i, "kind": "watch",
                  "content_hash": f"h{i}", "linked": i < linked, "linked_ts": None}
                 for i in range(total)]
         argo_store.save_json(self.pushes, rows)
@@ -123,6 +128,36 @@ class ColdStartTest(_PushTmp):
         self.assertEqual(argo_pushes.effective_threshold(), argo_pushes.DEFAULT_THRESHOLD)
         allowed, _ = argo_pushes.should_send("project")  # default 0.7*0.8 = 0.56
         self.assertTrue(allowed)
+
+
+class StaleFeedbackTest(_PushTmp):
+    """Verified-live regression: production logs showed `push gate SUPPRESS:
+    score=0.42 < threshold=0.43 (kind=watch)` for every watch alert, day after
+    day, since ~Jun 25 -- the user received nothing. The dial-up used to be
+    computed over ALL-TIME history with no recency check, so a low-engagement
+    stretch (plausible for a "watch" alert kind that doesn't invite a reply by
+    nature) ratchets the threshold up and it never comes back down, because old
+    unlinked rows never leave the denominator and there's no opposing signal.
+    """
+
+    def test_stale_history_falls_back_to_base_not_dialed_up(self):
+        # Long-ago low-engagement history: 10 rows, none linked, all from 30 days
+        # ago -- well outside DIALUP_LOOKBACK_SECONDS (14 days). Reproduces the
+        # starved-dial-up state without needing feedback to be totally absent.
+        stale_ts = time.time() - 30 * 24 * 3600
+        self._seed_history(total=10, linked=0, ts_base=stale_ts)
+
+        base = argo_pushes.get_threshold()  # DEFAULT_THRESHOLD == 0.30
+        # A real watch push: stakes*confidence = 0.6*0.7 = 0.42 (argo_watch's
+        # default "watch" kind score). Base threshold admits it (0.30 <= 0.42).
+        self.assertLessEqual(base, 0.42)
+
+        allowed, reason = argo_pushes.should_send("watch", stakes=0.6, confidence=0.7)
+        self.assertTrue(allowed,
+                         f"stale feedback must not suppress an in-bar push: {reason}")
+        # The effective threshold must have fallen back to base, not stayed
+        # dialed up from feedback that's no longer meaningful.
+        self.assertEqual(argo_pushes.effective_threshold(), base)
 
 
 class PushEndpointGateTest(_PushTmp):
