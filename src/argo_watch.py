@@ -126,28 +126,30 @@ def save_seen(seen):
     argo_store.save_json(SEEN_PATH, bounded)
 
 
+def _touch_and_eligible(seen, iid):
+    """LRU-touch a fetched id and report whether it's still eligible for judging.
+
+    Eligible = never seen, or seen but not yet settled (< MAX_ATTEMPTS un-alerted
+    judgings). Side effect: an id already in `seen` is moved to the store's newest
+    end. save_seen evicts oldest-first; without the touch, a settled item that
+    KEEPS circulating in a feed (GitHub Trending resurfaces repos for weeks) kept
+    its original slot, fell off the SEEN_CAP edge while still live, and re-alerted
+    -- the news-repeats-across-weeks bug. Shared by both collectors so the touch
+    semantics can't drift between them."""
+    if iid in seen:
+        seen[iid] = seen.pop(iid)
+    return seen.get(iid, 0) < MAX_ATTEMPTS
+
+
 def collect_new(seen):
-    """Fetch all feeds, return items still eligible for judging.
-
-    An item is eligible if it's never been seen, or has been seen but not yet
-    settled (fewer than MAX_ATTEMPTS un-alerted judgings). Settled means either
-    alerted (recorded at MAX_ATTEMPTS) or judged-and-skipped MAX_ATTEMPTS times.
-
-    Side effect: every fetched id already in `seen` is moved to the store's
-    newest end (LRU touch). save_seen evicts oldest-first; without the touch, a
-    settled item that KEEPS circulating in a feed (GitHub Trending resurfaces
-    repos for weeks) kept its original slot, fell off the SEEN_CAP edge while
-    still live, and re-alerted -- the news-repeats-across-weeks bug.
-    """
+    """Fetch all feeds, return items still eligible for judging (see
+    _touch_and_eligible for the eligibility rule and the LRU-touch side effect on
+    `seen`)."""
     new = []
     for label, url in fetch_signals.FEEDS:
         for item in fetch_signals.fetch_feed(label, url)[:PER_FEED]:
             iid = _item_id(item)
-            if not iid:
-                continue
-            if iid in seen:
-                seen[iid] = seen.pop(iid)  # LRU touch: still live in a feed
-            if seen.get(iid, 0) < MAX_ATTEMPTS:
+            if iid and _touch_and_eligible(seen, iid):
                 new.append(item)
     return new
 
@@ -173,9 +175,7 @@ def collect_grok(seen, already):
         iid = _item_id(item)
         if not iid or iid in have:
             continue
-        if iid in seen:
-            seen[iid] = seen.pop(iid)  # LRU touch, same as collect_new
-        if seen.get(iid, 0) < MAX_ATTEMPTS:
+        if _touch_and_eligible(seen, iid):
             have.add(iid)
             out.append(item)
     log.info("grok source added %d new candidate(s)", len(out))

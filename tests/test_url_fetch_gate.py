@@ -47,6 +47,10 @@ class UrlFetchGateTest(unittest.TestCase):
             wh.argo_cmo, "is_active", lambda c: False))
         self.enterContext(mock.patch.object(wh, "_recent_turns", lambda c: []))
         self.enterContext(mock.patch.object(wh.profile, "name", lambda: "User"))
+        # Purity: _generate_reply calls argo_memory.relevant(chat_id, log_user_text)
+        # which would otherwise read the real data/argo_chat.json.
+        self.enterContext(mock.patch.object(
+            wh.argo_memory, "relevant", lambda *a, **k: []))
         self.enterContext(mock.patch.object(
             wh.argo_memory, "record_many", lambda *a, **k: None))
 
@@ -79,6 +83,18 @@ class UrlFetchGateTest(unittest.TestCase):
         out = wh._generate_reply(7, "how are you", "how are you")
         self.assertEqual(out, "plain answer")
         self.assertEqual(chat.call_count, 1)
+
+    def test_gate_keys_off_user_text_not_route_text(self):
+        # The user's real message (log_user_text) has the URL; route_text is a
+        # synthetic recovery note with none. The gate must fire on the user's
+        # words, not the routing string (which the CONFIRM-recovery caller sets).
+        chat = mock.Mock(side_effect=[("from priors", []), ("redone", [])])
+        self.enterContext(mock.patch.object(observe, "chat_with_mcp", chat))
+        out = wh._generate_reply(
+            7, "look at https://example.com/x", "look at https://example.com/x",
+            route_text="[synthetic routing note with no link]")
+        self.assertEqual(out, "redone")
+        self.assertEqual(chat.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -458,8 +458,13 @@ def _final_text(content):
     the last tool block. The connector interleaves the model's working narration
     ("Let me check the schedule... Now let me read the watch module...") between
     tool calls; joining every text block sent that inner monologue to Telegram as
-    the reply. Falls back to all text when nothing follows the last tool block;
-    a no-tool response is unchanged (all text)."""
+    the reply. A no-tool response has no tool block, so last_tool stays -1 and the
+    whole thing is returned unchanged.
+
+    Fallback when nothing follows the last tool block (the turn ended on a tool
+    call): the LAST text block only, not every text block -- re-joining all of
+    them would dump the very working narration this exists to suppress."""
+    texts = [b.text for b in content if getattr(b, "type", None) == "text"]
     last_tool = -1
     for i, b in enumerate(content):
         if getattr(b, "type", "") in ("mcp_tool_use", "mcp_tool_result"):
@@ -468,8 +473,7 @@ def _final_text(content):
                    if getattr(b, "type", None) == "text")
     if tail.strip():
         return tail
-    return "".join(b.text for b in content
-                   if getattr(b, "type", None) == "text")
+    return texts[-1] if texts else ""
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
@@ -565,24 +569,39 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         # content back as the assistant turn. Left unresumed, the model's
         # half-finished narration ("Let me propose the edit.") became the final
         # Telegram reply and the planned work silently never happened.
+        #
+        # Accumulate every response's content into ONE growing assistant turn:
+        # the resumed responses carry only the CONTINUATION, so text emitted
+        # before the pause would be lost if we looked at the last response alone,
+        # and echoing each response as its own assistant message would produce
+        # consecutive assistant turns. Both are avoided by resending the single
+        # accumulated turn. base_messages is captured once so the caller's list
+        # never grows as a side effect.
+        base_messages = kwargs["messages"]
+        accumulated = list(response.content)
         resumes = 0
         while (getattr(response, "stop_reason", None) == "pause_turn"
                and resumes < _MAX_PAUSE_RESUMES):
             resumes += 1
             log.info("mcp pause_turn: resuming (%d/%d)", resumes,
                      _MAX_PAUSE_RESUMES)
-            # New list, not append: do_call reads kwargs at call time, and the
-            # caller's `messages` list must not grow as a side effect.
-            kwargs["messages"] = kwargs["messages"] + [
-                {"role": "assistant", "content": response.content}]
+            kwargs["messages"] = base_messages + [
+                {"role": "assistant", "content": list(accumulated)}]
             response = _guarded("anthropic", do_call, f"chat/{model}")
             # Same per-response bookkeeping as the first call: usage recorded
             # BEFORE the refusal check, and every unpack site checks refusal.
             argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
             _check_refusal(response, f"chat/{model}")
             _collect_tool_events(response, events)
-
-    text = _final_text(response.content)
+            accumulated += list(response.content)
+        if getattr(response, "stop_reason", None) == "pause_turn":
+            # Hit the resume cap still paused: the reply may be truncated, so say
+            # so in the log rather than shipping a half-finished turn silently.
+            log.warning("mcp pause_turn: resume cap (%d) hit; reply may be "
+                        "truncated", _MAX_PAUSE_RESUMES)
+        text = _final_text(accumulated)
+    else:
+        text = _final_text(response.content)
     return (text, events) if return_tool_events else text
 
 

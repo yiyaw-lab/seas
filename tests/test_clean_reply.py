@@ -25,6 +25,17 @@ class CleanReplyRespacingTest(unittest.TestCase):
         self.assertEqual(_clean_reply("firecrawl_client.scrape() is the seam"),
                          "firecrawl_client.scrape() is the seam")
 
+    def test_snake_case_pascal_attr_stays_glued(self):
+        # Rule 1 (capitalized attr) also skips a snake_case receiver:
+        # "fetch_signals.Feeds" is attribute access, not a sentence boundary.
+        self.assertEqual(_clean_reply("uses fetch_signals.Feeds here"),
+                         "uses fetch_signals.Feeds here")
+
+    def test_initialism_receiver_stays_glued(self):
+        # A receiver ending in an uppercase letter (initialism) is not respaced.
+        self.assertEqual(_clean_reply("the PR.Got merged"),
+                         "the PR.Got merged")
+
     def test_method_call_on_plain_receiver_stays_glued(self):
         self.assertEqual(_clean_reply("call client.scrape(url) next"),
                          "call client.scrape(url) next")
