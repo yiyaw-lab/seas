@@ -163,6 +163,40 @@ class AttemptsGatingTest(unittest.TestCase):
         self.assertNotIn("settled", eligible)       # == MAX_ATTEMPTS
 
 
+class LruTouchTest(unittest.TestCase):
+    """The news-repeats-across-weeks bug: save_seen evicts oldest-by-insertion,
+    and nothing refreshed an entry's slot -- so a settled item STILL circulating
+    in a feed (GitHub Trending resurfaces repos for weeks) fell off the SEEN_CAP
+    edge while live and re-alerted. collect_new now LRU-touches every fetched id
+    it has seen."""
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(watch, "SEEN_PATH",
+                                            self.tmp / "argo_seen.json"))
+        items = [{"link": "http://hot", "title": "hot"}]
+        self.enterContext(mock.patch.object(watch.fetch_signals, "FEEDS",
+                                            [("L", "http://feed")]))
+        self.enterContext(mock.patch.object(watch.fetch_signals, "fetch_feed",
+                                            lambda label, url: items))
+
+    def test_settled_item_still_in_feed_survives_cap_eviction(self):
+        # 'hot' was alerted long ago (settled, OLDEST slot) but is still in the
+        # feed today; 'mid1'/'mid2' were seen after it and have since left the
+        # feeds. With the cap at 3 the touch must keep 'hot' and evict the
+        # genuinely stale 'mid1' -- before the fix 'hot' was evicted and would
+        # re-alert as brand new next run.
+        seen = {"hot": watch.MAX_ATTEMPTS, "mid1": 1, "mid2": 1}
+        eligible = watch.collect_new(seen)
+        self.assertEqual(eligible, [])              # settled: not re-judged
+        seen["new1"] = 1                            # this run's fresh item
+        with mock.patch.object(watch, "SEEN_CAP", 3):
+            watch.save_seen(seen)
+        kept = watch.load_seen()
+        self.assertIn("hot", kept)
+        self.assertNotIn("mid1", kept)
+
+
 class TripwireStatusTest(unittest.TestCase):
     """get_tripwire_status (MCP tool) reports the REAL dedup state, so Argo stops
     guessing 'no dedup memory' and offering to build a log that already exists."""

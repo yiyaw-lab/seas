@@ -95,6 +95,57 @@ class ChatToolEventsTest(unittest.TestCase):
         self.assertNotIn("ops@example.com", logged)
         self.assertIn("<redacted>", logged)
 
+    def test_narration_before_tools_is_dropped(self):
+        # The reply is the segment AFTER the last tool block; the interleaved
+        # working narration ("Let me check...") used to be joined into the
+        # Telegram reply as leaked inner monologue.
+        text, events = self._run(
+            [_block(type="text", text="Let me check the schedule first."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok"),
+             _block(type="text", text="Here is the answer.")],
+            return_tool_events=True)
+        self.assertEqual(text, "Here is the answer.")
+        self.assertEqual(events, ["web_fetch"])
+
+    def test_all_narration_falls_back_to_full_text(self):
+        # Nothing after the last tool block: better the narration than nothing
+        # (an empty reply reads as a model failure upstream).
+        text, _ = self._run(
+            [_block(type="text", text="Let me check."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")],
+            return_tool_events=True)
+        self.assertEqual(text, "Let me check.")
+
+    def test_pause_turn_is_resumed_and_events_merged(self):
+        # The connector pauses a long tool loop (stop_reason "pause_turn");
+        # unresumed, the half-finished narration became the final reply and the
+        # planned work silently never happened.
+        paused = _response(
+            [_block(type="text", text="Let me look."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")])
+        paused.stop_reason = "pause_turn"
+        final = _response(
+            [_block(type="mcp_tool_use", name="propose_change"),
+             _block(type="mcp_tool_result", is_error=False, content="ok"),
+             _block(type="text", text="Opened the PR.")])
+        responses = [paused, final]
+        calls = []
+
+        def guarded(provider, fn, label):
+            calls.append(label)
+            return responses.pop(0)
+
+        with mock.patch.object(observe, "_guarded", guarded):
+            text, events = observe.chat_with_mcp(
+                "sys", _MESSAGES, "claude-sonnet-4-6", mcp_servers=_SERVERS,
+                return_tool_events=True)
+        self.assertEqual(text, "Opened the PR.")
+        self.assertEqual(events, ["web_fetch", "propose_change"])
+        self.assertEqual(len(calls), 2)  # one resume, no runaway loop
+
 
 if __name__ == "__main__":
     unittest.main()

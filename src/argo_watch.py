@@ -55,7 +55,7 @@ PER_FEED = 10          # consider this many recent items per feed
 # nothing else. This is only a safety backstop so a pathological feed day can't
 # blow up the phone — it is NOT a target and is not shown to the judge.
 ALERT_SAFETY_CAP = 8
-SEEN_CAP = 2000        # keep the seen-store bounded
+SEEN_CAP = 5000        # keep the seen-store bounded (see LRU touch in collect_new)
 MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
 
@@ -132,12 +132,22 @@ def collect_new(seen):
     An item is eligible if it's never been seen, or has been seen but not yet
     settled (fewer than MAX_ATTEMPTS un-alerted judgings). Settled means either
     alerted (recorded at MAX_ATTEMPTS) or judged-and-skipped MAX_ATTEMPTS times.
+
+    Side effect: every fetched id already in `seen` is moved to the store's
+    newest end (LRU touch). save_seen evicts oldest-first; without the touch, a
+    settled item that KEEPS circulating in a feed (GitHub Trending resurfaces
+    repos for weeks) kept its original slot, fell off the SEEN_CAP edge while
+    still live, and re-alerted -- the news-repeats-across-weeks bug.
     """
     new = []
     for label, url in fetch_signals.FEEDS:
         for item in fetch_signals.fetch_feed(label, url)[:PER_FEED]:
             iid = _item_id(item)
-            if iid and seen.get(iid, 0) < MAX_ATTEMPTS:
+            if not iid:
+                continue
+            if iid in seen:
+                seen[iid] = seen.pop(iid)  # LRU touch: still live in a feed
+            if seen.get(iid, 0) < MAX_ATTEMPTS:
                 new.append(item)
     return new
 
@@ -161,7 +171,11 @@ def collect_grok(seen, already):
     out = []
     for item in grok_search.fetch():
         iid = _item_id(item)
-        if iid and iid not in have and seen.get(iid, 0) < MAX_ATTEMPTS:
+        if not iid or iid in have:
+            continue
+        if iid in seen:
+            seen[iid] = seen.pop(iid)  # LRU touch, same as collect_new
+        if seen.get(iid, 0) < MAX_ATTEMPTS:
             have.add(iid)
             out.append(item)
     log.info("grok source added %d new candidate(s)", len(out))

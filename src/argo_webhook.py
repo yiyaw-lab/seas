@@ -120,6 +120,12 @@ MCP_SERVERS = _build_mcp_servers()
 # defeat the default, leaving an unroutable model name.
 CHAT_MODEL_DEFAULT = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
 CHAT_MODEL_PREMIUM = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
+# Output-token CAP for a tool-enabled chat turn (a cap, not a target -- billed
+# only for tokens actually produced). At chat_with_mcp's 1024 default the
+# server-side tool loop's working narration routinely exhausted the budget
+# mid-turn, so replies died half-planned ("Let me propose the edit." ... nothing)
+# and the next turn re-discovered everything from scratch.
+CHAT_MAX_TOKENS = 4096
 # Message looks high-stakes -> escalate to the premium model.
 PREMIUM_TRIGGERS = (
     "should i build", "worth building", "strategy", "strategic", "architecture",
@@ -554,17 +560,24 @@ def _clean_reply(text):
     # Repair a missing space after sentence-ending punctuation: the model
     # sometimes glues sentences together ("work.good", "PR.got") -- more so after
     # markdown stripping. Two cases:
-    #  1) .!? directly before an UPPERCASE letter (skip lone-capital initialisms
-    #     like U.S.A.).
-    text = re.sub(r"(?<![A-Z])([.!?])([A-Z])", r"\1 \2", text)
+    #  1) .!? directly before a real sentence start: Uppercase-then-lowercase, or
+    #     a lone I/A. Requiring the lowercase second letter skips initialisms
+    #     (U.S.A.) AND all-caps identifier tails ("fetch_signals.FEEDS" used to
+    #     come out "fetch_signals. FEEDS").
+    text = re.sub(r"(?<![A-Z])([.!?])(?=[A-Z][a-z]|I\b|A\b)", r"\1 ", text)
     #  2) .!? glued to a LOWERCASE word, where >=2 letters precede the punctuation
     #     (so initialisms/decimals like U.S.A. / a.b / 3.14 are skipped) AND the
     #     following word isn't a known file-ext / TLD (so docs.x.ai, file.py,
-    #     argo_chat.json, example.com stay intact).
+    #     argo_chat.json, example.com stay intact) AND it isn't a code reference:
+    #     a snake_case receiver ("firecrawl_client.scrape") or a method call
+    #     ("client.scrape(") stays glued.
     text = re.sub(
-        r"([A-Za-z]{2})([.!?])([a-z]{2,})",
-        lambda m: m.group(0) if m.group(3) in _NOT_SENTENCE_AFTER
-        else f"{m.group(1)}{m.group(2)} {m.group(3)}",
+        r"(\w*[A-Za-z]{2})([.!?])([a-z]{2,})(\()?",
+        lambda m: m.group(0) if (
+            m.group(3) in _NOT_SENTENCE_AFTER
+            or "_" in m.group(1)
+            or m.group(4)
+        ) else f"{m.group(1)}{m.group(2)} {m.group(3)}",
         text,
     )
     # Tidy leftover double spaces.
@@ -675,6 +688,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 raw, tool_events = observe.chat_with_mcp(
                     system, messages, model,
                     mcp_servers=MCP_SERVERS, return_tool_events=True,
+                    max_tokens=CHAT_MAX_TOKENS,
                 )
                 # Anti-bluff re-attempt: if the reply narrates a doable-in-turn
                 # action (a PR / a CONFIRM) but no backing tool fired, re-prompt
@@ -696,7 +710,29 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                             {"role": "user", "content": v.gap_note},
                         ],
                         model, mcp_servers=MCP_SERVERS, return_tool_events=True,
+                        max_tokens=CHAT_MAX_TOKENS,
                     )
+                elif v is None and isinstance(final_content, str):
+                    # URL-before-fetch gate (Argo's own most-logged chat_weakness):
+                    # the user's message names a URL but no read tool ran, so the
+                    # reply was composed from priors, not the page. Force ONE redo:
+                    # fetch it, or say plainly the link wasn't opened.
+                    gap = _url_fetch_gap(route_text, tool_events)
+                    if gap:
+                        log.info("url-no-fetch gate: forcing re-attempt")
+                        _note_incident("chat_weakness",
+                                       "replied about a URL without fetching it",
+                                       route_text[:200])
+                        raw, tool_events = observe.chat_with_mcp(
+                            system,
+                            messages + [
+                                {"role": "assistant", "content": raw},
+                                {"role": "user", "content": gap},
+                            ],
+                            model, mcp_servers=MCP_SERVERS,
+                            return_tool_events=True,
+                            max_tokens=CHAT_MAX_TOKENS,
+                        )
             else:
                 # Tool-less path: the original single string prompt, reached only
                 # when no MCP server is configured (or a non-tool provider). Text
@@ -781,6 +817,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
 _PR_CLAIM_RE = argo_bluff._PR_CLAIM_RE
 _PR_NUDGE = argo_bluff._PR_NUDGE
 _claim_unbacked = argo_bluff.claim_unbacked
+_url_fetch_gap = argo_bluff.url_fetch_gap
 
 
 def _pr_blocker():

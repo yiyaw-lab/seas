@@ -205,3 +205,30 @@ def guard_phantom_send(reply, tool_events, mcp_servers, note_incident, log):
     note_incident(v.incident_kind, v.incident_sig,
                   f"events={tool_events or 'none'}; reply={reply[:120]}")
     return v.replacement
+
+
+# --- URL-before-fetch gate -------------------------------------------------
+# classify_claim only fires when the REPLY claims it read something; a reply
+# that silently answers ABOUT a link from priors passes it. This gate keys off
+# the USER's message instead -- the code enforcement of Argo's most-logged
+# chat_weakness (self-flagged 4x: it composed replies about a URL before the
+# fetch path ever ran, so the guardrail existed only as a stated intention).
+_URL_IN_MSG_RE = re.compile(r"https?://[^\s)>\]]+")
+
+_URL_FETCH_GAP = (
+    "\n\n[system note: the user's message contains a URL but no read tool ran "
+    "this turn. Redo the reply: either call web_fetch/study_url on that URL now "
+    "and answer from what it actually returns, or state plainly that you have "
+    "not opened the link and answer only from what the user themselves wrote. "
+    "Never describe or summarize a link you did not fetch.]")
+
+
+def url_fetch_gap(user_text, tool_events):
+    """Return the gap note for ONE forced re-attempt when the user's turn
+    contains a URL and no read-family tool fired; None when the gate passes
+    (no URL, or a read receipt exists)."""
+    if not isinstance(user_text, str) or not _URL_IN_MSG_RE.search(user_text):
+        return None
+    if set(tool_events) & _LINK_READ_TOOLS:
+        return None
+    return _URL_FETCH_GAP
