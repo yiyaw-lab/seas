@@ -1598,12 +1598,16 @@ def _resolve_edits(edits):
         path, new = e.get("path"), e.get("new")
         if not path or not isinstance(new, str):
             return None, "each edit needs a 'path' and a string 'new'."
-        if path in files:
-            return None, f"two edits target '{path}'; combine them into one."
         refusal = _path_refusal(path)  # refuse unsafe/protected paths BEFORE any read
         if refusal:
             return None, refusal
         if "old" not in e:
+            if path in files:
+                # A no-'old' entry CREATES a file, so it can't follow another
+                # edit to the same path in this proposal -- edit the already-
+                # resolved text with 'old'/'new' instead.
+                return None, (f"'{path}' already has an edit in this proposal; "
+                              f"omit 'old' only to create a NEW file.")
             # No 'old' = CREATE a new file submitted in full, so cap it like a
             # propose_change file (the surgical size exemption is only for edits).
             if len(new.encode()) > MAX_PROPOSE_BYTES:
@@ -1636,18 +1640,29 @@ def _resolve_edits(edits):
         if len(old.encode()) + len(new.encode()) > MAX_PROPOSE_BYTES:
             return None, (f"the edit for '{path}' is too large (>{MAX_PROPOSE_BYTES} bytes "
                           f"of old+new text); split it into smaller edits.")
-        ok, cur = _gh_write(
-            "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
-        if not ok or not isinstance(cur, dict) or "content" not in cur:
-            return None, f"couldn't read the current '{path}' to edit it: {cur}"
-        try:
-            content = base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
-        except (ValueError, TypeError):
-            return None, f"couldn't decode the current '{path}'."
+        if path in files:
+            # A second edit to the same file applies against the text the earlier
+            # edit produced, so a multi-spot change to one module resolves
+            # sequentially. (This used to be rejected outright -- "two edits
+            # target '<path>'; combine them into one." -- which killed Argo's own
+            # multi-edit drafts against argo_watch.py and argo_observe.py.)
+            content = files[path]
+        else:
+            ok, cur = _gh_write(
+                "GET", f"/repos/{PROPOSE_REPO}/contents/{path}?ref={PROPOSE_BASE}", None)
+            if not ok or not isinstance(cur, dict) or "content" not in cur:
+                return None, f"couldn't read the current '{path}' to edit it: {cur}"
+            try:
+                content = base64.b64decode(cur["content"]).decode("utf-8", errors="replace")
+            except (ValueError, TypeError):
+                return None, f"couldn't decode the current '{path}'."
         n = content.count(old)
         if n == 0:
-            return None, (f"the 'old' text was not found in '{path}'; it must match the "
-                          f"current file exactly (read it first with github_read_file).")
+            hint = (" AFTER the earlier edits in this proposal (the 'old' must "
+                    "match the edited text)" if path in files else
+                    "; it must match the current file exactly (read it first "
+                    "with github_read_file)")
+            return None, f"the 'old' text was not found in '{path}'{hint}."
         if n > 1:
             return None, (f"the 'old' text appears {n} times in '{path}'; include more "
                           f"surrounding lines so it matches exactly once.")

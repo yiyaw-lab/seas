@@ -425,6 +425,57 @@ def _record_tool_error(name, detail):
         log.debug("record_incident failed for tool %s", name, exc_info=True)
 
 
+# Resume a paused connector tool loop at most this many times per turn. Each
+# resume is another guarded API call, so this bounds a runaway loop's spend.
+_MAX_PAUSE_RESUMES = 4
+
+
+def _collect_tool_events(response, events):
+    """Log every tool the connector fired in `response` (name on use, ok/error on
+    result) and append the fired names to `events`. A bare error-only log hid the
+    most important case -- the model SAYS it sent/proposed something but no tool
+    fired -- so each call is logged and the caller gets the fired-tool list to
+    detect that phantom (return_tool_events)."""
+    name = "?"  # last tool_use name; a result block follows its own use
+    for b in response.content:
+        bt = getattr(b, "type", "")
+        if bt == "mcp_tool_use":
+            name = getattr(b, "name", "?")
+            events.append(name)
+            log.info("mcp tool_use: %s", name)
+        elif bt == "mcp_tool_result":
+            import argo_incidents  # scrub secrets before the snippet is logged/stored
+            snippet = argo_incidents._redact(str(getattr(b, "content", ""))[:200])
+            if getattr(b, "is_error", False):
+                log.warning("mcp tool_result ERROR: %s", snippet)
+                _record_tool_error(name, snippet)
+            else:
+                log.info("mcp tool_result ok: %s", snippet)
+
+
+def _final_text(content):
+    """The reply text of a (possibly tool-looping) response: only the text AFTER
+    the last tool block. The connector interleaves the model's working narration
+    ("Let me check the schedule... Now let me read the watch module...") between
+    tool calls; joining every text block sent that inner monologue to Telegram as
+    the reply. A no-tool response has no tool block, so last_tool stays -1 and the
+    whole thing is returned unchanged.
+
+    Fallback when nothing follows the last tool block (the turn ended on a tool
+    call): the LAST text block only, not every text block -- re-joining all of
+    them would dump the very working narration this exists to suppress."""
+    texts = [b.text for b in content if getattr(b, "type", None) == "text"]
+    last_tool = -1
+    for i, b in enumerate(content):
+        if getattr(b, "type", "") in ("mcp_tool_use", "mcp_tool_result"):
+            last_tool = i
+    tail = "".join(b.text for b in content[last_tool + 1:]
+                   if getattr(b, "type", None) == "text")
+    if tail.strip():
+        return tail
+    return texts[-1] if texts else ""
+
+
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
                   temperature=1.0, return_tool_events=False, output_schema=None):
     """Claude chat call with structured messages and optional MCP tool servers.
@@ -435,8 +486,10 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     is the connector's server-definition list; for each server we add the matching
     `mcp_toolset` entry to `tools` (required by the 2025-11-20 connector). Anthropic
     runs the tool loop and may return mcp_tool_use/mcp_tool_result blocks alongside
-    text. Returns the joined text; with return_tool_events=True returns
-    (text, [fired_tool_name, ...]) so a caller can tell a real send from a phantom.
+    text. Returns the reply text (the segment AFTER the last tool block -- the
+    interleaved working narration is not the reply; see _final_text); with
+    return_tool_events=True returns (text, [fired_tool_name, ...]) so a caller can
+    tell a real send from a phantom.
 
     Dispatches by provider: Claude via the Anthropic MCP connector (below), GPT via
     the OpenAI Responses API remote-MCP tool (_chat_with_mcp_openai). Both point at
@@ -508,33 +561,47 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
     _check_refusal(response, f"chat/{model}")
 
-    # Telemetry: log every tool the connector fired (name on use, ok/error on
-    # result) and collect the fired names. A bare error-only log hid the most
-    # important case -- the model SAYS it sent/proposed something but no tool
-    # fired -- so we log each call and hand the caller the fired-tool list to
-    # detect that phantom (return_tool_events).
     events = []
     if mcp_servers:
-        name = "?"  # last tool_use name; a result block follows its own use
-        for b in response.content:
-            bt = getattr(b, "type", "")
-            if bt == "mcp_tool_use":
-                name = getattr(b, "name", "?")
-                events.append(name)
-                log.info("mcp tool_use: %s", name)
-            elif bt == "mcp_tool_result":
-                import argo_incidents  # scrub secrets before the snippet is logged/stored
-                snippet = argo_incidents._redact(str(getattr(b, "content", ""))[:200])
-                if getattr(b, "is_error", False):
-                    log.warning("mcp tool_result ERROR: %s", snippet)
-                    _record_tool_error(name, snippet)
-                else:
-                    log.info("mcp tool_result ok: %s", snippet)
-
-    text = "".join(
-        block.text for block in response.content
-        if getattr(block, "type", None) == "text"
-    )
+        _collect_tool_events(response, events)
+        # The connector PAUSES a long server-side tool loop (stop_reason
+        # "pause_turn") and expects the caller to resume by sending the paused
+        # content back as the assistant turn. Left unresumed, the model's
+        # half-finished narration ("Let me propose the edit.") became the final
+        # Telegram reply and the planned work silently never happened.
+        #
+        # Accumulate every response's content into ONE growing assistant turn:
+        # the resumed responses carry only the CONTINUATION, so text emitted
+        # before the pause would be lost if we looked at the last response alone,
+        # and echoing each response as its own assistant message would produce
+        # consecutive assistant turns. Both are avoided by resending the single
+        # accumulated turn. base_messages is captured once so the caller's list
+        # never grows as a side effect.
+        base_messages = kwargs["messages"]
+        accumulated = list(response.content)
+        resumes = 0
+        while (getattr(response, "stop_reason", None) == "pause_turn"
+               and resumes < _MAX_PAUSE_RESUMES):
+            resumes += 1
+            log.info("mcp pause_turn: resuming (%d/%d)", resumes,
+                     _MAX_PAUSE_RESUMES)
+            kwargs["messages"] = base_messages + [
+                {"role": "assistant", "content": list(accumulated)}]
+            response = _guarded("anthropic", do_call, f"chat/{model}")
+            # Same per-response bookkeeping as the first call: usage recorded
+            # BEFORE the refusal check, and every unpack site checks refusal.
+            argo_cost.record_usage(response, model, "anthropic", f"chat/{model}")
+            _check_refusal(response, f"chat/{model}")
+            _collect_tool_events(response, events)
+            accumulated += list(response.content)
+        if getattr(response, "stop_reason", None) == "pause_turn":
+            # Hit the resume cap still paused: the reply may be truncated, so say
+            # so in the log rather than shipping a half-finished turn silently.
+            log.warning("mcp pause_turn: resume cap (%d) hit; reply may be "
+                        "truncated", _MAX_PAUSE_RESUMES)
+        text = _final_text(accumulated)
+    else:
+        text = _final_text(response.content)
     return (text, events) if return_tool_events else text
 
 
@@ -603,19 +670,28 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
             events.append(name)
             log.info("openai mcp_call ok: %s", name)
 
-    # output_text is the SDK's aggregated assistant text; fall back to walking the
-    # message items if a version doesn't expose it.
-    text = getattr(response, "output_text", None)
-    if not text:
+    # Mirror the Anthropic path's final-segment rule (_final_text): message text
+    # emitted BEFORE the last tool call is working narration, not the reply.
+    # Fall back to the full walk, then to output_text (the SDK's aggregate),
+    # when the tail is empty.
+    items = list(getattr(response, "output", None) or [])
+    last_call = max((i for i, item in enumerate(items)
+                     if getattr(item, "type", "") == "mcp_call"), default=-1)
+
+    def _message_text(seq):
         chunks = []
-        for item in (getattr(response, "output", None) or []):
+        for item in seq:
             if getattr(item, "type", "") != "message":
                 continue
             for c in (getattr(item, "content", None) or []):
                 t = getattr(c, "text", None)
                 if t:
                     chunks.append(t)
-        text = "".join(chunks)
+        return "".join(chunks)
+
+    text = _message_text(items[last_call + 1:])
+    if not text.strip():
+        text = _message_text(items) or (getattr(response, "output_text", None) or "")
     return (text, events) if return_tool_events else text
 
 

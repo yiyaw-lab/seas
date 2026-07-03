@@ -183,6 +183,39 @@ class ProposeEditTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(files["src/x.py"], "def main():\n    return 2\n")
 
+    def test_resolve_two_edits_same_file_apply_sequentially(self):
+        # The "two edits target 'src/x.py'; combine them into one" rejection used
+        # to kill Argo's own multi-edit drafts; they now resolve in order.
+        cur = {"src/x.py": "a = 1\nb = 2\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "a = 1", "new": "a = 9"},
+                 {"path": "src/x.py", "old": "b = 2", "new": "b = 8"}])
+        self.assertIsNone(err)
+        self.assertEqual(files["src/x.py"], "a = 9\nb = 8\n")
+
+    def test_resolve_second_edit_matches_edited_text_not_original(self):
+        # The second edit applies against the FIRST edit's output; an 'old' that
+        # only matched the original errors with the sequential-application hint.
+        cur = {"src/x.py": "a = 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "a = 1", "new": "a = 2"},
+                 {"path": "src/x.py", "old": "a = 1", "new": "a = 3"}])
+        self.assertIsNone(files)
+        self.assertIn("not found", err.lower())
+        self.assertIn("earlier edits", err.lower())
+
+    def test_resolve_create_after_edit_same_path_refused(self):
+        # A no-'old' CREATE can't follow an edit to the same path.
+        cur = {"src/x.py": "a = 1\n"}
+        with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):
+            files, err = srv._resolve_edits(
+                [{"path": "src/x.py", "old": "a = 1", "new": "a = 2"},
+                 {"path": "src/x.py", "new": "whole file"}])
+        self.assertIsNone(files)
+        self.assertIn("already has an edit", err.lower())
+
     def test_resolve_rejects_missing_old_text(self):
         cur = {"src/x.py": "a = 1\n"}
         with mock.patch.object(srv, "_gh_write", side_effect=self._fake_get(cur)):

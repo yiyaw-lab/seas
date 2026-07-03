@@ -120,6 +120,12 @@ MCP_SERVERS = _build_mcp_servers()
 # defeat the default, leaving an unroutable model name.
 CHAT_MODEL_DEFAULT = os.environ.get("ARGO_CHAT_MODEL") or "claude-sonnet-4-6"
 CHAT_MODEL_PREMIUM = os.environ.get("ARGO_CHAT_MODEL_PREMIUM") or "claude-opus-4-8"
+# Output-token CAP for a tool-enabled chat turn (a cap, not a target -- billed
+# only for tokens actually produced). At chat_with_mcp's 1024 default the
+# server-side tool loop's working narration routinely exhausted the budget
+# mid-turn, so replies died half-planned ("Let me propose the edit." ... nothing)
+# and the next turn re-discovered everything from scratch.
+CHAT_MAX_TOKENS = 4096
 # Message looks high-stakes -> escalate to the premium model.
 PREMIUM_TRIGGERS = (
     "should i build", "worth building", "strategy", "strategic", "architecture",
@@ -554,17 +560,33 @@ def _clean_reply(text):
     # Repair a missing space after sentence-ending punctuation: the model
     # sometimes glues sentences together ("work.good", "PR.got") -- more so after
     # markdown stripping. Two cases:
-    #  1) .!? directly before an UPPERCASE letter (skip lone-capital initialisms
-    #     like U.S.A.).
-    text = re.sub(r"(?<![A-Z])([.!?])([A-Z])", r"\1 \2", text)
+    #  1) .!? directly before a real sentence start: Uppercase-then-lowercase, or
+    #     a lone I/A. Requiring the lowercase second letter skips initialisms
+    #     (U.S.A.) AND all-caps identifier tails ("fetch_signals.FEEDS" used to
+    #     come out "fetch_signals. FEEDS"). Skip when the receiver ends in an
+    #     uppercase letter (an initialism like U.S.A / PR) or is a snake_case
+    #     identifier ("fetch_signals.Feeds" is an attribute access, not a
+    #     sentence). A bare module.Class ("pathlib.Path") is still ambiguous to a
+    #     regex and left as-is -- the same pre-existing limitation.
+    text = re.sub(
+        r"([A-Za-z0-9_]*[A-Za-z])([.!?])(?=[A-Z][a-z]|I\b|A\b)",
+        lambda m: m.group(0) if (m.group(1)[-1].isupper() or "_" in m.group(1))
+        else f"{m.group(1)}{m.group(2)} ",
+        text,
+    )
     #  2) .!? glued to a LOWERCASE word, where >=2 letters precede the punctuation
     #     (so initialisms/decimals like U.S.A. / a.b / 3.14 are skipped) AND the
     #     following word isn't a known file-ext / TLD (so docs.x.ai, file.py,
-    #     argo_chat.json, example.com stay intact).
+    #     argo_chat.json, example.com stay intact) AND it isn't a code reference:
+    #     a snake_case receiver ("firecrawl_client.scrape") or a method call
+    #     ("client.scrape(") stays glued.
     text = re.sub(
-        r"([A-Za-z]{2})([.!?])([a-z]{2,})",
-        lambda m: m.group(0) if m.group(3) in _NOT_SENTENCE_AFTER
-        else f"{m.group(1)}{m.group(2)} {m.group(3)}",
+        r"(\w*[A-Za-z]{2})([.!?])([a-z]{2,})(\()?",
+        lambda m: m.group(0) if (
+            m.group(3) in _NOT_SENTENCE_AFTER
+            or "_" in m.group(1)
+            or m.group(4)
+        ) else f"{m.group(1)}{m.group(2)} {m.group(3)}",
         text,
     )
     # Tidy leftover double spaces.
@@ -675,6 +697,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 raw, tool_events = observe.chat_with_mcp(
                     system, messages, model,
                     mcp_servers=MCP_SERVERS, return_tool_events=True,
+                    max_tokens=CHAT_MAX_TOKENS,
                 )
                 # Anti-bluff re-attempt: if the reply narrates a doable-in-turn
                 # action (a PR / a CONFIRM) but no backing tool fired, re-prompt
@@ -686,16 +709,37 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
                 # Only text turns re-attempt: an image/document turn carries block
                 # content, and re-sending it for a second vision pass is slow with
                 # little upside -- the terminal guard still suppresses any bluff.
+                # One re-attempt per turn, at most: either the anti-bluff gate
+                # (a doable-in-turn claim no tool backed) OR the URL-before-fetch
+                # gate (a URL in the user's message that no read tool touched).
+                # Both re-prompt with the same shape, so compute the gap note once
+                # and share the single re-attempt call below.
                 v = _classify_claim(_clean_reply(raw.strip()), tool_events)
+                gap_note = None
                 if v is not None and v.reattemptable and isinstance(final_content, str):
                     log.info("anti-bluff re-attempt: %s", v.incident_sig)
+                    gap_note = v.gap_note
+                elif v is None and isinstance(final_content, str):
+                    # URL-before-fetch gate (Argo's own most-logged chat_weakness):
+                    # the reply was composed ABOUT a link no read tool touched.
+                    # Key off log_user_text -- the user's ACTUAL words -- not
+                    # route_text, which can be a synthetic routing/CONFIRM note
+                    # (same source the memory-recall call above already uses).
+                    gap_note = _url_fetch_gap(log_user_text, tool_events)
+                    if gap_note:
+                        log.info("url-no-fetch gate: forcing re-attempt")
+                        _note_incident("chat_weakness",
+                                       "replied about a URL without fetching it",
+                                       log_user_text[:200])
+                if gap_note:
                     raw, tool_events = observe.chat_with_mcp(
                         system,
                         messages + [
                             {"role": "assistant", "content": raw},
-                            {"role": "user", "content": v.gap_note},
+                            {"role": "user", "content": gap_note},
                         ],
                         model, mcp_servers=MCP_SERVERS, return_tool_events=True,
+                        max_tokens=CHAT_MAX_TOKENS,
                     )
             else:
                 # Tool-less path: the original single string prompt, reached only
@@ -781,6 +825,7 @@ def _generate_reply(chat_id, final_content, log_user_text, route_text=None,
 _PR_CLAIM_RE = argo_bluff._PR_CLAIM_RE
 _PR_NUDGE = argo_bluff._PR_NUDGE
 _claim_unbacked = argo_bluff.claim_unbacked
+_url_fetch_gap = argo_bluff.url_fetch_gap
 
 
 def _pr_blocker():

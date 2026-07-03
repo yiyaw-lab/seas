@@ -55,5 +55,14 @@ jobs:
           git config user.name "argo-watch"
           git config user.email "argo-watch@users.noreply.github.com"
           git add data/argo_seen.json 2>/dev/null || true
-          git commit -m "argo-watch: update seen-store" || echo "No changes"
-          git push || echo "Nothing to push"
+          git commit -m "argo-watch: update seen-store" || { echo "No changes"; exit 0; }
+          # Rebase-retry before pushing (same as argo-schedule.yml). This repo has
+          # other writers, so a bare `git push` loses the seen-store update to a
+          # non-fast-forward race -- and a silently dropped update re-sends last
+          # run's news (the repeat-news bug). Fail loudly if it truly can't land.
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push && exit 0
+            echo "push race (attempt $i) -- rebasing and retrying"
+            sleep $((RANDOM % 6 + 3))
+          done
+          echo "ERROR: could not push seen-store after 5 attempts"; exit 1

@@ -95,6 +95,113 @@ class ChatToolEventsTest(unittest.TestCase):
         self.assertNotIn("ops@example.com", logged)
         self.assertIn("<redacted>", logged)
 
+    def test_narration_before_tools_is_dropped(self):
+        # The reply is the segment AFTER the last tool block; the interleaved
+        # working narration ("Let me check...") used to be joined into the
+        # Telegram reply as leaked inner monologue.
+        text, events = self._run(
+            [_block(type="text", text="Let me check the schedule first."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok"),
+             _block(type="text", text="Here is the answer.")],
+            return_tool_events=True)
+        self.assertEqual(text, "Here is the answer.")
+        self.assertEqual(events, ["web_fetch"])
+
+    def test_all_narration_falls_back_to_full_text(self):
+        # Nothing after the last tool block: better the narration than nothing
+        # (an empty reply reads as a model failure upstream).
+        text, _ = self._run(
+            [_block(type="text", text="Let me check."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")],
+            return_tool_events=True)
+        self.assertEqual(text, "Let me check.")
+
+    def test_pause_turn_is_resumed_and_events_merged(self):
+        # The connector pauses a long tool loop (stop_reason "pause_turn");
+        # unresumed, the half-finished narration became the final reply and the
+        # planned work silently never happened.
+        paused = _response(
+            [_block(type="text", text="Let me look."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")])
+        paused.stop_reason = "pause_turn"
+        final = _response(
+            [_block(type="mcp_tool_use", name="propose_change"),
+             _block(type="mcp_tool_result", is_error=False, content="ok"),
+             _block(type="text", text="Opened the PR.")])
+        responses = [paused, final]
+        calls = []
+
+        def guarded(provider, fn, label):
+            calls.append(label)
+            return responses.pop(0)
+
+        with mock.patch.object(observe, "_guarded", guarded):
+            text, events = observe.chat_with_mcp(
+                "sys", _MESSAGES, "claude-sonnet-4-6", mcp_servers=_SERVERS,
+                return_tool_events=True)
+        self.assertEqual(text, "Opened the PR.")
+        self.assertEqual(events, ["web_fetch", "propose_change"])
+        self.assertEqual(len(calls), 2)  # one resume, no runaway loop
+
+    def test_pre_pause_answer_survives_a_resume(self):
+        # The answer is emitted BEFORE the pause; the resumed response carries
+        # only a tool call + a short ack. Because content is accumulated across
+        # responses, the earlier answer is not lost.
+        paused = _response(
+            [_block(type="text", text="The answer is 42."),
+             _block(type="mcp_tool_use", name="web_fetch"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")])
+        paused.stop_reason = "pause_turn"
+        final = _response(
+            [_block(type="mcp_tool_use", name="verify_feed"),
+             _block(type="mcp_tool_result", is_error=False, content="ok")])
+        # final ends on a tool block with no trailing text -> the accumulated
+        # tail is empty, so _final_text falls back to the last text block, which
+        # is the real answer emitted before the pause.
+        responses = [paused, final]
+        with mock.patch.object(
+                observe, "_guarded",
+                lambda provider, fn, label: responses.pop(0)):
+            text, events = observe.chat_with_mcp(
+                "sys", _MESSAGES, "claude-sonnet-4-6", mcp_servers=_SERVERS,
+                return_tool_events=True)
+        self.assertEqual(text, "The answer is 42.")
+        self.assertEqual(events, ["web_fetch", "verify_feed"])
+
+    def test_two_resumes_complete_and_do_not_mutate_caller_messages(self):
+        # Two consecutive pauses (each a real tool-loop chunk): the loop resumes
+        # twice, the reply is the text after the LAST tool block across the whole
+        # accumulation, and the caller's messages list is never grown as a side
+        # effect (base_messages captured once; each resend is a fresh list).
+        def chunk(narration, tool, stop):
+            r = _response([_block(type="text", text=narration),
+                           _block(type="mcp_tool_use", name=tool),
+                           _block(type="mcp_tool_result", is_error=False,
+                                  content="ok")])
+            r.stop_reason = stop
+            return r
+
+        r1 = chunk("looking", "web_fetch", "pause_turn")
+        r2 = chunk("still going", "verify_feed", "pause_turn")
+        r3 = _response([_block(type="mcp_tool_use", name="github_list"),
+                        _block(type="mcp_tool_result", is_error=False, content="ok"),
+                        _block(type="text", text="done")])
+        r3.stop_reason = "end_turn"
+        responses = [r1, r2, r3]
+        caller_messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(
+                observe, "_guarded",
+                lambda provider, fn, label: responses.pop(0)):
+            text, events = observe.chat_with_mcp(
+                "sys", caller_messages, "claude-sonnet-4-6",
+                mcp_servers=_SERVERS, return_tool_events=True)
+        self.assertEqual(text, "done")  # tail after the last tool, not narration
+        self.assertEqual(events, ["web_fetch", "verify_feed", "github_list"])
+        self.assertEqual(caller_messages, [{"role": "user", "content": "go"}])
+
 
 if __name__ == "__main__":
     unittest.main()
