@@ -62,11 +62,12 @@ _FEEDS_FALLBACK = [
 
 
 def _load_feeds():
+    """Load feeds from data/feeds.json, preserving the full dict (including
+    optional 'type' field) for each entry. Falls back to _FEEDS_FALLBACK."""
     path = ROOT / "data" / "feeds.json"
     try:
         data = json.loads(path.read_text())
-        feeds = [(f["label"], f["url"]) for f in data["feeds"]
-                 if f.get("label") and f.get("url")]
+        feeds = [f for f in data["feeds"] if f.get("label") and f.get("url")]
         if feeds:
             return feeds
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
@@ -183,7 +184,68 @@ def _clean(text):
     return text[:400]
 
 
-def fetch_feed(label, url):
+def _fetch_html_source(label, url):
+    """Scrape article titles/links from a plain HTML page (for sources with no feed).
+
+    Uses BeautifulSoup if available, falls back to stdlib html.parser.
+    Returns items in the same shape as fetch_feed.
+    """
+    try:
+        raw = _fetch_url(url)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        print(f"  ! {label}: fetch failed ({exc})")
+        return []
+
+    text = raw.decode("utf-8", errors="replace")
+    items = []
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            title = a.get_text(separator=" ", strip=True)
+            href = a["href"]
+            if not title or len(title) < 20:
+                continue
+            # Only keep links that look like article paths (not nav/footer/social)
+            if not any(seg in href for seg in ("/article", "/blog", "/post", "/news", "/research", "/papers", "/articles")):
+                continue
+            if not href.startswith("http"):
+                from urllib.parse import urljoin
+                href = urljoin(url, href)
+            items.append({"title": title, "summary": "", "published": None, "link": href, "source": label})
+    except ImportError:
+        # stdlib fallback
+        import html
+        import re
+        for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([^<]{20,300})</a>', text, re.I):
+            href, raw_title = m.group(1), m.group(2)
+            title = html.unescape(raw_title).strip()
+            if not title:
+                continue
+            if not any(seg in href for seg in ("/article", "/blog", "/post", "/news", "/research", "/papers", "/articles")):
+                continue
+            if not href.startswith("http"):
+                from urllib.parse import urljoin
+                href = urljoin(url, href)
+            items.append({"title": title, "summary": "", "published": None, "link": href, "source": label})
+
+    # Dedupe by title within this source
+    seen_titles = set()
+    deduped = []
+    for item in items:
+        key = item["title"].lower()
+        if key not in seen_titles:
+            seen_titles.add(key)
+            deduped.append(item)
+
+    return deduped[:PER_FEED]
+
+
+def fetch_feed(label, url, feed_type="rss"):
+    if feed_type == "html":
+        return _fetch_html_source(label, url)
+
     try:
         raw = _fetch_url(url)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
@@ -240,8 +302,10 @@ def main():
     print("\n📡 Argo — Fetch Signals\n")
 
     pool = []
-    for label, url in FEEDS:
-        items = fetch_feed(label, url)
+    for feed in (f if isinstance(f, dict) else {"label": f[0], "url": f[1]} for f in FEEDS):
+        label, url = feed["label"], feed["url"]
+        feed_type = feed.get("type", "rss") if isinstance(feed, dict) else "rss"
+        items = fetch_feed(label, url, feed_type=feed_type)
         print(f"  • {label}: {len(items)} items")
         pool.extend(items)
 
