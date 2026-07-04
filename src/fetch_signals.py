@@ -61,17 +61,21 @@ _FEEDS_FALLBACK = [
 ]
 
 
-def _load_feeds():
+def _load_feeds_raw():
+    """Return full feed dicts (label, url, optional type) from feeds.json."""
     path = ROOT / "data" / "feeds.json"
     try:
         data = json.loads(path.read_text())
-        feeds = [(f["label"], f["url"]) for f in data["feeds"]
-                 if f.get("label") and f.get("url")]
+        feeds = [f for f in data["feeds"] if f.get("label") and f.get("url")]
         if feeds:
             return feeds
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
         pass
-    return _FEEDS_FALLBACK
+    return [{"label": l, "url": u} for l, u in _FEEDS_FALLBACK]
+
+
+def _load_feeds():
+    return [(f["label"], f["url"]) for f in _load_feeds_raw()]
 
 
 FEEDS = _load_feeds()
@@ -183,7 +187,49 @@ def _clean(text):
     return text[:400]
 
 
-def fetch_feed(label, url):
+def _fetch_html_source(label, url):
+    """Scrape an HTML page via Firecrawl and extract article titles as signal items.
+    Returns [] gracefully if Firecrawl is unavailable or scraping fails."""
+    import re
+    try:
+        import firecrawl_client
+    except ImportError:
+        print(f"  ! {label}: firecrawl_client not available")
+        return []
+
+    if not firecrawl_client.is_enabled():
+        print(f"  ! {label}: Firecrawl not configured (no FIRECRAWL_API_KEY)")
+        return []
+
+    md = firecrawl_client.scrape(url)
+    if not md:
+        print(f"  ! {label}: scrape returned nothing")
+        return []
+
+    items = []
+    # Extract titles from markdown headings (## Title) and markdown links ([Title](url))
+    # Headings first, then links as fallback.
+    seen_titles = set()
+    for m in re.finditer(r'^#{1,3}\s+(.+)$', md, re.MULTILINE):
+        title = m.group(1).strip()
+        if title and title.lower() not in seen_titles:
+            seen_titles.add(title.lower())
+            items.append({"title": title, "summary": "", "published": None, "link": url, "source": label})
+    if not items:
+        for m in re.finditer(r'\[([^\]]{10,120})\]\(https?://[^)]+\)', md):
+            title = m.group(1).strip()
+            if title and title.lower() not in seen_titles:
+                seen_titles.add(title.lower())
+                items.append({"title": title, "summary": "", "published": None, "link": url, "source": label})
+
+    print(f"  • {label}: {len(items)} items (html scrape)")
+    return items[:PER_FEED]
+
+
+def fetch_feed(label, url, type=None):
+    if type == "html":
+        return _fetch_html_source(label, url)
+
     try:
         raw = _fetch_url(url)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
@@ -240,9 +286,12 @@ def main():
     print("\n📡 Argo — Fetch Signals\n")
 
     pool = []
-    for label, url in FEEDS:
-        items = fetch_feed(label, url)
-        print(f"  • {label}: {len(items)} items")
+    for feed in _load_feeds_raw():
+        label, url = feed["label"], feed["url"]
+        ftype = feed.get("type")
+        items = fetch_feed(label, url, type=ftype)
+        if ftype != "html":
+            print(f"  • {label}: {len(items)} items")
         pool.extend(items)
 
     if not pool:
