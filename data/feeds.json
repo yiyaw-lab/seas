@@ -15,6 +15,7 @@
     { "label": "Simon Willison's Blog", "url": "https://simonwillison.net/atom/everything/" },
     { "label": "Interconnects (Nathan Lambert)", "url": "https://www.interconnects.ai/feed.xml" },
     { "label": "LessWrong AI", "url": "https://www.lesswrong.com/feed.xml?view=communityAll&karmaThreshold=50" },
-    { "label": "Together AI Blog", "url": "https://www.together.ai/blog/rss.xml" }
+    { "label": "Together AI Blog", "url": "https://www.together.ai/blog/rss.xml" },
+    { "label": "Artificial Analysis", "url": "https://artificialanalysis.ai/articles", "type": "html" }
   ]
 }
