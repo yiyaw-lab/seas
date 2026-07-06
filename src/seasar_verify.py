@@ -24,6 +24,7 @@ a missing field is a failed check, not a crash. Every accessor is defensive .get
 import json
 import re
 
+import seasar_dispatch
 import seasar_gate_forge
 import seasar_requirements
 
@@ -485,6 +486,14 @@ def verify_order(order):
             "requirement gate(s) lack golden/broken discrimination evidence: "
             + " | ".join(forge_bad))
 
+        not_ready = [r for r in seasar_dispatch.readiness_rows(order) if not r.get("ready")]
+        detail = " | ".join(
+            "%s: %s" % (r.get("requirement_id") or "(missing id)",
+                         "; ".join(r.get("reasons") or []))
+            for r in not_ready)
+        add("latent_requirements_dispatch_ready", not not_ready, WARN,
+            "requirement(s) not dispatch-ready: " + detail)
+
     # every decision must anchor to a real task/file, or it routes to NO agent's packet
     # while still blocking the build globally (a silent fleet deadlock).
     decisions = _dicts(order, "decisions")
@@ -526,7 +535,8 @@ def verify_order(order):
                    "decisions_routed", "contracts_specify_behavior",
                    "latent_requirements_have_counter_cues",
                    "latent_requirements_gate_threaded",
-                   "gate_forge_discriminates")
+                   "gate_forge_discriminates",
+                   "latent_requirements_dispatch_ready")
     ind = [c for c in checks if c["name"] in independent]
     ind_pass = sum(1 for c in ind if c["ok"])
     return {
