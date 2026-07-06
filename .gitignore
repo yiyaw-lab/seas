@@ -120,3 +120,6 @@ data/opportunities.json
 
 # SEAS job run artifacts (JSON outputs in subdirs; .md design docs stay)
 runs/**/*.json
+
+# Local prompt-vault captures belong in agent-armor or a personal vault, not SEAS.
+vault/prompt-library/*.md
