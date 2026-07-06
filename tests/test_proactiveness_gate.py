@@ -160,6 +160,16 @@ class StaleFeedbackTest(_PushTmp):
         self.assertEqual(argo_pushes.effective_threshold(), base)
 
 
+class WatchAlertStarvationTest(_PushTmp):
+    def test_recent_low_engagement_does_not_starve_watch_alerts(self):
+        # Watch alerts are already post-filtered by the tripwire judge, and they
+        # often help without drawing a reply. A quiet recent stretch must not make
+        # the generic proactiveness gate suppress every news alert.
+        self._seed_history(total=10, linked=0)
+        allowed, reason = argo_pushes.should_send("watch")
+        self.assertTrue(allowed, reason)
+
+
 class PushEndpointGateTest(_PushTmp):
     """(e) The /push handler runs the gate before recording and bridges the verdict.
 

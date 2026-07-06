@@ -1534,6 +1534,15 @@ def _health_payload():
     except Exception:
         payload["incidents"] = []
 
+    # Recent watch receipts from the same local filesystem as the scheduler. This
+    # shows whether the tripwire found candidates, got suppressed, delivered, or
+    # failed, without touching network or LLM calls.
+    try:
+        import argo_watch_runs
+        payload["watch_runs"] = argo_watch_runs.recent(3)
+    except Exception:
+        payload["watch_runs"] = []
+
     return payload
 
 

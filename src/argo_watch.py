@@ -1,8 +1,8 @@
 """
 Argo V2 — Phase G: the tripwire (proactive frontier alerts).
 
-Flips Argo from reactive to proactive. On a schedule (GitHub Actions cron,
-~3-4x/day) this watcher:
+Flips Argo from reactive to proactive. On a schedule (Railway local_loop, with
+direct CLI runs still supported) this watcher:
   1. fetches current items from the frontier feeds (fetch_signals.FEEDS), plus
      optional live X/web items via Grok (grok_search) when ARGO_GROK_SOURCE=1,
   2. dedups against a seen-store (data/argo_seen.json) so only genuinely NEW
@@ -38,6 +38,7 @@ import argo_observe as observe
 import argo_paths
 import argo_pushes
 import argo_store
+import argo_watch_runs
 import fetch_signals
 import send_telegram
 from argo_log import get_logger
@@ -283,94 +284,108 @@ def _was_alerted(item, alerts):
 
 def main():
     no_send = "--no-send" in sys.argv
+    run = argo_watch_runs.new_run(no_send=no_send)
 
-    seen = load_seen()
+    try:
+        seen = load_seen()
 
-    new_items = collect_new(seen)
-    new_items += collect_grok(seen, new_items)  # optional live X/web source
-    print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
+        rss_items = collect_new(seen)
+        grok_items = collect_grok(seen, rss_items)  # optional live X/web source
+        new_items = rss_items + grok_items
+        run["rss_candidates"] = len(rss_items)
+        run["grok_candidates"] = len(grok_items)
+        run["candidates"] = len(new_items)
+        print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
-    alerts = judge(new_items)
-    log.info("watch run: %d eligible, %d cleared the bar", len(new_items), len(alerts))
+        alerts = judge(new_items)
+        run["judge_kept"] = len(alerts)
+        log.info("watch run: %d eligible, %d cleared the bar",
+                 len(new_items), len(alerts))
 
-    if not alerts:
-        print("Nothing cleared the frontier-builder bar this run.")
-    else:
-        print(f"\n{len(alerts)} alert(s):")
-        for a in alerts:
-            print(f"  • {a}")
-            if not no_send:
-                msg = f"🛰️ Argo spotted something:\n\n{a}"
-                # Instrument the push so act_on_rate can tell whether it landed (a
-                # user reply links it in the webhook). This runs on Actions
-                # (ephemeral checkout), so we POST the push onto the Railway VOLUME
-                # via the authenticated /push endpoint rather than the local
-                # Actions filesystem the reader never sees; post_to_webhook is
-                # best-effort + non-fatal, so a failed POST never blocks the send
-                # (skips silently when WEBHOOK_URL/ARGO_MCP_TOKEN are unset).
-                # Recorded BEFORE the send so the push row + its timestamp precede
-                # any reply -- a fast user reply must never arrive (or timestamp)
-                # ahead of its own push, or link_reply finds no open push to link
-                # and act_on_rate undercounts (same fix as argo_project.main).
-                # The /push round-trip ALSO runs the F6 steerable-proactiveness gate
-                # on the volume (where the act-on-rate + the user's threshold live --
-                # this Actions checkout has neither) and bridges the verdict back:
-                # when result.suppressed the alert is below the bar, so SKIP both the
-                # send and the chat-memory record (nothing was sent, nothing to
-                # remember). A POST failure is fail-open (not suppressed), so a flaky
-                # webhook never silences an alert.
-                suppressed = False
-                try:
-                    result = argo_pushes.post_to_webhook("watch", msg)
-                    suppressed = result.suppressed
-                except Exception:
-                    log.warning("could not instrument watch push", exc_info=True)
-                if suppressed:
-                    log.info("F6 gate: watch alert below threshold, suppressed")
-                    continue
-                send_telegram.send_message(msg)
-                # Record the push into chat memory so a follow-up about this alert
-                # ("is this a counter to X?") sees it -- proactive sends used to
-                # bypass the log and Argo looked amnesiac. Best-effort: a memory
-                # write must never block delivery.
-                try:
-                    argo_memory.record(os.environ.get("TELEGRAM_CHAT_ID"), "Argo", msg)
-                except Exception:
-                    log.warning("could not record watch alert to chat memory",
-                                exc_info=True)
-
-    if no_send:
-        print("\n(--no-send: nothing sent, seen-store NOT updated)")
-        print("\n✅ Watch complete.\n")
-        return
-
-    # Update the seen-store. An ALERTED item is settled (recorded at
-    # MAX_ATTEMPTS so it's never reconsidered). An un-alerted item gets its
-    # attempt count bumped, so a real drop the non-deterministic judge skipped
-    # gets a few more shots before retiring -- instead of being lost forever.
-    alerted = skipped = 0
-    for it in new_items:
-        iid = _item_id(it)
-        if not iid:
-            continue
-        if _was_alerted(it, alerts):
-            seen[iid] = MAX_ATTEMPTS
-            alerted += 1
+        if not alerts:
+            print("Nothing cleared the frontier-builder bar this run.")
         else:
-            seen[iid] = seen.get(iid, 0) + 1
-            skipped += 1
-    save_seen(seen)
-    # SEEN_PATH sits under ROOT only in the ephemeral-checkout case (bad: data is
-    # lost on redeploy); on the volume (SEEN_PATH=/data/..., ROOT=/app) it never
-    # is, and that's the CORRECT placement -- relative_to would raise ValueError
-    # there, which used to crash this print (and the scheduler's `watch` entry)
-    # on every run. is_relative_to never raises, so show the relative path in the
-    # bad case and the plain absolute path (no warning) in the good one.
-    shown = SEEN_PATH.relative_to(ROOT) if SEEN_PATH.is_relative_to(ROOT) else SEEN_PATH
-    print(f"\nSeen-store: settled {alerted} alerted, bumped {skipped} un-alerted "
-          f"({shown}).")
+            print(f"\n{len(alerts)} alert(s):")
+            for a in alerts:
+                print(f"  • {a}")
+                if not no_send:
+                    msg = f"🛰️ Argo spotted something:\n\n{a}"
+                    # Instrument the push so act_on_rate can tell whether it landed
+                    # (a user reply links it in the webhook). The /push round-trip
+                    # also runs the F6 steerable-proactiveness gate on the volume and
+                    # bridges the verdict back: when result.suppressed the alert is
+                    # below the bar, so skip both the send and the chat-memory record.
+                    # A POST failure is fail-open (not suppressed), so a flaky webhook
+                    # never silences an alert.
+                    suppressed = False
+                    try:
+                        result = argo_pushes.post_to_webhook("watch", msg)
+                        suppressed = result.suppressed
+                    except Exception as exc:
+                        argo_watch_runs.add_error(
+                            run, f"push instrumentation failed: {type(exc).__name__}: {exc}")
+                        log.warning("could not instrument watch push", exc_info=True)
+                    if suppressed:
+                        run["suppressed"] += 1
+                        argo_watch_runs.add_suppression(run, "proactiveness gate")
+                        log.info("F6 gate: watch alert below threshold, suppressed")
+                        continue
+                    try:
+                        send_telegram.send_message(msg)
+                    except SystemExit as exc:
+                        argo_watch_runs.add_error(run, f"telegram send failed: {exc}")
+                        raise
+                    run["sent"] += 1
+                    # Record the push into chat memory so a follow-up about this alert
+                    # ("is this a counter to X?") sees it. Best-effort: a memory
+                    # write must never block delivery.
+                    try:
+                        argo_memory.record(os.environ.get("TELEGRAM_CHAT_ID"),
+                                           "Argo", msg)
+                    except Exception as exc:
+                        argo_watch_runs.add_error(
+                            run, f"chat-memory record failed: {type(exc).__name__}: {exc}")
+                        log.warning("could not record watch alert to chat memory",
+                                    exc_info=True)
 
-    print("\n✅ Watch complete.\n")
+        if no_send:
+            print("\n(--no-send: nothing sent, seen-store NOT updated)")
+            print("\n✅ Watch complete.\n")
+            return
+
+        # Update the seen-store. An ALERTED item is settled (recorded at
+        # MAX_ATTEMPTS so it's never reconsidered). An un-alerted item gets its
+        # attempt count bumped, so a real drop the non-deterministic judge skipped
+        # gets a few more shots before retiring -- instead of being lost forever.
+        alerted = skipped = 0
+        for it in new_items:
+            iid = _item_id(it)
+            if not iid:
+                continue
+            if _was_alerted(it, alerts):
+                seen[iid] = MAX_ATTEMPTS
+                alerted += 1
+            else:
+                seen[iid] = seen.get(iid, 0) + 1
+                skipped += 1
+        save_seen(seen)
+        run["seen_store_written"] = True
+        # SEEN_PATH sits under ROOT only in the ephemeral-checkout case (bad: data is
+        # lost on redeploy); on the volume (SEEN_PATH=/data/..., ROOT=/app) it never
+        # is, and that's the CORRECT placement -- relative_to would raise ValueError
+        # there, which used to crash this print (and the scheduler's `watch` entry)
+        # on every run. is_relative_to never raises, so show the relative path in the
+        # bad case and the plain absolute path (no warning) in the good one.
+        shown = SEEN_PATH.relative_to(ROOT) if SEEN_PATH.is_relative_to(ROOT) else SEEN_PATH
+        print(f"\nSeen-store: settled {alerted} alerted, bumped {skipped} un-alerted "
+              f"({shown}).")
+
+        print("\n✅ Watch complete.\n")
+    except Exception as exc:
+        argo_watch_runs.add_error(run, f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        argo_watch_runs.finish(run)
 
 
 if __name__ == "__main__":
