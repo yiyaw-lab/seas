@@ -1161,6 +1161,75 @@ def _md_requirements(order):
     return "\n".join(out)
 
 
+_REQUIREMENT_DIFF_ACTIONS = {
+    "accept": "Accept this counter-cue as a required sentence for implementation.",
+    "edit": "Edit the counter-cue text while preserving the requirement ID and evidence link.",
+    "reject": "Reject this scanner finding only if the source span does not imply the requirement.",
+    "waive": "Waive this requirement only with an explicit waiver_reason in the ledger.",
+}
+
+
+def requirement_diff_rows(order):
+    """Return structured missing-sentence diff rows for bundle and future UI/API use."""
+    reqs = _latent_requirements(order)
+    if not reqs:
+        return []
+    order = order or {}
+    gate_by_name = {g.get("name"): g for g in (order.get("quality_gates") or [])}
+    readiness = _dispatch_rows_by_requirement(order)
+    rows = []
+    for r in reqs:
+        gate_id = r.get("gate_id", "")
+        gate = gate_by_name.get(gate_id) if gate_id else None
+        forge = _gate_forge_for_gate(gate, r) if gate else {}
+        if not gate_id:
+            gate_state = "not linked"
+        elif not gate:
+            gate_state = "missing"
+        elif gate.get("blocks_merge"):
+            gate_state = "blocking"
+        else:
+            gate_state = "nonblocking"
+        rows.append({
+            "requirement_id": r.get("requirement_id", ""),
+            "affordance": r.get("affordance", ""),
+            "source_span": r.get("source_span") or "(compiler-supplied)",
+            "inserted_counter_cue_sentence": r.get("counter_cue", ""),
+            "status": r.get("status", ""),
+            "gate_id": gate_id,
+            "gate_state": gate_state,
+            "forge_state": forge.get("status") if forge else "missing",
+            "dispatch_readiness": seasar_dispatch.readiness_text(
+                readiness.get(r.get("requirement_id"), {})),
+            "actions": dict(_REQUIREMENT_DIFF_ACTIONS),
+        })
+    return rows
+
+
+def _md_requirement_diff(order):
+    rows = requirement_diff_rows(order)
+    if not rows:
+        return "# Requirement Diff\n\nNo latent requirements detected by the v0 scanner.\n"
+    out = ["# Requirement Diff\n",
+           "Each row shows the original cue Seasar found and the missing sentence "
+           "inserted into the requirement ledger.\n"]
+    for row in rows:
+        out.append(f"## {row['requirement_id']}")
+        out.append(f"- requirement ID: `{row['requirement_id']}`")
+        out.append(f"- original source span: {row['source_span']}")
+        out.append("- inserted counter-cue sentence: "
+                   f"{row['inserted_counter_cue_sentence']}")
+        out.append(f"- status: {row['status']}")
+        gate = row["gate_id"] or "(none)"
+        out.append(f"- gate state: `{gate}` ({row['gate_state']})")
+        out.append(f"- forge state: {row['forge_state']}")
+        out.append(f"- dispatch readiness: {row['dispatch_readiness']}")
+        for action, text in row["actions"].items():
+            out.append(f"- {action}: {text}")
+        out.append("")
+    return "\n".join(out)
+
+
 def _md_gate_forge(order):
     rows = _gate_forge_rows(order)
     if not rows:
@@ -2476,6 +2545,7 @@ def build_bundle(order):
         put(f"{root}/constitution.md", _md_constitution(order))
         put(f"{root}/spec.md", _md_spec(order))
         put(f"{root}/REQUIREMENTS.md", _md_requirements(order))
+        put(f"{root}/REQUIREMENT_DIFF.md", _md_requirement_diff(order))
         put(f"{root}/GATE_FORGE.md", _md_gate_forge(order))
         put(f"{root}/hardening.md", _md_hardening(order))
         put(f"{root}/provisions.md", _md_provisions(order))
