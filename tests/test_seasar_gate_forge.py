@@ -7,6 +7,10 @@ normalization, verification, and bundle emission.
 
 import io
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 import zipfile
 
@@ -88,6 +92,13 @@ def _bundle_file(order, suffix):
         return z.read(name).decode()
 
 
+def _bundle_root(order, dest):
+    os.makedirs(dest, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(sc.build_bundle(order))) as z:
+        z.extractall(dest)
+    return os.path.join(dest, os.listdir(dest)[0])
+
+
 class GateForgeNormalizeTest(unittest.TestCase):
     def test_normalization_is_stable_and_clamps_unknown_status(self):
         raw = _forge(status="claimed")
@@ -159,6 +170,39 @@ class GateForgeBundleTest(unittest.TestCase):
         self.assertIn("forge `discriminates`", orchestration)
         self.assertEqual(raw["quality_gates"][0]["gate_forge"]["status"],
                          "discriminates")
+
+    def test_bundle_emits_gate_forge_packet_and_ci_gate(self):
+        order = _order(_forge())
+        sc._normalize_order(order)
+
+        packet = _bundle_file(order, "gate-forge/gate-pagination-completeness.md")
+        workflow = _bundle_file(order, ".github/workflows/seasar-gate.yml")
+        selftest = _bundle_file(order, "scripts/selftest-gates.py")
+
+        self.assertIn("Gate Forge Packet", packet)
+        self.assertIn("LR-PAGINATION-001", packet)
+        self.assertIn("Required evidence shape", packet)
+        self.assertIn("python3 scripts/check-gate-forge.py", workflow)
+        self.assertIn("check-gate-forge.py", selftest)
+
+    def test_generated_gate_forge_script_passes_and_fails(self):
+        good = _order(_forge())
+        sc._normalize_order(good)
+        bad = _order()
+        sc._normalize_order(bad)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            good_root = _bundle_root(good, os.path.join(tmp, "good"))
+            bad_root = _bundle_root(bad, os.path.join(tmp, "bad"))
+            script = os.path.join(good_root, "scripts", "check-gate-forge.py")
+            good_run = subprocess.run([sys.executable, script, good_root],
+                                      capture_output=True, text=True)
+            bad_run = subprocess.run([sys.executable, script, bad_root],
+                                     capture_output=True, text=True)
+
+        self.assertEqual(good_run.returncode, 0, good_run.stdout + good_run.stderr)
+        self.assertNotEqual(bad_run.returncode, 0)
+        self.assertIn("missing gate_forge evidence", bad_run.stdout + bad_run.stderr)
 
 
 if __name__ == "__main__":
