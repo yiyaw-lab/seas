@@ -90,6 +90,10 @@ data/schedule_state_local.json
 # share one filesystem (the F1 placement triad).
 data/argo_pushes.json
 
+# Tripwire watch-run receipt ledger (argo_watch_runs): local-loop runtime state
+# written on the Railway volume and surfaced through health/MCP.
+data/argo_watch_runs.json
+
 # Usage/cost telemetry (argo_cost): one row per LLM call (model + provider +
 # normalized token counts) the model-call path writes for cost-claim scoring.
 # Runtime state; point ARGO_COST_LEDGER_PATH at the Railway volume so the spend

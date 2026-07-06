@@ -63,6 +63,13 @@ TASTE_PATH = Path(os.environ.get("ARGO_TASTE_PATH", str(DATA / "taste_signals.js
 # above. argo_watch re-exports this as its module-level SEEN_PATH (the test patch
 # point), so load_seen/save_seen read the override at call time.
 SEEN_PATH = Path(os.environ.get("ARGO_SEEN_PATH", str(DATA / "argo_seen.json")))
+# Tripwire run ledger: written by argo_watch when the scheduled local_loop runs
+# on the Railway volume, then read back by health/MCP from the same process. This
+# is the operator receipt for candidate/kept/suppressed/sent counts, separate
+# from SEEN_PATH's item dedup role. Gitignored; argo_watch_runs re-exports this as
+# its module-level patch point.
+WATCH_RUNS_PATH = Path(os.environ.get("ARGO_WATCH_RUNS_PATH",
+                                      str(DATA / "argo_watch_runs.json")))
 # Self-diagnosis stores: the operational-failure ledger Argo reads back to spot its
 # own recurring problems, and the proposal ledger that joins a fix PR to the belief
 # it should resolve. Env-overridable for the same reason as the self-model: the live

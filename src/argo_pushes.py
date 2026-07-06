@@ -296,7 +296,9 @@ DEFAULT_THRESHOLD = 0.30
 # confidence) each in [0, 1].
 _KIND_DEFAULTS = {
     "project": (0.7, 0.8),  # 0.56
-    "watch": (0.6, 0.7),    # 0.42
+    # A watch alert has already cleared argo_watch's frontier-builder judge.
+    # Reading it silently is success, so reply-rate dial-up must not starve it.
+    "watch": (0.9, 0.9),    # 0.81
 }
 # A push kind we don't recognize is treated as middling, not high -- an unknown
 # sender shouldn't get a free pass above the bar.

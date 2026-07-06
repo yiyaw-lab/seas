@@ -864,6 +864,16 @@ def get_tripwire_status() -> str:
             f"persists between runs, so repeats only happen if a run fails to save.")
 
 
+@mcp.tool()
+@with_deadline(10)  # pure local read
+def get_watch_status(limit: int = 5) -> str:
+    """Report recent tripwire watch runs: candidate counts, judge-kept counts,
+    proactiveness suppressions, Telegram sends, seen-store writes, and local
+    errors. Use before explaining why daily news did or did not arrive."""
+    import argo_watch_runs
+    return argo_watch_runs.format_status(limit)
+
+
 # --- V3 H0.1: read SEAS findings (the SEAS->Argo coupling) -------------------
 # SEAS produces findings (findings/F-*.md) — what the research engine believes is
 # true. Until now they sat in a directory Argo never read. This tool lets Argo
