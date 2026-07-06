@@ -45,6 +45,7 @@ from pathlib import Path
 
 import argo_rehearse as rehearse
 import argo_store
+import seasar_dispatch
 import seasar_gate_forge
 import seasar_requirements
 import seasar_verify
@@ -1100,19 +1101,36 @@ def _gate_forge_for_gate(g, req=None):
     )
 
 
+def _dispatch_rows_by_requirement(order):
+    return {r.get("requirement_id"): r for r in seasar_dispatch.readiness_rows(order)}
+
+
+def _dispatch_summary_lines(order):
+    summary = seasar_dispatch.readiness_summary(order)
+    if summary["total"] == 0:
+        return "- No latent requirements detected."
+    lines = [f"- Ready: {summary['ready']}/{summary['total']} latent requirements"]
+    for r in summary["rows"]:
+        lines.append(f"- `{r.get('requirement_id')}`: {seasar_dispatch.readiness_text(r)}")
+    return "\n".join(lines)
+
+
 def _requirement_lines(order):
     reqs = _latent_requirements(order)
     if not reqs:
         return "- (none detected)"
     gate_by_name = {g.get("name"): g for g in (order.get("quality_gates") or [])}
+    readiness = _dispatch_rows_by_requirement(order)
     lines = []
     for r in reqs:
         gate = f" Gate: `{r['gate_id']}`." if r.get("gate_id") else ""
         status = f" Status: {r['status']}."
         forge = _gate_forge_for_gate(gate_by_name.get(r.get("gate_id")), r)
         forged = f" Forge: {forge['status']}." if forge else ""
+        ready = readiness.get(r["requirement_id"], {})
+        rtxt = f" Dispatch: {seasar_dispatch.readiness_text(ready)}." if ready else ""
         lines.append(f"- `{r['requirement_id']}` ({r['affordance'] or 'requirement'}): "
-                     f"{r['counter_cue']}{gate}{status}{forged}")
+                     f"{r['counter_cue']}{gate}{status}{forged}{rtxt}")
     return "\n".join(lines)
 
 
@@ -1124,6 +1142,7 @@ def _md_requirements(order):
            "These are missing positive requirements compiled from risky affordances. "
            "They are counter-cues, not advisory notes: implement them or waive them "
            "explicitly with a reason.\n"]
+    readiness = _dispatch_rows_by_requirement(order)
     for r in reqs:
         out.append(f"## {r['requirement_id']} -- {r['affordance'] or 'requirement'}")
         out.append(f"- counter-cue: {r['counter_cue']}")
@@ -1135,6 +1154,9 @@ def _md_requirements(order):
         out.append(f"- status: {r['status']}")
         if r.get("waiver_reason"):
             out.append(f"- waiver: {r['waiver_reason']}")
+        ready = readiness.get(r["requirement_id"])
+        if ready:
+            out.append(f"- dispatch readiness: {seasar_dispatch.readiness_text(ready)}")
         out.append("")
     return "\n".join(out)
 
@@ -1437,6 +1459,9 @@ def _md_orchestration(order):
 ## Requirement ledger
 {_requirement_lines(order)}
 
+## Dispatch readiness
+{_dispatch_summary_lines(order)}
+
 ## Consistency check
 {orch.get('consistency_check', '')}
 """
@@ -1534,12 +1559,16 @@ def _md_work_order(wo, order=None):
                        + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
     if requirements:
         gate_by_name = {g.get("name"): g for g in (order.get("quality_gates") or [])}
+        readiness = _dispatch_rows_by_requirement(order)
         out.append("\n## Requirement counter-cues (implement or explicitly waive)")
         for r in requirements:
             gate = f"; gate `{r.get('gate_id')}`" if r.get("gate_id") else ""
             forge = _gate_forge_for_gate(gate_by_name.get(r.get("gate_id")), r)
             ftxt = f"; forge `{forge.get('status')}`" if forge else ""
-            out.append(f"- `{r.get('requirement_id')}`: {r.get('counter_cue')}{gate}{ftxt}")
+            ready = readiness.get(r.get("requirement_id"), {})
+            rtxt = (f"; {seasar_dispatch.readiness_text(ready)}" if ready else "")
+            out.append(f"- `{r.get('requirement_id')}`: {r.get('counter_cue')}"
+                       f"{gate}{ftxt}{rtxt}")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
     out.append("- The emitted gates pass (assert-no-sentinel + check-ownership + "
