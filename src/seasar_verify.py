@@ -24,6 +24,7 @@ a missing field is a failed check, not a crash. Every accessor is defensive .get
 import json
 import re
 
+import seasar_gate_forge
 import seasar_requirements
 
 ERROR = "error"   # structural -- agents WILL collide / block
@@ -187,6 +188,10 @@ def _scaffold_flags(order):
     return (any(p.endswith(_MANIFESTS) for p in paths),
             any(any(h in p for h in _TEST_HINTS) for p in paths),
             any(p.endswith(_ENV_HINTS) for p in paths))
+
+
+def _materialized_fixture_paths(order):
+    return {f.get("path") for f in _dicts(order, "fixtures") if _fixture_materialized(f)}
 
 
 def _scaffold_score(order):
@@ -389,7 +394,7 @@ def verify_order(order):
             "blocking gate(s) with no executable test_source+test_path (prose, not a gate): "
             + ", ".join(map(str, no_pred)))
         # a predicate that imports a fixture not in the bundle would fail to run.
-        mat = {f.get("path") for f in _dicts(order, "fixtures") if _fixture_materialized(f)}
+        mat = _materialized_fixture_paths(order)
         miss = [f"{g.get('name')}:{r}" for g in gates
                 for r in _strs(g.get("fixture_refs")) if r not in mat]
         add("gate_fixtures_materialized", not miss, WARN,
@@ -449,6 +454,37 @@ def verify_order(order):
             "requirement(s) not referenced by a blocking quality gate: "
             + ", ".join(map(str, unthreaded)))
 
+        gate_by_name = {str(g.get("name", "") or ""): g for g in gates}
+        materialized = _materialized_fixture_paths(order)
+        forge_bad = []
+        for r in reqs:
+            if r.get("status") == "waived":
+                continue
+            gate_id = r.get("gate_id", "")
+            if not gate_id:
+                continue
+            g = gate_by_name.get(gate_id)
+            if not g:
+                continue
+            forge = seasar_gate_forge.normalize_gate_forge(
+                g.get("gate_forge"),
+                gate_name=g.get("name", ""),
+                test_path=g.get("test_path", ""),
+                requirement_id=r.get("requirement_id", ""),
+                counter_cue=r.get("counter_cue", ""),
+            )
+            probs = seasar_gate_forge.discrimination_problems(
+                forge, materialized_paths=materialized)
+            if probs:
+                forge_bad.append("%s/%s: %s" % (
+                    r.get("requirement_id") or "(missing id)",
+                    gate_id,
+                    "; ".join(probs),
+                ))
+        add("gate_forge_discriminates", not forge_bad, WARN,
+            "requirement gate(s) lack golden/broken discrimination evidence: "
+            + " | ".join(forge_bad))
+
     # every decision must anchor to a real task/file, or it routes to NO agent's packet
     # while still blocking the build globally (a silent fleet deadlock).
     decisions = _dicts(order, "decisions")
@@ -489,7 +525,8 @@ def verify_order(order):
                    "gate_fixtures_materialized", "gate_predicates_distinct",
                    "decisions_routed", "contracts_specify_behavior",
                    "latent_requirements_have_counter_cues",
-                   "latent_requirements_gate_threaded")
+                   "latent_requirements_gate_threaded",
+                   "gate_forge_discriminates")
     ind = [c for c in checks if c["name"] in independent]
     ind_pass = sum(1 for c in ind if c["ok"])
     return {

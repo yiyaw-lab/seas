@@ -45,6 +45,7 @@ from pathlib import Path
 
 import argo_rehearse as rehearse
 import argo_store
+import seasar_gate_forge
 import seasar_requirements
 import seasar_verify
 from argo_log import get_logger
@@ -232,7 +233,7 @@ _CAST_SCHEMA = """{
     "test": "the test that proves this task done", "acceptance": "boolean exit gate, checkable"
   }],
   "work_orders": [{ "agent": "Agent A", "role": "Backend", "task_ids": ["T1","T3"], "worktree": "wt/agent-a", "brief": "the scoped brief for this worker", "definition_of_done": "what 'done' means for this agent + the handoff artifact it leaves (e.g. contract committed, typecheck green) before a dependent agent starts" }],
-  "quality_gates": [{ "name": "anchor-drift", "threshold": "the measurable bar, in words", "blocks_merge": true, "test_lang": "typescript|python|...", "test_path": "tests/gates/anchor-drift.test.ts", "test_source": "the LITERAL runnable test (authored by YOU, the compiler) that asserts the threshold against named fixture_refs -- the feature agent INHERITS it, never writes its own", "fixture_refs": ["tests/fixtures/sample.epub"] }],
+  "quality_gates": [{ "name": "anchor-drift", "threshold": "the measurable bar, in words", "blocks_merge": true, "test_lang": "typescript|python|...", "test_path": "tests/gates/anchor-drift.test.ts", "test_source": "the LITERAL runnable test (authored by YOU, the compiler) that asserts the threshold against named fixture_refs -- the feature agent INHERITS it, never writes its own", "fixture_refs": ["tests/fixtures/sample.epub"], "gate_forge": { "forge_id": "forge-anchor-drift", "gate_id": "anchor-drift", "requirement_id": "LR-PAGINATION-001", "counter_cue": "the requirement this gate proves", "status": "pending|discriminates|failed", "run_command": "the exact command that runs this gate", "golden_fixture_ref": "tests/fixtures/golden.json", "broken_fixture_ref": "tests/fixtures/broken.json", "attempts": [{ "attempt": 1, "run_command": "same command or revised command", "test_path": "tests/gates/anchor-drift.test.ts", "golden_fixture_ref": "tests/fixtures/golden.json", "golden_exit_code": 0, "broken_fixture_ref": "tests/fixtures/broken.json", "broken_exit_code": 1, "revision_note": "what changed after the previous attempt" }], "failure_reason": "required when status is failed" } }],
   "orchestration": { "topology": "orchestrator-worker", "waves": [["T1","T2"],["T3"]], "consistency_check": "how spec<->tasks<->contracts are checked to agree before any agent starts", "handoff_protocol": "each agent's definition-of-done + the integration/merge order + how a downstream agent requests a change to a contract it does NOT own (propose-to-owner, never edit the file)", "contract_evolution": "the exact ritual to change a frozen contract mid-build without two agents writing the same file" },
   "fixtures": [{ "path": "tests/fixtures/sample.epub", "purpose": "golden input every anchor/export test runs against", "format": "epub|pdf|json|csv|sql|md", "body": "the LITERAL fixture content for text fixtures; empty when binary", "binary": false, "generator": "for a binary fixture (epub/pdf/image): the literal script/command that reproducibly PRODUCES it", "produced_by_task": "T0", "consumed_by_tasks": ["T6","T7"] }],
   "scaffold_files": [{ "path": "package.json", "purpose": "the runnable boot skeleton, present before any feature task", "body": "the LITERAL file content -- real JSON/TS/YAML that installs, typechecks, lints, and runs an empty test green" }],
@@ -310,6 +311,11 @@ HARD RULES FOR THE PLAN:
   (`test_source` + `test_path` + `test_lang`) that operationalizes its `threshold`
   against named `fixture_refs`. YOU write the predicate so the feature agent inherits a
   gate it cannot tautologize -- a gate with only a prose `threshold` is not a gate.
+- `quality_gates[].gate_forge`: for each gate that proves a latent requirement, record
+  the Gate Forge evidence. Include a golden fixture, a broken fixture, the run command,
+  and the latest run result. Use `status:"discriminates"` ONLY when the gate passes
+  golden with exit 0 and fails broken with nonzero exit. Otherwise mark it `pending` or
+  `failed`; never claim evidence the forge did not produce.
 - `latent_requirements`: include every precompiled requirement above unless it is
   truly irrelevant after normalization. Preserve each `counter_cue` sentence exactly
   when possible. For each open/accepted requirement, make a blocking quality gate whose
@@ -527,6 +533,8 @@ def _normalize_order(order):
         d["options"] = [str(o) for o in _as_list(d.get("options"))]
         d["recommended"] = str(d.get("recommended", "") or "")
         d["rationale"] = str(d.get("rationale", "") or "")
+    req_by_gate = {r.get("gate_id"): r for r in order.get("latent_requirements", [])
+                   if r.get("gate_id")}
     # quality_gates: each carries a compiler-authored executable predicate (test_source)
     # so the feature agent inherits a gate it cannot tautologize.
     for g in order["quality_gates"]:
@@ -537,6 +545,18 @@ def _normalize_order(order):
         g["test_source"] = str(g.get("test_source", "") or "")
         g["fixture_refs"] = [str(x) for x in _as_list(g.get("fixture_refs"))]
         g["blocks_merge"] = bool(g.get("blocks_merge", False))
+        req = req_by_gate.get(g["name"], {})
+        forge = seasar_gate_forge.normalize_gate_forge(
+            g.get("gate_forge"),
+            gate_name=g["name"],
+            test_path=g["test_path"],
+            requirement_id=req.get("requirement_id", ""),
+            counter_cue=req.get("counter_cue", ""),
+        )
+        if forge:
+            g["gate_forge"] = forge
+        elif "gate_forge" in g:
+            g["gate_forge"] = {}
     # constitution -> list of non-empty strings.
     order["constitution"] = [
         str(c).strip() for c in _as_list(order.get("constitution")) if str(c).strip()
@@ -1069,16 +1089,30 @@ def _latent_requirements(order):
         (order or {}).get("latent_requirements") or (order or {}).get("requirements"))
 
 
+def _gate_forge_for_gate(g, req=None):
+    req = req or {}
+    return seasar_gate_forge.normalize_gate_forge(
+        (g or {}).get("gate_forge"),
+        gate_name=(g or {}).get("name", ""),
+        test_path=(g or {}).get("test_path", ""),
+        requirement_id=req.get("requirement_id", ""),
+        counter_cue=req.get("counter_cue", ""),
+    )
+
+
 def _requirement_lines(order):
     reqs = _latent_requirements(order)
     if not reqs:
         return "- (none detected)"
+    gate_by_name = {g.get("name"): g for g in (order.get("quality_gates") or [])}
     lines = []
     for r in reqs:
         gate = f" Gate: `{r['gate_id']}`." if r.get("gate_id") else ""
         status = f" Status: {r['status']}."
+        forge = _gate_forge_for_gate(gate_by_name.get(r.get("gate_id")), r)
+        forged = f" Forge: {forge['status']}." if forge else ""
         lines.append(f"- `{r['requirement_id']}` ({r['affordance'] or 'requirement'}): "
-                     f"{r['counter_cue']}{gate}{status}")
+                     f"{r['counter_cue']}{gate}{status}{forged}")
     return "\n".join(lines)
 
 
@@ -1101,6 +1135,40 @@ def _md_requirements(order):
         out.append(f"- status: {r['status']}")
         if r.get("waiver_reason"):
             out.append(f"- waiver: {r['waiver_reason']}")
+        out.append("")
+    return "\n".join(out)
+
+
+def _md_gate_forge(order):
+    req_by_gate = {r.get("gate_id"): r for r in _latent_requirements(order)
+                   if r.get("gate_id")}
+    rows = []
+    for g in (order.get("quality_gates") or []):
+        forge = _gate_forge_for_gate(g, req_by_gate.get(g.get("name")))
+        if not forge:
+            continue
+        latest = (forge.get("attempts") or [{}])[-1]
+        rows.append((g, forge, latest))
+    if not rows:
+        return "# Gate Forge\n\nNo Gate Forge evidence recorded yet.\n"
+    out = ["# Gate Forge\n",
+           "A gate is trusted only when its forge evidence shows golden passes "
+           "and broken fails.\n"]
+    for g, forge, latest in rows:
+        out.append(f"## {g.get('name', '')}")
+        out.append(f"- status: {forge.get('status', '')}")
+        if forge.get("requirement_id"):
+            out.append(f"- requirement: `{forge.get('requirement_id')}`")
+        out.append(f"- run: `{forge.get('run_command', '')}`")
+        out.append(f"- golden: `{forge.get('golden_fixture_ref', '')}`")
+        out.append(f"- broken: `{forge.get('broken_fixture_ref', '')}`")
+        if latest:
+            out.append("- latest attempt: golden exit {gexit}; broken exit {bexit}".format(
+                gexit=latest.get("golden_exit_code"),
+                bexit=latest.get("broken_exit_code"),
+            ))
+        if forge.get("failure_reason"):
+            out.append(f"- failure: {forge.get('failure_reason')}")
         out.append("")
     return "\n".join(out)
 
@@ -1314,6 +1382,9 @@ def _md_orchestration(order):
         req = req_by_gate.get(g.get("name"))
         if req:
             line += f" -- proves `{req.get('requirement_id')}`"
+        forge = _gate_forge_for_gate(g, req)
+        if forge:
+            line += f" -- forge `{forge.get('status')}`"
         return line
     gates = "\n".join(_gline(g) for g in (order.get("quality_gates") or [])) or "- (none)"
     return f"""# Orchestration
@@ -1425,10 +1496,13 @@ def _md_work_order(wo, order=None):
                        + (f" (recommended: {rec})" if rec else "")
                        + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
     if requirements:
+        gate_by_name = {g.get("name"): g for g in (order.get("quality_gates") or [])}
         out.append("\n## Requirement counter-cues (implement or explicitly waive)")
         for r in requirements:
             gate = f"; gate `{r.get('gate_id')}`" if r.get("gate_id") else ""
-            out.append(f"- `{r.get('requirement_id')}`: {r.get('counter_cue')}{gate}")
+            forge = _gate_forge_for_gate(gate_by_name.get(r.get("gate_id")), r)
+            ftxt = f"; forge `{forge.get('status')}`" if forge else ""
+            out.append(f"- `{r.get('requirement_id')}`: {r.get('counter_cue')}{gate}{ftxt}")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
     out.append("- The emitted gates pass (assert-no-sentinel + check-ownership + "
@@ -2171,6 +2245,7 @@ def build_bundle(order):
         put(f"{root}/constitution.md", _md_constitution(order))
         put(f"{root}/spec.md", _md_spec(order))
         put(f"{root}/REQUIREMENTS.md", _md_requirements(order))
+        put(f"{root}/GATE_FORGE.md", _md_gate_forge(order))
         put(f"{root}/hardening.md", _md_hardening(order))
         put(f"{root}/provisions.md", _md_provisions(order))
         put(f"{root}/.env.example", _env_example(order))
