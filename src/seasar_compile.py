@@ -1140,21 +1140,14 @@ def _md_requirements(order):
 
 
 def _md_gate_forge(order):
-    req_by_gate = {r.get("gate_id"): r for r in _latent_requirements(order)
-                   if r.get("gate_id")}
-    rows = []
-    for g in (order.get("quality_gates") or []):
-        forge = _gate_forge_for_gate(g, req_by_gate.get(g.get("name")))
-        if not forge:
-            continue
-        latest = (forge.get("attempts") or [{}])[-1]
-        rows.append((g, forge, latest))
+    rows = _gate_forge_rows(order)
     if not rows:
         return "# Gate Forge\n\nNo Gate Forge evidence recorded yet.\n"
     out = ["# Gate Forge\n",
            "A gate is trusted only when its forge evidence shows golden passes "
            "and broken fails.\n"]
-    for g, forge, latest in rows:
+    for row in rows:
+        g, forge, latest = row["gate"], row["forge"], row["latest"]
         out.append(f"## {g.get('name', '')}")
         out.append(f"- status: {forge.get('status', '')}")
         if forge.get("requirement_id"):
@@ -1169,6 +1162,50 @@ def _md_gate_forge(order):
             ))
         if forge.get("failure_reason"):
             out.append(f"- failure: {forge.get('failure_reason')}")
+        out.append("")
+    return "\n".join(out)
+
+
+def _gate_forge_rows(order):
+    req_by_gate = {r.get("gate_id"): r for r in _latent_requirements(order)
+                   if r.get("gate_id")}
+    rows = []
+    for g in (order.get("quality_gates") or []):
+        req = req_by_gate.get(g.get("name"))
+        forge = _gate_forge_for_gate(g, req)
+        if not forge:
+            continue
+        latest = (forge.get("attempts") or [{}])[-1]
+        rows.append({"gate": g, "requirement": req or {}, "forge": forge,
+                     "latest": latest})
+    return rows
+
+
+def _md_gate_forge_packet(row):
+    g, req, forge, latest = (row["gate"], row["requirement"],
+                             row["forge"], row["latest"])
+    out = [f"# Gate Forge Packet: {g.get('name', '')}\n",
+           f"- requirement: `{req.get('requirement_id') or forge.get('requirement_id')}`",
+           f"- status: {forge.get('status', '')}",
+           f"- source span: {req.get('source_span') or '(compiler-supplied)'}",
+           f"- counter-cue: {req.get('counter_cue') or forge.get('counter_cue')}",
+           f"- test path: `{g.get('test_path', '')}`",
+           f"- run command: `{forge.get('run_command', '')}`",
+           f"- golden fixture: `{forge.get('golden_fixture_ref', '')}`",
+           f"- broken fixture: `{forge.get('broken_fixture_ref', '')}`",
+           "\n## Required evidence shape",
+           "- `status` must be `discriminates`.",
+           "- Latest attempt must have `golden_exit_code: 0`.",
+           "- Latest attempt must have nonzero `broken_exit_code`.",
+           "- Golden and broken fixture refs must be materialized in the bundle.",
+           ""]
+    if latest:
+        out.append("## Latest attempt")
+        out.append(f"- attempt: {latest.get('attempt')}")
+        out.append(f"- golden exit: {latest.get('golden_exit_code')}")
+        out.append(f"- broken exit: {latest.get('broken_exit_code')}")
+        if latest.get("revision_note"):
+            out.append(f"- revision: {latest.get('revision_note')}")
         out.append("")
     return "\n".join(out)
 
@@ -1825,6 +1862,8 @@ jobs:
           python3 scripts/check-contract-freeze.py < /tmp/seasar_changed.txt
       - name: Contract source compiles (substance prober)
         run: python3 scripts/check-contracts-compile.py
+      - name: Gate Forge evidence discriminates
+        run: python3 scripts/check-gate-forge.py
       - name: Gates have teeth (negative control -- no tautology gate)
         run: python3 scripts/selftest-gates.py
       - name: Project verify (typecheck + tests + gate predicates)
@@ -2036,6 +2075,120 @@ if __name__ == "__main__":
 '''
 
 
+_CHECK_GATE_FORGE = r'''#!/usr/bin/env python3
+"""check-gate-forge -- enforce golden/broken Gate Forge evidence.
+
+Every non-waived latent requirement with a gate_id must be backed by a blocking
+quality gate whose gate_forge evidence says the gate passes golden and fails
+broken. This is intentionally self-contained: generated bundles do not import
+Seasar's source tree.
+"""
+import json
+import os
+import sys
+
+
+def _nonempty(v):
+    return bool(str(v or "").strip())
+
+
+def _latest(forge):
+    attempts = forge.get("attempts") if isinstance(forge, dict) else []
+    attempts = [a for a in (attempts or []) if isinstance(a, dict)]
+    return attempts[-1] if attempts else {}
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fixture_materialized(root, rel):
+    if not _nonempty(rel):
+        return False
+    return os.path.exists(os.path.join(root, rel))
+
+
+def _forge_problems(root, gate, req):
+    forge = gate.get("gate_forge") if isinstance(gate, dict) else {}
+    if not isinstance(forge, dict) or not forge:
+        return ["missing gate_forge evidence"]
+    problems = []
+    if forge.get("status") != "discriminates":
+        problems.append("status is %s" % (forge.get("status") or "missing"))
+    if not _nonempty(forge.get("run_command")):
+        problems.append("run_command is empty")
+    golden = forge.get("golden_fixture_ref")
+    broken = forge.get("broken_fixture_ref")
+    if not _fixture_materialized(root, golden):
+        problems.append("golden fixture not materialized")
+    if not _fixture_materialized(root, broken):
+        problems.append("broken fixture not materialized")
+    latest = _latest(forge)
+    if not latest:
+        problems.append("no golden/broken run attempt recorded")
+    else:
+        if _int(latest.get("golden_exit_code")) != 0:
+            problems.append("golden fixture did not pass")
+        broken_exit = _int(latest.get("broken_exit_code"))
+        if broken_exit is None:
+            problems.append("broken fixture was not run")
+        elif broken_exit == 0:
+            problems.append("broken fixture passed")
+    if req.get("requirement_id") and forge.get("requirement_id"):
+        if str(req.get("requirement_id")) != str(forge.get("requirement_id")):
+            problems.append("forge requirement_id does not match requirement")
+    return problems
+
+
+def main(root="."):
+    try:
+        with open(os.path.join(root, "build-order.json"), encoding="utf-8") as fh:
+            order = json.load(fh)
+    except (OSError, ValueError) as e:
+        print("check-gate-forge: cannot load build-order.json (%s)" % e, file=sys.stderr)
+        return 1
+    gates = {
+        str(g.get("name", "") or ""): g
+        for g in (order.get("quality_gates") or [])
+        if isinstance(g, dict) and g.get("blocks_merge")
+    }
+    failures = []
+    checked = 0
+    for req in (order.get("latent_requirements") or order.get("requirements") or []):
+        if not isinstance(req, dict) or req.get("status") == "waived":
+            continue
+        gate_id = str(req.get("gate_id", "") or "")
+        if not gate_id:
+            continue
+        gate = gates.get(gate_id)
+        if not gate:
+            failures.append("%s/%s: missing blocking quality gate" % (
+                req.get("requirement_id") or "(missing id)", gate_id))
+            continue
+        problems = _forge_problems(root, gate, req)
+        if problems:
+            failures.append("%s/%s: %s" % (
+                req.get("requirement_id") or "(missing id)",
+                gate_id,
+                "; ".join(problems)))
+        checked += 1
+    if failures:
+        print("GATE FORGE CHECK FAILED:")
+        for f in failures:
+            print("  " + f)
+        return 1
+    print("OK: %d requirement-backed gate(s) have discriminating forge evidence." % checked)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "."))
+'''
+
+
 # The negative control, emitted into every bundle: prove the OTHER gates have teeth.
 # A gate that cannot fail is decoration; this runs each one against a deliberately
 # broken fixture (must exit nonzero) AND a clean one (must exit 0), so a tautology gate
@@ -2122,6 +2275,53 @@ def _freeze_clean(root):
     _write(root, "CONTRACT_CHANGES.md", "# Contract changes\n\nCCR C: bumped to v2\n")
 
 
+def _gate_forge_broken(root):
+    _write(root, "build-order.json", json.dumps({
+        "latent_requirements": [{
+            "requirement_id": "LR-PAGINATION-001",
+            "gate_id": "gate-pagination-completeness",
+            "status": "accepted",
+        }],
+        "quality_gates": [{
+            "name": "gate-pagination-completeness",
+            "blocks_merge": True,
+            "test_path": "tests/gates/pagination.py",
+            "test_source": "def test_gate(): pass\n",
+        }],
+    }))
+
+
+def _gate_forge_clean(root):
+    _write(root, "tests/fixtures/pagination-golden.json", "{}\n")
+    _write(root, "tests/fixtures/pagination-broken.json", "{}\n")
+    _write(root, "build-order.json", json.dumps({
+        "latent_requirements": [{
+            "requirement_id": "LR-PAGINATION-001",
+            "gate_id": "gate-pagination-completeness",
+            "status": "accepted",
+        }],
+        "quality_gates": [{
+            "name": "gate-pagination-completeness",
+            "blocks_merge": True,
+            "test_path": "tests/gates/pagination.py",
+            "test_source": "def test_gate(): pass\n",
+            "gate_forge": {
+                "gate_id": "gate-pagination-completeness",
+                "requirement_id": "LR-PAGINATION-001",
+                "status": "discriminates",
+                "run_command": "python -m pytest tests/gates/pagination.py",
+                "golden_fixture_ref": "tests/fixtures/pagination-golden.json",
+                "broken_fixture_ref": "tests/fixtures/pagination-broken.json",
+                "attempts": [{
+                    "attempt": 1,
+                    "golden_exit_code": 0,
+                    "broken_exit_code": 1,
+                }],
+            },
+        }],
+    }))
+
+
 # (label, script, broken-spec, clean-spec); each spec = (build_fn, argv, stdin).
 CASES = [
     ("assert-no-sentinel (forced stop)", "assert-no-sentinel.py",
@@ -2132,6 +2332,8 @@ CASES = [
      (_ownership, ("--lanes",), "a.py\nb.py\n"), (_ownership, ("--lanes",), "a.py\n")),
     ("check-contract-freeze (no silent contract change)", "check-contract-freeze.py",
      (_freeze_broken, (), "c.py\n"), (_freeze_clean, (), "c.py\n")),
+    ("check-gate-forge (golden/broken evidence)", "check-gate-forge.py",
+     (_gate_forge_broken, (), None), (_gate_forge_clean, (), None)),
 ]
 
 
@@ -2262,11 +2464,15 @@ def build_bundle(order):
         put(f"{root}/scripts/check-ownership.py", _CHECK_OWNERSHIP)
         put(f"{root}/scripts/check-contract-freeze.py", _CHECK_CONTRACT_FREEZE)
         put(f"{root}/scripts/check-contracts-compile.py", _CHECK_CONTRACTS_COMPILE)
+        put(f"{root}/scripts/check-gate-forge.py", _CHECK_GATE_FORGE)
         # The negative control: a gate that ships proving the OTHER gates have teeth.
         put(f"{root}/scripts/selftest-gates.py", _SELFTEST_GATES)
         put(f"{root}/CONTRACT_CHANGES.md", _md_contract_changes(order))
         put(f"{root}/MERGE_ORDER.md", _md_merge_order(order))
         put(f"{root}/.github/workflows/seasar-gate.yml", _CI_WORKFLOW)
+        for row in _gate_forge_rows(order):
+            gate_name = _slug(row["gate"].get("name") or "gate")
+            put(f"{root}/gate-forge/{gate_name}.md", _md_gate_forge_packet(row))
         for c in (order.get("contracts") or []):
             name = _slug(c.get("name") or "contract")
             put(f"{root}/contracts/{name}.md", _md_contract(c))
