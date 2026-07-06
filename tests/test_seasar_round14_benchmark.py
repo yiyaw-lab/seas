@@ -13,7 +13,7 @@ import seasar_round14_benchmark as bench
 class Round14BenchmarkTest(unittest.TestCase):
     def test_cases_cover_the_four_proven_seams(self):
         self.assertEqual([c["affordance"] for c in bench.CASES],
-                         list(seasar_requirements.AFFORDANCE_ORDER))
+                         list(seasar_requirements.AFFORDANCE_ORDER[:4]))
         for case in bench.CASES:
             req = seasar_requirements.scan_sources({"idea": case["prompt"]})[0]
             self.assertNotIn(req["counter_cue"], case["prompt"])
