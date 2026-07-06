@@ -8,9 +8,9 @@ direct CLI runs still supported) this watcher:
   2. dedups against a seen-store (data/argo_seen.json) so only genuinely NEW
      items are considered,
   3. runs an LLM judge: "would a frontier builder want to know this today?",
-     keeping only real launches/models/tools/capabilities (not routine papers),
-  4. texts Yiya the items that clear that bar (no fixed count — strength decides;
-     only ALERT_SAFETY_CAP bounds a runaway run), in Argo's plain-text voice,
+     keeping the strongest eligible items from the never-before-seen pool,
+  4. texts Yiya the items that clear that bar, topping up to a small quiet-day
+     floor from fresh items only; ALERT_SAFETY_CAP bounds a runaway run,
   5. records everything seen (whether alerted or not) so it won't repeat.
 
 Runs as a batch job, NOT in the webhook, so it can't slow chat. Reuses
@@ -51,11 +51,12 @@ log = get_logger(__name__)
 # by bare name at call time, so the override still bites.
 SEEN_PATH = argo_paths.SEEN_PATH
 PER_FEED = 10          # consider this many recent items per feed
-# Strength, not count, decides how many alerts fire: the judge keeps every item
-# that genuinely clears the "a frontier builder must know this today" bar and
-# nothing else. This is only a safety backstop so a pathological feed day can't
-# blow up the phone — it is NOT a target and is not shown to the judge.
+# Keep a small quiet-day floor from genuinely fresh items, while still bounding a
+# pathological feed day. The floor is enforced after the LLM verdict so a model
+# that says NONE cannot starve the tripwire; items already in the seen-store are
+# never used to satisfy the floor.
 ALERT_SAFETY_CAP = 8
+ALERT_FLOOR = 2
 SEEN_CAP = 5000        # keep the seen-store bounded (see LRU touch in collect_new)
 MAX_ATTEMPTS = 3       # re-judge an un-alerted item this many times before retiring
 
@@ -193,14 +194,14 @@ NEVER miss a flagship launch from a major lab (OpenAI, Anthropic, Google
 DeepMind, Meta, xAI/Grok, Mistral, DeepSeek) or a tool builders will adopt
 widely. If a major lab ships a new model or product, that always clears the bar.
 
-Keep EVERY item that genuinely clears this bar, and NO others. There is no target
-number: most days that is 0 to 2, a big launch day might be 5 or more. Do NOT pad
-to hit a count, and do NOT drop a must-know item just to stay short. Strength is
-the only filter.
+These items have already been filtered against the seen-store. Keep EVERY item
+that genuinely clears this bar, and on quiet days still keep the best 1 or 2
+fresh candidates so the scout keeps learning what is worth noticing. Do NOT drop
+a must-know item just to stay short.
 
 For each item you keep, write ONE short plain-text line (no markdown) saying what
 it is and why it matters, then the link on its own.
-If nothing clears the bar, output exactly: NONE
+Use NONE only if every item is clearly irrelevant, spam, broken, or non-AI.
 
 Format per kept item:
 <one sharp sentence>
@@ -212,9 +213,12 @@ Items:
 
 
 def judge(new_items):
-    """LLM judge -> list of alert lines, one per item that cleared the strength
-    bar (no fixed count). Trimmed to ALERT_SAFETY_CAP only as a runaway backstop.
-    [] if nothing qualifies."""
+    """LLM judge -> alert lines for must-know items plus quiet-day candidates.
+
+    Trimmed to ALERT_SAFETY_CAP only as a runaway backstop. [] means the judge
+    found only irrelevant, spam, broken, or non-AI input; main() may still top up
+    from never-before-seen items if the model under-keeps.
+    """
     if not new_items:
         return []
 
@@ -282,12 +286,57 @@ def _was_alerted(item, alerts):
     return bool((link and link in blob) or (title and title in blob))
 
 
+def _fallback_alert(item):
+    """Plain-text alert for a fresh item the LLM judge did not keep."""
+    title = re.sub(r"\s+", " ", (item.get("title") or "").strip())
+    if not title:
+        title = "Fresh frontier-feed item"
+    summary = re.sub(r"\s+", " ", (item.get("summary") or "").strip())
+    summary = re.sub(r"<[^>]+>", "", summary).strip()
+    if summary:
+        sentence = f"{title}: {summary[:180].rstrip()}"
+    else:
+        sentence = f"{title}: fresh frontier-feed item worth a quick look."
+    link = (item.get("link") or "").strip()
+    return f"{sentence}\n{link}" if link else sentence
+
+
+def _alert_mentions_seen_item(alert, new_items, seen_before):
+    """Best-effort check that an alert points at an already-seen item."""
+    for item in new_items:
+        iid = _item_id(item)
+        if iid in seen_before and _was_alerted(item, [alert]):
+            return True
+    return False
+
+
+def _ensure_alert_floor(new_items, alerts, seen_before):
+    """Top up alerts to ALERT_FLOOR using only never-before-seen items."""
+    floor = min(ALERT_FLOOR, ALERT_SAFETY_CAP)
+    out = [
+        alert for alert in alerts[:ALERT_SAFETY_CAP]
+        if not _alert_mentions_seen_item(alert, new_items, seen_before)
+    ]
+    if len(out) >= floor:
+        return out[:ALERT_SAFETY_CAP]
+
+    for item in new_items:
+        iid = _item_id(item)
+        if not iid or iid in seen_before or _was_alerted(item, out):
+            continue
+        out.append(_fallback_alert(item))
+        if len(out) >= floor or len(out) >= ALERT_SAFETY_CAP:
+            break
+    return out[:ALERT_SAFETY_CAP]
+
+
 def main():
     no_send = "--no-send" in sys.argv
     run = argo_watch_runs.new_run(no_send=no_send)
 
     try:
         seen = load_seen()
+        seen_before = set(seen)
 
         rss_items = collect_new(seen)
         grok_items = collect_grok(seen, rss_items)  # optional live X/web source
@@ -297,7 +346,11 @@ def main():
         run["candidates"] = len(new_items)
         print(f"\n📡 Argo Watch — {len(new_items)} items eligible for judging")
 
-        alerts = judge(new_items)
+        judged_alerts = judge(new_items)
+        alerts = _ensure_alert_floor(new_items, judged_alerts, seen_before)
+        if len(alerts) > len(judged_alerts):
+            log.info("watch floor kept %d fresh fallback candidate(s)",
+                     len(alerts) - len(judged_alerts))
         run["judge_kept"] = len(alerts)
         log.info("watch run: %d eligible, %d cleared the bar",
                  len(new_items), len(alerts))

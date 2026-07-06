@@ -2,6 +2,7 @@ import sys
 import tempfile
 import types
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -83,6 +84,88 @@ class WatchRunLedgerTest(unittest.TestCase):
         self.assertEqual(row["sent"], 0)
         self.assertTrue(row["seen_store_written"])
         self.assertEqual(row["suppression_reasons"], ["proactiveness gate"])
+
+    def test_watch_main_keeps_fresh_candidates_when_judge_returns_none(self):
+        sys.modules.setdefault(
+            "dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None)
+        )
+        import argo_watch
+
+        items = [
+            {"title": "Fresh model one", "summary": "A new model shipped.",
+             "link": "https://example.com/one"},
+            {"title": "Fresh tool two", "summary": "A new builder tool shipped.",
+             "link": "https://example.com/two"},
+            {"title": "Fresh paper three", "summary": "A fresh item.",
+             "link": "https://example.com/three"},
+        ]
+        seen_path = Path(self.tmp.name) / "seen.json"
+        sent = []
+        result = types.SimpleNamespace(suppressed=False)
+
+        with mock.patch.object(argo_watch, "SEEN_PATH", seen_path), \
+             mock.patch.object(argo_watch, "collect_new", return_value=items), \
+             mock.patch.object(argo_watch, "collect_grok", return_value=[]), \
+             mock.patch.object(argo_watch, "judge", return_value=[]), \
+             mock.patch.object(argo_watch.argo_pushes, "post_to_webhook",
+                               return_value=result), \
+             mock.patch.object(argo_watch.send_telegram, "send_message",
+                               side_effect=lambda msg: sent.append(msg)), \
+             mock.patch.object(argo_watch.argo_memory, "record"), \
+             mock.patch.object(sys, "argv", ["argo_watch.py"]):
+            argo_watch.main()
+
+        self.assertEqual(len(sent), 2)
+        self.assertIn("Fresh model one", sent[0])
+        self.assertIn("Fresh tool two", sent[1])
+        row = argo_watch_runs.recent(1)[0]
+        self.assertEqual(row["candidates"], 3)
+        self.assertEqual(row["judge_kept"], 2)
+        self.assertEqual(row["sent"], 2)
+        seen = json.loads(seen_path.read_text())
+        self.assertEqual(seen["example.com/one"], argo_watch.MAX_ATTEMPTS)
+        self.assertEqual(seen["example.com/two"], argo_watch.MAX_ATTEMPTS)
+        self.assertEqual(seen["example.com/three"], 1)
+
+    def test_watch_floor_does_not_keep_items_already_in_seen_store(self):
+        sys.modules.setdefault(
+            "dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None)
+        )
+        import argo_watch
+
+        seen_path = Path(self.tmp.name) / "seen.json"
+        seen_path.write_text('{"example.com/old": 1}')
+        old = {"title": "Old retry", "summary": "Already seen.",
+               "link": "https://example.com/old"}
+        fresh = {"title": "Fresh candidate", "summary": "Never seen before.",
+                 "link": "https://example.com/fresh"}
+        sent = []
+        result = types.SimpleNamespace(suppressed=False)
+
+        with mock.patch.object(argo_watch, "SEEN_PATH", seen_path), \
+             mock.patch.object(argo_watch, "collect_new", return_value=[old, fresh]), \
+             mock.patch.object(argo_watch, "collect_grok", return_value=[]), \
+             mock.patch.object(
+                 argo_watch, "judge", return_value=["Old retry https://example.com/old"]
+             ), \
+             mock.patch.object(argo_watch.argo_pushes, "post_to_webhook",
+                               return_value=result), \
+             mock.patch.object(argo_watch.send_telegram, "send_message",
+                               side_effect=lambda msg: sent.append(msg)), \
+             mock.patch.object(argo_watch.argo_memory, "record"), \
+             mock.patch.object(sys, "argv", ["argo_watch.py"]):
+            argo_watch.main()
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Fresh candidate", sent[0])
+        self.assertNotIn("Old retry", sent[0])
+        row = argo_watch_runs.recent(1)[0]
+        self.assertEqual(row["candidates"], 2)
+        self.assertEqual(row["judge_kept"], 1)
+        self.assertEqual(row["sent"], 1)
+        seen = json.loads(seen_path.read_text())
+        self.assertEqual(seen["example.com/old"], 2)
+        self.assertEqual(seen["example.com/fresh"], argo_watch.MAX_ATTEMPTS)
 
 
 if __name__ == "__main__":
