@@ -1,14 +1,23 @@
 """Deterministic latent-requirement scanner for Seasar build orders.
 
-The scanner is deliberately narrow: it recognizes the four post-round14 seams that
-have evidence today, emits one stable counter-cue per seam, and leaves broader
-discovery to later Gate Forge work. Pure stdlib, no I/O, no model calls.
+The scanner is deliberately narrow: it recognizes high-confidence post-round14
+seams that have evidence today, emits one stable counter-cue per seam, and leaves
+broader discovery to later Gate Forge work. Pure stdlib, no I/O, no model calls.
 """
 
 import re
 
 
-AFFORDANCE_ORDER = ("pagination", "caching", "retry", "debounce")
+AFFORDANCE_ORDER = (
+    "pagination",
+    "caching",
+    "retry",
+    "debounce",
+    "idempotency",
+    "stale_reads",
+    "async_events",
+    "race_conditions",
+)
 
 _AFFORDANCES = {
     "pagination": {
@@ -83,6 +92,80 @@ _AFFORDANCES = {
             "When input or events are debounced, the implementation must define "
             "leading or trailing behavior, cancellation, and flush timing, and must "
             "never drop the final intended action."
+        ),
+    },
+    "idempotency": {
+        "requirement_id": "LR-IDEMPOTENCY-001",
+        "confidence": 0.84,
+        "gate_id": "gate-idempotent-side-effects",
+        "patterns": (
+            r"\bidempot(?:ent|ency)\b",
+            r"\bduplicate (?:request|event|message|payment|charge|side effect)s?\b",
+            r"\bat[- ]most[- ]once\b",
+            r"\bexactly[- ]once\b",
+            r"\breplay(?:ed|able|ing)?\b",
+            r"\bdeduplicat(?:e|ed|es|ing|ion)\b",
+        ),
+        "counter_cue": (
+            "When an operation can be replayed or delivered more than once, the "
+            "implementation must define an idempotency key or deduplication guard, "
+            "and must never duplicate externally visible side effects."
+        ),
+    },
+    "stale_reads": {
+        "requirement_id": "LR-STALE-READS-001",
+        "confidence": 0.83,
+        "gate_id": "gate-stale-read-freshness",
+        "patterns": (
+            r"\bstale (?:read|reads|data|cache|response)s?\b",
+            r"\beventual(?:ly)? consistent\b",
+            r"\bread[- ]your[- ]writes\b",
+            r"\breplica lag\b",
+            r"\bfresh(?:ness)?\b",
+            r"\bsource of truth\b",
+        ),
+        "counter_cue": (
+            "When reads may be stale, the implementation must define the freshness "
+            "boundary and source of truth, and must never treat stale replica or "
+            "cache data as current where current data is required."
+        ),
+    },
+    "async_events": {
+        "requirement_id": "LR-ASYNC-EVENTS-001",
+        "confidence": 0.82,
+        "gate_id": "gate-async-event-completion",
+        "patterns": (
+            r"\basync(?:hronous)?\b",
+            r"\bevent (?:bus|stream|handler|boundary|delivery)\b",
+            r"\bwebhook (?:event|handler|callback|delivery)\b",
+            r"\bqueue(?:d|s|ing)?\b",
+            r"\bworker(?:s)?\b",
+            r"\bbackground job(?:s)?\b",
+        ),
+        "counter_cue": (
+            "When work crosses an asynchronous event boundary, the implementation "
+            "must define delivery, ordering, failure handling, and completion "
+            "visibility, and must never report completion before required async work "
+            "is durably queued or processed."
+        ),
+    },
+    "race_conditions": {
+        "requirement_id": "LR-RACE-CONDITIONS-001",
+        "confidence": 0.82,
+        "gate_id": "gate-race-condition-serialization",
+        "patterns": (
+            r"\brace condition(?:s)?\b",
+            r"\bconcurrent(?:ly| writes| requests| updates)?\b",
+            r"\bparallel updates?\b",
+            r"\blocking\b",
+            r"\btransaction(?:al|s)?\b",
+            r"\bmutex(?:es)?\b",
+            r"\bcompare[- ]and[- ]swap\b",
+        ),
+        "counter_cue": (
+            "When multiple actors can update the same state concurrently, the "
+            "implementation must define serialization, locking, or conflict handling, "
+            "and must never allow last-write-wins behavior to corrupt state."
         ),
     },
 }

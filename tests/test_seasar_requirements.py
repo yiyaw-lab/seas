@@ -21,6 +21,14 @@ SCAN_TEXT = (
     "Debounce search-as-you-type input."
 )
 
+NEW_SCAN_TEXT = (
+    "Use idempotency keys to prevent duplicate payment charges. "
+    "After writes, dashboards read from replicas with replica lag and need "
+    "read-your-writes freshness. "
+    "A queued background job processes event delivery from an event bus. "
+    "Concurrent updates can race unless locking or transactions serialize writes."
+)
+
 
 def _req_order(reqs=None, threaded=True):
     reqs = reqs or sr.scan_sources({"idea": "List all records across pages."})
@@ -60,11 +68,39 @@ class ScannerTest(unittest.TestCase):
         first = sr.scan_sources({"extra": "unused", "idea": SCAN_TEXT})
         second = sr.scan_sources({"idea": SCAN_TEXT, "extra": "unused"})
         self.assertEqual(first, second)
-        self.assertEqual([r["affordance"] for r in first], list(sr.AFFORDANCE_ORDER))
+        expected = ["pagination", "caching", "retry", "debounce"]
+        self.assertEqual([r["affordance"] for r in first], expected)
+        self.assertEqual([r["requirement_id"] for r in first], [
+            "LR-PAGINATION-001",
+            "LR-CACHING-001",
+            "LR-RETRY-001",
+            "LR-DEBOUNCE-001",
+        ])
         for r in first:
             self.assertIn("must", r["counter_cue"])
             self.assertTrue(r["requirement_id"].startswith("LR-"))
             self.assertTrue(r["gate_id"].startswith("gate-"))
+
+    def test_new_affordances_are_detected_after_existing_four(self):
+        first = sr.scan_sources({"idea": NEW_SCAN_TEXT})
+        second = sr.scan_sources({"extra": "ignored", "idea": NEW_SCAN_TEXT})
+        self.assertEqual(first, second)
+        self.assertEqual([r["affordance"] for r in first], [
+            "idempotency",
+            "stale_reads",
+            "async_events",
+            "race_conditions",
+        ])
+        self.assertEqual([r["requirement_id"] for r in first], [
+            "LR-IDEMPOTENCY-001",
+            "LR-STALE-READS-001",
+            "LR-ASYNC-EVENTS-001",
+            "LR-RACE-CONDITIONS-001",
+        ])
+        self.assertIn("idempotency key", first[0]["counter_cue"])
+        self.assertIn("freshness boundary", first[1]["counter_cue"])
+        self.assertIn("asynchronous event boundary", first[2]["counter_cue"])
+        self.assertIn("serialization", first[3]["counter_cue"])
 
     def test_normalize_clamps_and_fills_counter_cue(self):
         req = sr.normalize_requirement({
@@ -89,7 +125,10 @@ class ScannerTest(unittest.TestCase):
         order = {
             "quality_gates": [{
                 "name": "transient-resilience",
-                "threshold": "Retries use bounded backoff.",
+                "threshold": (
+                    "Retries use bounded backoff. Idempotency keys, replica lag, "
+                    "event bus delivery, and race conditions are gate-only text."
+                ),
                 "blocks_merge": True,
             }],
         }
@@ -109,6 +148,8 @@ class CompilerThreadingTest(unittest.TestCase):
         self.assertIn(reqs[0]["counter_cue"], prompt)
         self.assertIn(reqs[0]["gate_id"], prompt)
         self.assertIn('"latent_requirements"', sc._CAST_SCHEMA)
+        self.assertIn("idempotency|stale_reads|async_events|race_conditions",
+                      sc._CAST_SCHEMA)
 
     def test_requirements_survive_normalization_and_verification(self):
         reqs = sr.scan_sources({"idea": SCAN_TEXT})
