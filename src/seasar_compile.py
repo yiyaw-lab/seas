@@ -45,6 +45,7 @@ from pathlib import Path
 
 import argo_rehearse as rehearse
 import argo_store
+import seasar_requirements
 import seasar_verify
 from argo_log import get_logger
 
@@ -201,7 +202,9 @@ _CAST_SYSTEM = (
     "against; `scaffold_files` carry the literal runnable boot skeleton; and "
     "`orchestration.handoff_protocol` + `contract_evolution` plus each work order's "
     "`definition_of_done` make the merge protocol explicit. The buildability score "
-    "grades EXECUTABILITY, so prose-only contracts and vapor fixtures score F. "
+    "grades EXECUTABILITY, so prose-only contracts and vapor fixtures score F. Preserve "
+    "any supplied latent requirement ledger: these are missing positive requirements "
+    "that must be stated in work orders and backed by quality gates. "
     "Return ONLY the JSON described, no prose, no markdown fences."
 )
 
@@ -220,6 +223,7 @@ _CAST_SCHEMA = """{
     "non_goals": ["explicitly out of scope", "..."],
     "examples": [{ "input": "concrete input", "output": "concrete expected output" }]
   },
+  "latent_requirements": [{ "requirement_id": "LR-PAGINATION-001", "source_span": "where the affordance was detected", "affordance": "pagination|caching|retry|debounce|other", "counter_cue": "plain positive requirement sentence, using must/never", "confidence": 0.0, "evidence_type": "affordance_scan|compiler|user", "gate_id": "blocking quality gate name that proves this requirement, or empty", "status": "open|accepted|satisfied|waived", "waiver_reason": "required only when status is waived" }],
   "repo_scaffold": [{ "path": "src/api/server.ts", "purpose": "one line" }],
   "contracts": [{ "name": "api-spec", "kind": "openapi|schema|types|data-model|event", "owner_task": "T2", "detail": "the human rationale for this seam", "source_lang": "typescript|zod|sql|json-schema|openapi|graphql|protobuf|python", "source_path": "src/lib/contracts/api.ts", "source": "the LITERAL compilable contract source -- the file dependent tasks IMPORT byte-for-byte, not a description of it", "version": "semver; bump on a breaking change so consumers re-verify (default 1.0.0)", "consumers": ["task ids that IMPORT this seam -- a version bump re-verifies them; also auto-derived from depends_on(owner_task)"], "behavior": { "ordering": "result/event order guarantee, or 'unordered'", "idempotency": "which ops are safe to retry and on what key", "errors": "error model -- shape, codes, and what is thrown vs returned", "pagination": "cursor/offset scheme + page bounds, or 'none'", "units": "units + encodings (cents not dollars, RFC3339 UTC, ...)" }, "interface": [{ "op": "operationName", "params": [{ "name": "x", "type": "language-neutral type" }], "returns": "language-neutral type", "errors": ["NotFound", "..."] }] }],
   "tasks": [{
@@ -238,10 +242,11 @@ _CAST_SCHEMA = """{
 }"""
 
 
-def _cast_prompt(idea, brief, scope, agents, critiques):
+def _cast_prompt(idea, brief, scope, agents, critiques, latent_requirements=None):
     crit_block = "\n\n".join(
         f"[{role.upper()} CRITIQUE]\n{text}" for role, text in critiques.items()
     )
+    req_block = seasar_requirements.prompt_block(latent_requirements)
     return f"""Compile a BUILD ORDER.
 
 THE ORIGINAL IDEA:
@@ -259,6 +264,10 @@ DIALS:
 
 THE ADVERSARIES SAID (bake the surviving objections into spec/constitution/quality_gates):
 {crit_block}
+
+PRECOMPILED LATENT REQUIREMENTS (preserve these counter-cues in `latent_requirements`,
+thread them into relevant work_orders, and author matching blocking quality gates):
+{req_block}
 
 HARD RULES FOR THE PLAN:
 - tasks form a real DAG. `wave` is 1-based; tasks in the SAME wave run in PARALLEL,
@@ -301,12 +310,17 @@ HARD RULES FOR THE PLAN:
   (`test_source` + `test_path` + `test_lang`) that operationalizes its `threshold`
   against named `fixture_refs`. YOU write the predicate so the feature agent inherits a
   gate it cannot tautologize -- a gate with only a prose `threshold` is not a gate.
+- `latent_requirements`: include every precompiled requirement above unless it is
+  truly irrelevant after normalization. Preserve each `counter_cue` sentence exactly
+  when possible. For each open/accepted requirement, make a blocking quality gate whose
+  `name` matches its `gate_id` (or whose threshold names the requirement_id) so the
+  missing sentence is not just advice.
 
 Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
 
 
-def cast(idea, brief, scope, agents, critiques):
+def cast(idea, brief, scope, agents, critiques, latent_requirements=None):
     """Run the premium CAST compile. Returns (parsed partial BuildOrder dict, model,
     raw_text) -- everything but buildability/debate/meta; the raw text is kept for
     internal cost metering. Raises on no-model or parse failure."""
@@ -319,7 +333,8 @@ def cast(idea, brief, scope, agents, critiques):
     # work orders + spec) is large, and a cap that truncates mid-JSON yields an
     # unbalanced, unparseable object. 16000 leaves real headroom over the ~12K
     # chars a full order runs.
-    text = rehearse._call(_CAST_SYSTEM, _cast_prompt(idea, brief, scope, agents, critiques),
+    text = rehearse._call(_CAST_SYSTEM, _cast_prompt(idea, brief, scope, agents,
+                                                     critiques, latent_requirements),
                           model, temperature=None, max_tokens=16000)
     return _parse_json_object(text), model, text
 
@@ -439,6 +454,10 @@ def _normalize_order(order):
     for k in ("repo_scaffold", "contracts", "tasks", "work_orders", "quality_gates",
               "hardening", "provisions", "fixtures", "scaffold_files", "decisions"):
         order[k] = [x for x in _as_list(order.get(k)) if isinstance(x, dict)]
+    raw_requirements = order.get("latent_requirements")
+    if raw_requirements is None:
+        raw_requirements = order.get("requirements")
+    order["latent_requirements"] = seasar_requirements.normalize_requirements(raw_requirements)
     # hardening items: coerce the three string fields so the renderer can't crash.
     for h in order["hardening"]:
         h["concern"] = str(h.get("concern", "") or "")
@@ -887,6 +906,11 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
             "inferred_stack": brief["inferred_stack"],
             "assumptions": brief["assumptions"],
         }})
+        precast_requirements = seasar_requirements.scan_sources({
+            "idea": idea,
+            "normalized_brief": brief["normalized_idea"],
+            "assumptions": brief["assumptions"],
+        })
 
         # ---- DEBATE ----
         yield _sse({"stage": "debate", "status": "running"})
@@ -908,7 +932,8 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
 
         # ---- CAST ----
         yield _sse({"stage": "cast", "status": "running"})
-        partial, cast_model, cast_raw = cast(idea, brief, scope, agents, critiques)
+        partial, cast_model, cast_raw = cast(idea, brief, scope, agents, critiques,
+                                             precast_requirements)
         yield _sse({"stage": "cast", "status": "done"})
 
         # ---- assemble the order, then STAMP it (stamp normalizes it) ----
@@ -920,6 +945,11 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
         if not str(order.get("stack", "")).strip():
             order["stack"] = brief["inferred_stack"]
         order["debate"] = debate
+        order["latent_requirements"] = seasar_requirements.merge_requirements(
+            precast_requirements,
+            seasar_requirements.scan_order(order, idea=idea, brief=brief),
+            order.get("latent_requirements") or order.get("requirements"),
+        )
 
         yield _sse({"stage": "stamp", "status": "running"})
         buildability = stamp(order)
@@ -957,7 +987,8 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
             })
         stages.append({
             "stage": "cast", "model": cast_model,
-            "input": _CAST_SYSTEM + _cast_prompt(idea, brief, scope, agents, critiques),
+            "input": _CAST_SYSTEM + _cast_prompt(idea, brief, scope, agents,
+                                                 critiques, precast_requirements),
             "output": cast_raw,
         })
         _record_cost(order, stages, compile_ms)
@@ -1033,6 +1064,47 @@ def _md_constitution(order):
     return f"# Constitution\n\nNon-negotiable invariants every agent must hold:\n\n{body}\n"
 
 
+def _latent_requirements(order):
+    return seasar_requirements.normalize_requirements(
+        (order or {}).get("latent_requirements") or (order or {}).get("requirements"))
+
+
+def _requirement_lines(order):
+    reqs = _latent_requirements(order)
+    if not reqs:
+        return "- (none detected)"
+    lines = []
+    for r in reqs:
+        gate = f" Gate: `{r['gate_id']}`." if r.get("gate_id") else ""
+        status = f" Status: {r['status']}."
+        lines.append(f"- `{r['requirement_id']}` ({r['affordance'] or 'requirement'}): "
+                     f"{r['counter_cue']}{gate}{status}")
+    return "\n".join(lines)
+
+
+def _md_requirements(order):
+    reqs = _latent_requirements(order)
+    if not reqs:
+        return "# Requirement ledger\n\nNo latent requirements detected by the v0 scanner.\n"
+    out = ["# Requirement ledger\n",
+           "These are missing positive requirements compiled from risky affordances. "
+           "They are counter-cues, not advisory notes: implement them or waive them "
+           "explicitly with a reason.\n"]
+    for r in reqs:
+        out.append(f"## {r['requirement_id']} -- {r['affordance'] or 'requirement'}")
+        out.append(f"- counter-cue: {r['counter_cue']}")
+        out.append(f"- source: {r['source_span'] or '(compiler-supplied)'}")
+        out.append(f"- confidence: {r['confidence']:.2f}")
+        out.append(f"- evidence: {r['evidence_type']}")
+        if r.get("gate_id"):
+            out.append(f"- gate: `{r['gate_id']}`")
+        out.append(f"- status: {r['status']}")
+        if r.get("waiver_reason"):
+            out.append(f"- waiver: {r['waiver_reason']}")
+        out.append("")
+    return "\n".join(out)
+
+
 def _md_spec(order):
     spec = order.get("spec") or {}
     ac = "\n".join(f"- {c}" for c in spec.get("acceptance_criteria", [])) or "- (none)"
@@ -1057,6 +1129,9 @@ def _md_spec(order):
 
 ## Examples
 {ex}
+
+## Requirement ledger
+{_requirement_lines(order)}
 """
 
 
@@ -1145,6 +1220,7 @@ def _md_agents(order):
     gate_lines = "\n".join(
         f"- `{g.get('name', '')}` MUST pass: {g.get('threshold', '')}" for g in gates
     ) or "- (no blocking gates declared -- itself a buildability gap)"
+    requirements = _requirement_lines(order)
     constitution = order.get("constitution") or []
     invariants = "\n".join(f"- {c}" for c in constitution) or "- follow the spec"
     orch = order.get("orchestration") or {}
@@ -1165,6 +1241,9 @@ Build context for autonomous coding agents on this Build Order.
 {gate_lines}
 - Always write the test named on your task before marking it done.
 - Always stay inside the files listed on your task -- one writer per file.
+
+### Requirement ledger (counter-cues)
+{requirements}
 
 ### Invariants (the constitution -- never violate; not every one is gated yet)
 {invariants}
@@ -1226,11 +1305,17 @@ def _md_orchestration(order):
         nums = [wave_of[t] for t in ids if t in wave_of]
         return f"- Wave {min(nums) if nums else '?'}: {', '.join(ids)}"
     wave_lines = "\n".join(_wline(w) for w in waves) or "- (none)"
-    gates = "\n".join(
-        f"- **{g.get('name', '')}** -- threshold: {g.get('threshold', '')} "
-        f"(blocks merge: {bool(g.get('blocks_merge'))})"
-        for g in (order.get("quality_gates") or [])
-    ) or "- (none)"
+    req_by_gate = {r.get("gate_id"): r for r in _latent_requirements(order)
+                   if r.get("gate_id")}
+
+    def _gline(g):
+        line = (f"- **{g.get('name', '')}** -- threshold: {g.get('threshold', '')} "
+                f"(blocks merge: {bool(g.get('blocks_merge'))})")
+        req = req_by_gate.get(g.get("name"))
+        if req:
+            line += f" -- proves `{req.get('requirement_id')}`"
+        return line
+    gates = "\n".join(_gline(g) for g in (order.get("quality_gates") or [])) or "- (none)"
     return f"""# Orchestration
 
 - **Topology:** {orch.get('topology', 'orchestrator-worker')}
@@ -1240,6 +1325,9 @@ def _md_orchestration(order):
 
 ## Quality gates
 {gates}
+
+## Requirement ledger
+{_requirement_lines(order)}
 
 ## Consistency check
 {orch.get('consistency_check', '')}
@@ -1304,6 +1392,7 @@ def _md_work_order(wo, order=None):
     my_decisions = [d for d in (order.get("decisions") or [])
                     if d.get("anchor_task") in my_ids
                     or (d.get("anchor_file") and d.get("anchor_file") in allowed_set)]
+    requirements = _latent_requirements(order)
     out = [f"# Work order: {wo.get('agent', '')}\n",
            f"- **role:** {wo.get('role', '')}",
            f"- **task ids:** {', '.join(my_ids) or '(none)'}",
@@ -1335,6 +1424,11 @@ def _md_work_order(wo, order=None):
             out.append(f"- {d.get('id')}: {d.get('question', '')}  [{opts}]"
                        + (f" (recommended: {rec})" if rec else "")
                        + f" -- resolve decision {d.get('id')} in DECISIONS.md (do not guess)")
+    if requirements:
+        out.append("\n## Requirement counter-cues (implement or explicitly waive)")
+        for r in requirements:
+            gate = f"; gate `{r.get('gate_id')}`" if r.get("gate_id") else ""
+            out.append(f"- `{r.get('requirement_id')}`: {r.get('counter_cue')}{gate}")
     out.append("\n## Required before done")
     out.append("- The test named on each assigned task passes.")
     out.append("- The emitted gates pass (assert-no-sentinel + check-ownership + "
@@ -2076,6 +2170,7 @@ def build_bundle(order):
         put(f"{root}/README.md", _md_readme(order, root))
         put(f"{root}/constitution.md", _md_constitution(order))
         put(f"{root}/spec.md", _md_spec(order))
+        put(f"{root}/REQUIREMENTS.md", _md_requirements(order))
         put(f"{root}/hardening.md", _md_hardening(order))
         put(f"{root}/provisions.md", _md_provisions(order))
         put(f"{root}/.env.example", _env_example(order))

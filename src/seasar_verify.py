@@ -24,6 +24,8 @@ a missing field is a failed check, not a crash. Every accessor is defensive .get
 import json
 import re
 
+import seasar_requirements
+
 ERROR = "error"   # structural -- agents WILL collide / block
 WARN = "warn"     # executability -- the order is prose, not runnable artifact
 
@@ -89,6 +91,20 @@ def _str_id(v):
         return None
     s = str(v).strip()
     return s or None
+
+
+def _requirements_raw(order):
+    if not isinstance(order, dict):
+        return None
+    if "latent_requirements" in order:
+        return order.get("latent_requirements")
+    if "requirements" in order:
+        return order.get("requirements")
+    return None
+
+
+def _requirements(order):
+    return seasar_requirements.normalize_requirements(_requirements_raw(order))
 
 
 def _source_parse_error(c):
@@ -386,6 +402,53 @@ def verify_order(order):
             "blocking gates share a test_path (one predicate is dropped at bundle time): "
             + ", ".join(map(str, dups)))
 
+    raw_reqs = _requirements_raw(order)
+    if raw_reqs is not None:
+        reqs = _requirements(order)
+        raw_items = raw_reqs if isinstance(raw_reqs, list) else (
+            [raw_reqs] if isinstance(raw_reqs, dict) else [])
+        non_objects = sum(1 for r in raw_items if not isinstance(r, dict))
+        bad = []
+        for r in reqs:
+            if not (_nonempty(r.get("requirement_id"))
+                    and _nonempty(r.get("affordance"))
+                    and _nonempty(r.get("counter_cue"))):
+                bad.append(r.get("requirement_id") or "(missing id)")
+            if r.get("status") == "waived" and not _nonempty(r.get("waiver_reason")):
+                bad.append((r.get("requirement_id") or "(missing id)") + " waived without reason")
+        malformed = raw_reqs is not None and not isinstance(raw_reqs, (list, dict))
+        ok_reqs = not malformed and non_objects == 0 and not bad
+        detail = []
+        if malformed:
+            detail.append("latent_requirements is not a list/object")
+        if non_objects:
+            detail.append("%d non-object requirement item(s)" % non_objects)
+        if bad:
+            detail.append("bad requirement(s): " + ", ".join(map(str, bad)))
+        add("latent_requirements_have_counter_cues", ok_reqs, WARN, "; ".join(detail))
+
+        gate_names = {str(g.get("name", "") or "") for g in gates}
+        gate_blob = "\n".join(
+            " ".join(str(g.get(k, "") or "") for k in ("name", "threshold", "test_source"))
+            for g in gates)
+        unthreaded = []
+        for r in reqs:
+            if r.get("status") == "waived":
+                continue
+            rid = r.get("requirement_id", "")
+            cue = r.get("counter_cue", "")
+            gate = r.get("gate_id", "")
+            if gate and gate in gate_names:
+                continue
+            if rid and rid in gate_blob:
+                continue
+            if cue and cue in gate_blob:
+                continue
+            unthreaded.append(rid or "(missing id)")
+        add("latent_requirements_gate_threaded", not unthreaded, WARN,
+            "requirement(s) not referenced by a blocking quality gate: "
+            + ", ".join(map(str, unthreaded)))
+
     # every decision must anchor to a real task/file, or it routes to NO agent's packet
     # while still blocking the build globally (a silent fleet deadlock).
     decisions = _dicts(order, "decisions")
@@ -424,7 +487,9 @@ def verify_order(order):
     independent = ("handoff_protocol_present", "contract_evolution_present",
                    "work_orders_have_dod", "gates_have_predicates",
                    "gate_fixtures_materialized", "gate_predicates_distinct",
-                   "decisions_routed", "contracts_specify_behavior")
+                   "decisions_routed", "contracts_specify_behavior",
+                   "latent_requirements_have_counter_cues",
+                   "latent_requirements_gate_threaded")
     ind = [c for c in checks if c["name"] in independent]
     ind_pass = sum(1 for c in ind if c["ok"])
     return {
