@@ -36,6 +36,7 @@ import io
 import json
 import os
 import re
+import hashlib
 import time
 import uuid
 import zipfile
@@ -78,6 +79,96 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _env_int(name, default, minimum=1):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+CAST_MAX_TOKENS = _env_int("SEASAR_CAST_MAX_TOKENS", 16000)
+CAST_FAILURES_PATH = Path(os.environ.get(
+    "SEASAR_CAST_FAILURES_LOG", str(ROOT / "data" / "seasar_cast_failures.jsonl")))
+_CAST_FAILURE_TAIL_CHARS = 600
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization)\b['\"]?\s*[:=]\s*['\"]?[^'\"\s,}]+"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"\b(?:sk|pk|gh[pousr]?|xox[baprs])[-_][A-Za-z0-9_\-]{6,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
+
+
+def _redact_text(text):
+    text = str(text or "")
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text
+
+
+def _redacted_tail(text, limit=_CAST_FAILURE_TAIL_CHARS):
+    text = str(text or "")
+    tail = text[-limit:] if len(text) > limit else text
+    return _redact_text(tail)
+
+
+def _sha256(text):
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+class JsonObjectParseError(ValueError):
+    """Diagnostic JSON-object parse failure; safe for user-facing CAST wrapping."""
+
+    def __init__(self, reason, response_text="", brace_depth=0,
+                 likely_truncated=False, detail=""):
+        self.reason = reason
+        self.response_chars = len(response_text or "")
+        self.brace_depth = brace_depth
+        self.tail = _redacted_tail(response_text)
+        self.likely_truncated = bool(likely_truncated)
+        msg = detail or reason
+        super().__init__(msg)
+
+
+class CastParseError(ValueError):
+    """CAST failed to return a parseable BuildOrder JSON object."""
+
+    def __init__(self, code, parse_error, metadata=None):
+        metadata = metadata or {}
+        self.code = code
+        self.reason = parse_error.reason
+        self.response_chars = parse_error.response_chars
+        self.brace_depth = parse_error.brace_depth
+        self.tail = parse_error.tail
+        self.likely_truncated = bool(parse_error.likely_truncated
+                                     or metadata.get("stop_reason") == "max_tokens")
+        self.provider = metadata.get("provider")
+        self.model = metadata.get("model")
+        self.stop_reason = metadata.get("stop_reason")
+        self.max_tokens = metadata.get("max_tokens")
+        self.input_tokens = metadata.get("input_tokens")
+        self.output_tokens = metadata.get("output_tokens")
+        super().__init__(
+            "%s: %s (model=%s, stop_reason=%s, chars=%s, brace_depth=%s)" % (
+                self.code, self.reason, self.model or "",
+                self.stop_reason or "", self.response_chars, self.brace_depth)
+        )
+
+    def to_event(self):
+        return {
+            "stage": "error",
+            "code": self.code,
+            "message": str(self),
+            "reason": self.reason,
+            "model": self.model,
+            "stop_reason": self.stop_reason,
+            "max_tokens": self.max_tokens,
+            "response_chars": self.response_chars,
+            "brace_depth": self.brace_depth,
+            "likely_truncated": self.likely_truncated,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Defensive JSON parsing -- the model is told to return ONLY JSON, but we never
 # trust that: strip ```json fences if present, then find the outermost {...}.
@@ -90,7 +181,8 @@ def _parse_json_object(text):
     otherwise (the caller turns that into an honest error event -- never a fabricated
     order, never a non-dict the rest of the pipeline would choke on)."""
     if not text:
-        raise ValueError("empty model response")
+        raise JsonObjectParseError("empty_response", "", 0, False,
+                                   "empty model response")
     s = text.strip()
     # Strip a leading ```json / ``` fence and any trailing fence.
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", s, re.DOTALL)
@@ -107,7 +199,8 @@ def _parse_json_object(text):
     # top-level array wrapping the object).
     start = s.find("{")
     if start == -1:
-        raise ValueError("model response was not a JSON object")
+        raise JsonObjectParseError("not_json_object", s, 0, False,
+                                   "model response was not a JSON object")
     depth, in_str, esc = 0, False, False
     for i in range(start, len(s)):
         c = s[i]
@@ -126,11 +219,21 @@ def _parse_json_object(text):
         elif c == "}":
             depth -= 1
             if depth == 0:
-                inner = json.loads(s[start:i + 1])
+                try:
+                    inner = json.loads(s[start:i + 1])
+                except (json.JSONDecodeError, ValueError) as exc:
+                    raise JsonObjectParseError(
+                        "malformed_json", s, depth, False,
+                        "model response JSON object did not parse: %s" % exc
+                    ) from exc
                 if not isinstance(inner, dict):
-                    raise ValueError("model response was not a JSON object")
+                    raise JsonObjectParseError(
+                        "not_json_object", s, depth, False,
+                        "model response was not a JSON object")
                 return inner
-    raise ValueError("unbalanced JSON object in model response")
+    raise JsonObjectParseError(
+        "unbalanced_json", s, depth, True,
+        "unbalanced JSON object in model response")
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +430,41 @@ Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
 
 
+def _cast_failure_code(parse_error, metadata):
+    if (metadata or {}).get("stop_reason") == "max_tokens":
+        return "cast_truncated"
+    return "cast_malformed_json"
+
+
+def _record_cast_failure(error, prompt, response_text):
+    """Best-effort CAST failure ledger. Never writes full prompt or full output."""
+    try:
+        path = Path(CAST_FAILURES_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "created_at": _now_iso(),
+            "code": error.code,
+            "reason": error.reason,
+            "provider": error.provider,
+            "model": error.model,
+            "stop_reason": error.stop_reason,
+            "max_tokens": error.max_tokens,
+            "input_tokens": error.input_tokens,
+            "output_tokens": error.output_tokens,
+            "response_chars": error.response_chars,
+            "brace_depth": error.brace_depth,
+            "likely_truncated": error.likely_truncated,
+            "response_sha256": _sha256(response_text),
+            "prompt_sha256": _sha256(prompt),
+            "prompt_chars": len(prompt or ""),
+            "tail": error.tail,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        log.warning("seasar: CAST failure logging failed", exc_info=True)
+
+
 def cast(idea, brief, scope, agents, critiques, latent_requirements=None):
     """Run the premium CAST compile. Returns (parsed partial BuildOrder dict, model,
     raw_text) -- everything but buildability/debate/meta; the raw text is kept for
@@ -338,12 +476,24 @@ def cast(idea, brief, scope, agents, critiques, latent_requirements=None):
     # a temperature. _call omits it for the Anthropic path when None.
     # max_tokens generous: the whole BuildOrder JSON (a deep DAG + contracts +
     # work orders + spec) is large, and a cap that truncates mid-JSON yields an
-    # unbalanced, unparseable object. 16000 leaves real headroom over the ~12K
-    # chars a full order runs.
-    text = rehearse._call(_CAST_SYSTEM, _cast_prompt(idea, brief, scope, agents,
-                                                     critiques, latent_requirements),
-                          model, temperature=None, max_tokens=16000)
-    return _parse_json_object(text), model, text
+    # unbalanced, unparseable object. The cap is env-tunable for paid canaries.
+    prompt = _cast_prompt(idea, brief, scope, agents, critiques, latent_requirements)
+    result = rehearse._call(
+        _CAST_SYSTEM, prompt, model, temperature=None,
+        max_tokens=CAST_MAX_TOKENS, return_metadata=True)
+    if isinstance(result, tuple) and len(result) == 2:
+        text, metadata = result
+    else:
+        text, metadata = result, {"model": model, "max_tokens": CAST_MAX_TOKENS}
+    metadata = metadata or {}
+    metadata.setdefault("model", model)
+    metadata.setdefault("max_tokens", CAST_MAX_TOKENS)
+    try:
+        return _parse_json_object(text), model, text
+    except JsonObjectParseError as exc:
+        err = CastParseError(_cast_failure_code(exc, metadata), exc, metadata)
+        _record_cast_failure(err, prompt, text)
+        raise err from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1166,9 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
 
         yield _sse({"stage": "complete", "order": order})
 
+    except CastParseError as exc:
+        log.warning("seasar CAST failed: %s", exc)
+        yield _sse(exc.to_event())
     except (ValueError, RuntimeError) as exc:
         # Expected boundaries: model parse failure (ValueError) or no-model
         # (RuntimeError). Honest, specific reason.

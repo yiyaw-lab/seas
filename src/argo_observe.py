@@ -265,6 +265,27 @@ def _check_refusal(response, label):
         raise ModelRefusal(f"model refused: {label}")
 
 
+def _usage_number(usage, name):
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage.get(name)
+    return getattr(usage, name, None)
+
+
+def _response_metadata(provider, model, response, max_tokens=None):
+    usage = getattr(response, "usage", None)
+    return {
+        "provider": provider,
+        "model": model,
+        "stop_reason": getattr(response, "stop_reason", None),
+        "status": getattr(response, "status", None),
+        "max_tokens": max_tokens,
+        "input_tokens": _usage_number(usage, "input_tokens"),
+        "output_tokens": _usage_number(usage, "output_tokens"),
+    }
+
+
 def _call_openai(job, model, temperature=1.0):
     from openai import OpenAI  # lazy: no-key path needs no SDK
 
@@ -477,7 +498,8 @@ def _final_text(content):
 
 
 def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
-                  temperature=1.0, return_tool_events=False, output_schema=None):
+                  temperature=1.0, return_tool_events=False, output_schema=None,
+                  return_metadata=False):
     """Claude chat call with structured messages and optional MCP tool servers.
 
     Separate from generate_observations (the string-in/string-out helper the
@@ -502,7 +524,7 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
     if provider and provider["name"] == "openai":
         return _chat_with_mcp_openai(
             system, messages, model, mcp_servers, max_tokens, temperature,
-            return_tool_events)
+            return_tool_events, return_metadata)
     if not (provider and provider["name"] == "anthropic"):
         # Only Anthropic + OpenAI have an MCP tool path. A chat-only provider (e.g.
         # xai/grok, supports_mcp=False) must never fall through to the Anthropic
@@ -602,7 +624,14 @@ def chat_with_mcp(system, messages, model, mcp_servers=None, max_tokens=1024,
         text = _final_text(accumulated)
     else:
         text = _final_text(response.content)
-    return (text, events) if return_tool_events else text
+    metadata = _response_metadata("anthropic", model, response, max_tokens)
+    if return_tool_events and return_metadata:
+        return text, events, metadata
+    if return_tool_events:
+        return text, events
+    if return_metadata:
+        return text, metadata
+    return text
 
 
 # Reasoning models (gpt-5*) spend tokens on hidden reasoning that counts against
@@ -613,7 +642,7 @@ _OPENAI_MIN_OUTPUT_TOKENS = 4096
 
 
 def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
-                          temperature, return_tool_events):
+                          temperature, return_tool_events, return_metadata=False):
     """GPT counterpart to chat_with_mcp: the OpenAI Responses API talking to the
     SAME remote MCP server (Streamable HTTP) the Anthropic connector uses. OpenAI
     runs the tool loop; each fired tool surfaces as an `mcp_call` output item, which
@@ -692,7 +721,15 @@ def _chat_with_mcp_openai(system, messages, model, mcp_servers, max_tokens,
     text = _message_text(items[last_call + 1:])
     if not text.strip():
         text = _message_text(items) or (getattr(response, "output_text", None) or "")
-    return (text, events) if return_tool_events else text
+    metadata = _response_metadata(
+        "openai", model, response, max(max_tokens, _OPENAI_MIN_OUTPUT_TOKENS))
+    if return_tool_events and return_metadata:
+        return text, events, metadata
+    if return_tool_events:
+        return text, events
+    if return_metadata:
+        return text, metadata
+    return text
 
 
 # Provider registry. Each entry: how to recognise a model name, which env var

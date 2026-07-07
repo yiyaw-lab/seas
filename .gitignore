@@ -118,6 +118,11 @@ data/ledger.json
 data/capabilities.json
 data/opportunities.json
 
+# Seasar paid-run artifacts and operator ledgers
+data/seasar_orders/
+data/seasar_costs.jsonl
+data/seasar_cast_failures.jsonl
+
 # SEAS job run artifacts (JSON outputs in subdirs; .md design docs stay)
 runs/**/*.json
 
