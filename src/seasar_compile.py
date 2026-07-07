@@ -91,6 +91,8 @@ CAST_MAX_TOKENS = _env_int("SEASAR_CAST_MAX_TOKENS", 16000)
 CAST_RECOVERY_RETRIES = _env_int("SEASAR_CAST_RECOVERY_RETRIES", 1, minimum=0)
 CAST_RECOVERY_MAX_TOKENS = _env_int(
     "SEASAR_CAST_RECOVERY_MAX_TOKENS", CAST_MAX_TOKENS)
+RECOVERED_CAST_MIN_SCORE = min(100, _env_int(
+    "SEASAR_RECOVERED_CAST_MIN_SCORE", 70, minimum=0))
 CAST_FAILURES_PATH = Path(os.environ.get(
     "SEASAR_CAST_FAILURES_LOG", str(ROOT / "data" / "seasar_cast_failures.jsonl")))
 _CAST_FAILURE_TAIL_CHARS = 600
@@ -182,6 +184,58 @@ class CastParseError(ValueError):
             "attempt_kind": self.attempt_kind,
             "recovery_attempted": self.recovery_attempted,
             "retries_exhausted": self.retries_exhausted,
+        }
+
+
+class CastQualityError(ValueError):
+    """A recovered CAST parsed, but failed the deterministic quality floor."""
+
+    def __init__(self, buildability, verification, attempts, min_score):
+        buildability = buildability or {}
+        verification = verification or {}
+        self.code = "cast_recovery_low_quality"
+        self.score = int(buildability.get("score") or 0)
+        self.grade = buildability.get("grade")
+        self.min_score = int(min_score)
+        self.verification_ok = bool(verification.get("ok"))
+        self.strict_ok = bool(verification.get("strict_ok"))
+        self.attempts = len(attempts or [])
+        self.recovery_attempted = True
+        self.failed_checks = [
+            {
+                "name": c.get("name"),
+                "severity": c.get("severity"),
+                "detail": c.get("detail", ""),
+            }
+            for c in verification.get("checks", [])
+            if not c.get("ok")
+        ]
+        reasons = []
+        if not self.verification_ok:
+            reasons.append("structural_verification_failed")
+        if self.score < self.min_score:
+            reasons.append("buildability_below_floor")
+        self.reasons = reasons or ["recovered_cast_quality_failed"]
+        super().__init__(
+            "%s: %s (score=%s, min_score=%s, attempts=%s)" % (
+                self.code, ",".join(self.reasons), self.score,
+                self.min_score, self.attempts)
+        )
+
+    def to_event(self):
+        return {
+            "stage": "error",
+            "code": self.code,
+            "message": str(self),
+            "reasons": self.reasons,
+            "score": self.score,
+            "grade": self.grade,
+            "min_score": self.min_score,
+            "verification_ok": self.verification_ok,
+            "strict_ok": self.strict_ok,
+            "attempts": self.attempts,
+            "recovery_attempted": self.recovery_attempted,
+            "failed_checks": self.failed_checks,
         }
 
 
@@ -531,6 +585,41 @@ def _record_cast_failure(error, prompt, response_text, final=True,
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         log.warning("seasar: CAST failure logging failed", exc_info=True)
+
+
+def _record_cast_quality_failure(error, order):
+    """Best-effort quality failure ledger. No prompt, raw CAST output, or full order."""
+    try:
+        path = Path(CAST_FAILURES_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        signature = {
+            "id": (order or {}).get("id"),
+            "title": (order or {}).get("title"),
+            "task_count": len((order or {}).get("tasks") or []),
+            "contract_count": len((order or {}).get("contracts") or []),
+            "gate_count": len((order or {}).get("quality_gates") or []),
+            "requirement_count": len((order or {}).get("latent_requirements") or []),
+        }
+        record = {
+            "created_at": _now_iso(),
+            "code": error.code,
+            "reasons": error.reasons,
+            "score": error.score,
+            "grade": error.grade,
+            "min_score": error.min_score,
+            "verification_ok": error.verification_ok,
+            "strict_ok": error.strict_ok,
+            "attempts": error.attempts,
+            "recovery_attempted": error.recovery_attempted,
+            "failed_checks": error.failed_checks,
+            "order_signature_sha256": _sha256(json.dumps(
+                signature, sort_keys=True, ensure_ascii=False)),
+            **signature,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        log.warning("seasar: CAST quality failure logging failed", exc_info=True)
 
 
 def _call_cast_attempt(prompt, model, max_tokens):
@@ -1018,6 +1107,20 @@ def stamp(order):
     return buildability
 
 
+def _cast_recovery_used(cast_attempts):
+    return len(cast_attempts or []) > 1
+
+
+def _recovered_cast_quality_error(order, buildability, cast_attempts):
+    if not _cast_recovery_used(cast_attempts):
+        return None
+    verification = seasar_verify.verify_order(order)
+    if verification.get("ok") and int(buildability.get("score") or 0) >= RECOVERED_CAST_MIN_SCORE:
+        return None
+    return CastQualityError(
+        buildability, verification, cast_attempts, RECOVERED_CAST_MIN_SCORE)
+
+
 # ---------------------------------------------------------------------------
 # Persistence.
 # ---------------------------------------------------------------------------
@@ -1239,6 +1342,10 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
 
         yield _sse({"stage": "stamp", "status": "running"})
         buildability = stamp(order)
+        quality_error = _recovered_cast_quality_error(order, buildability, cast_attempts)
+        if quality_error:
+            _record_cast_quality_failure(quality_error, order)
+            raise quality_error
         yield _sse({"stage": "stamp", "status": "done",
                     "data": {"buildability": buildability}})
 
@@ -1286,6 +1393,9 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
 
     except CastParseError as exc:
         log.warning("seasar CAST failed: %s", exc)
+        yield _sse(exc.to_event())
+    except CastQualityError as exc:
+        log.warning("seasar CAST recovery failed quality floor: %s", exc)
         yield _sse(exc.to_event())
     except (ValueError, RuntimeError) as exc:
         # Expected boundaries: model parse failure (ValueError) or no-model

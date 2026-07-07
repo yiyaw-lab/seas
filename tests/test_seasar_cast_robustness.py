@@ -82,6 +82,23 @@ def _minimal_partial():
     }
 
 
+def _structurally_broken_partial():
+    order = _minimal_partial()
+    order["tasks"].append({
+        "id": "T2",
+        "title": "Same-wave dependent task",
+        "wave": 1,
+        "depends_on": ["T1"],
+        "files": ["src/worker.py"],
+        "agent_role": "Backend",
+        "test": "PYTHONPATH=src python -m unittest",
+        "acceptance": "tests pass",
+    })
+    order["orchestration"]["waves"] = [["T1", "T2"]]
+    order["work_orders"][0]["task_ids"] = ["T1", "T2"]
+    return order
+
+
 class CastParserDiagnosticsTest(unittest.TestCase):
     def test_truncated_json_has_diagnostics(self):
         with self.assertRaises(sc.JsonObjectParseError) as cm:
@@ -333,7 +350,10 @@ class CompileStreamCastFailureTest(unittest.TestCase):
         self._orig_run = sc.rehearse.run_adversaries
         self._orig_cast = sc.cast
         self._orig_record_cost = sc._record_cost
+        self._orig_failures = sc.CAST_FAILURES_PATH
+        self._orig_min_score = sc.RECOVERED_CAST_MIN_SCORE
         sc.ORDERS_DIR = Path(self.tmp.name) / "orders"
+        sc.CAST_FAILURES_PATH = Path(self.tmp.name) / "cast-failures.jsonl"
         sc.smelt = lambda *a, **k: (_brief(), "claude-sonnet-4-6", "{}")
         sc.rehearse._assign_adversary_models = lambda roles: {
             "critic": "claude-sonnet-4-6",
@@ -349,6 +369,8 @@ class CompileStreamCastFailureTest(unittest.TestCase):
         sc.rehearse.run_adversaries = self._orig_run
         sc.cast = self._orig_cast
         sc._record_cost = self._orig_record_cost
+        sc.CAST_FAILURES_PATH = self._orig_failures
+        sc.RECOVERED_CAST_MIN_SCORE = self._orig_min_score
         self.tmp.cleanup()
 
     def test_cast_failure_emits_code_and_persists_no_order(self):
@@ -369,6 +391,81 @@ class CompileStreamCastFailureTest(unittest.TestCase):
         self.assertEqual(events[-1]["code"], "cast_truncated")
         self.assertFalse(os.path.exists(sc.ORDERS_DIR))
 
+    def test_recovered_low_score_emits_quality_error_and_persists_no_order(self):
+        attempts = [
+            {"stage": "cast", "model": "claude-opus-4-8",
+             "input": "initial prompt", "output": "truncated"},
+            {"stage": "cast:recovery1", "model": "claude-opus-4-8",
+             "input": "recovery prompt", "output": json.dumps(_minimal_partial())},
+        ]
+
+        def recovered_cast(*args, **kwargs):
+            self.assertTrue(kwargs.get("return_attempts"))
+            return _minimal_partial(), "claude-opus-4-8", attempts[-1]["output"], attempts
+
+        def record_cost(*args, **kwargs):
+            self.fail("cost accounting should not run for rejected recovered CAST")
+
+        sc.RECOVERED_CAST_MIN_SCORE = 90
+        sc.cast = recovered_cast
+        sc._record_cost = record_cost
+
+        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
+        err = events[-1]
+        self.assertEqual(err["stage"], "error")
+        self.assertEqual(err["code"], "cast_recovery_low_quality")
+        self.assertIn("buildability_below_floor", err["reasons"])
+        self.assertLess(err["score"], err["min_score"])
+        self.assertFalse(os.path.exists(sc.ORDERS_DIR))
+
+        with open(sc.CAST_FAILURES_PATH) as fh:
+            record = json.loads(fh.read())
+        self.assertEqual(record["code"], "cast_recovery_low_quality")
+        self.assertNotIn("prompt", record)
+        self.assertNotIn("response", record)
+
+    def test_recovered_structural_error_fails_even_without_score_floor(self):
+        attempts = [
+            {"stage": "cast", "model": "claude-opus-4-8",
+             "input": "initial prompt", "output": "truncated"},
+            {"stage": "cast:recovery1", "model": "claude-opus-4-8",
+             "input": "recovery prompt", "output": json.dumps(_structurally_broken_partial())},
+        ]
+
+        def recovered_cast(*args, **kwargs):
+            self.assertTrue(kwargs.get("return_attempts"))
+            return _structurally_broken_partial(), "claude-opus-4-8", attempts[-1]["output"], attempts
+
+        sc.RECOVERED_CAST_MIN_SCORE = 0
+        sc.cast = recovered_cast
+
+        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
+        err = events[-1]
+        self.assertEqual(err["code"], "cast_recovery_low_quality")
+        self.assertIn("structural_verification_failed", err["reasons"])
+        self.assertFalse(err["verification_ok"])
+        failed = {c["name"] for c in err["failed_checks"]}
+        self.assertIn("deps_point_backward", failed)
+        self.assertFalse(os.path.exists(sc.ORDERS_DIR))
+
+    def test_quality_floor_does_not_apply_to_initial_cast(self):
+        attempts = [
+            {"stage": "cast", "model": "claude-opus-4-8",
+             "input": "initial prompt", "output": json.dumps(_minimal_partial())},
+        ]
+
+        def initial_cast(*args, **kwargs):
+            self.assertTrue(kwargs.get("return_attempts"))
+            return _minimal_partial(), "claude-opus-4-8", attempts[-1]["output"], attempts
+
+        sc.RECOVERED_CAST_MIN_SCORE = 100
+        sc.cast = initial_cast
+        sc._record_cost = lambda *a, **k: None
+
+        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
+        self.assertEqual(events[-1]["stage"], "complete")
+        self.assertTrue(os.path.exists(sc.ORDERS_DIR))
+
     def test_compile_stream_threads_recovered_cast_attempts_to_costing(self):
         captured = {}
         attempts = [
@@ -387,6 +484,7 @@ class CompileStreamCastFailureTest(unittest.TestCase):
 
         sc.cast = recovered_cast
         sc._record_cost = record_cost
+        sc.RECOVERED_CAST_MIN_SCORE = 0
 
         events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
         self.assertEqual(events[-1]["stage"], "complete")
