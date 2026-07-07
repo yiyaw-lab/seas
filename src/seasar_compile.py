@@ -88,6 +88,9 @@ def _env_int(name, default, minimum=1):
 
 
 CAST_MAX_TOKENS = _env_int("SEASAR_CAST_MAX_TOKENS", 16000)
+CAST_RECOVERY_RETRIES = _env_int("SEASAR_CAST_RECOVERY_RETRIES", 1, minimum=0)
+CAST_RECOVERY_MAX_TOKENS = _env_int(
+    "SEASAR_CAST_RECOVERY_MAX_TOKENS", CAST_MAX_TOKENS)
 CAST_FAILURES_PATH = Path(os.environ.get(
     "SEASAR_CAST_FAILURES_LOG", str(ROOT / "data" / "seasar_cast_failures.jsonl")))
 _CAST_FAILURE_TAIL_CHARS = 600
@@ -133,7 +136,9 @@ class JsonObjectParseError(ValueError):
 class CastParseError(ValueError):
     """CAST failed to return a parseable BuildOrder JSON object."""
 
-    def __init__(self, code, parse_error, metadata=None):
+    def __init__(self, code, parse_error, metadata=None, attempt=1,
+                 attempt_kind="initial", max_attempts=1,
+                 recovery_attempted=False, retries_exhausted=False):
         metadata = metadata or {}
         self.code = code
         self.reason = parse_error.reason
@@ -148,10 +153,16 @@ class CastParseError(ValueError):
         self.max_tokens = metadata.get("max_tokens")
         self.input_tokens = metadata.get("input_tokens")
         self.output_tokens = metadata.get("output_tokens")
+        self.attempt = attempt
+        self.attempt_kind = attempt_kind
+        self.max_attempts = max_attempts
+        self.recovery_attempted = recovery_attempted
+        self.retries_exhausted = retries_exhausted
         super().__init__(
-            "%s: %s (model=%s, stop_reason=%s, chars=%s, brace_depth=%s)" % (
-                self.code, self.reason, self.model or "",
-                self.stop_reason or "", self.response_chars, self.brace_depth)
+            "%s: %s (attempt=%s/%s, model=%s, stop_reason=%s, chars=%s, brace_depth=%s)" % (
+                self.code, self.reason, self.attempt, self.max_attempts,
+                self.model or "", self.stop_reason or "", self.response_chars,
+                self.brace_depth)
         )
 
     def to_event(self):
@@ -166,6 +177,11 @@ class CastParseError(ValueError):
             "response_chars": self.response_chars,
             "brace_depth": self.brace_depth,
             "likely_truncated": self.likely_truncated,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "attempt_kind": self.attempt_kind,
+            "recovery_attempted": self.recovery_attempted,
+            "retries_exhausted": self.retries_exhausted,
         }
 
 
@@ -430,13 +446,58 @@ Return ONLY this JSON object (no prose, no markdown fences):
 {_CAST_SCHEMA}"""
 
 
+def _cast_recovery_prompt(idea, brief, scope, agents, critiques,
+                          latent_requirements=None):
+    crit_block = "\n\n".join(
+        f"[{role.upper()} CRITIQUE]\n{text}" for role, text in critiques.items()
+    )
+    req_block = seasar_requirements.prompt_block(latent_requirements)
+    return f"""The previous CAST attempt hit the output token limit before producing
+a complete JSON object. Retry from scratch; do NOT continue the truncated fragment.
+
+Return a COMPLETE but COMPACT BuildOrder JSON object matching the schema below.
+
+THE ORIGINAL IDEA:
+{idea}
+
+THE NORMALIZED BRIEF:
+{brief['normalized_idea']}
+
+INFERRED/DECLARED STACK: {brief['inferred_stack']}
+ASSUMPTIONS: {"; ".join(brief['assumptions']) or "(none)"}
+
+DIALS:
+- scope: {scope}
+- fleet size: {agents} autonomous coding agents building in parallel
+
+THE ADVERSARIES SAID:
+{crit_block}
+
+PRECOMPILED LATENT REQUIREMENTS:
+{req_block}
+
+COMPACTNESS RULES:
+- Produce exactly {agents} work_orders.
+- Prefer one task per major file boundary; keep total tasks as small as correctness allows.
+- Keep prose fields short but specific.
+- Keep `source`, `test_source`, fixture `body`, and scaffold `body` minimal but runnable.
+- Preserve every supplied latent requirement and its counter_cue exactly when possible.
+- Every accepted/open latent requirement still needs a blocking quality gate with
+  gate_forge evidence; compact does not mean advisory-only.
+- Return one valid JSON object only: no prose, no markdown fences, no trailing comments.
+
+SCHEMA:
+{_CAST_SCHEMA}"""
+
+
 def _cast_failure_code(parse_error, metadata):
     if (metadata or {}).get("stop_reason") == "max_tokens":
         return "cast_truncated"
     return "cast_malformed_json"
 
 
-def _record_cast_failure(error, prompt, response_text):
+def _record_cast_failure(error, prompt, response_text, final=True,
+                         will_retry=False):
     """Best-effort CAST failure ledger. Never writes full prompt or full output."""
     try:
         path = Path(CAST_FAILURES_PATH)
@@ -454,6 +515,13 @@ def _record_cast_failure(error, prompt, response_text):
             "response_chars": error.response_chars,
             "brace_depth": error.brace_depth,
             "likely_truncated": error.likely_truncated,
+            "attempt": error.attempt,
+            "attempt_kind": error.attempt_kind,
+            "max_attempts": error.max_attempts,
+            "recovery_attempted": error.recovery_attempted,
+            "retries_exhausted": error.retries_exhausted,
+            "final": bool(final),
+            "will_retry": bool(will_retry),
             "response_sha256": _sha256(response_text),
             "prompt_sha256": _sha256(prompt),
             "prompt_chars": len(prompt or ""),
@@ -465,7 +533,32 @@ def _record_cast_failure(error, prompt, response_text):
         log.warning("seasar: CAST failure logging failed", exc_info=True)
 
 
-def cast(idea, brief, scope, agents, critiques, latent_requirements=None):
+def _call_cast_attempt(prompt, model, max_tokens):
+    result = rehearse._call(
+        _CAST_SYSTEM, prompt, model, temperature=None,
+        max_tokens=max_tokens, return_metadata=True)
+    if isinstance(result, tuple) and len(result) == 2:
+        text, metadata = result
+    else:
+        text, metadata = result, {"model": model, "max_tokens": max_tokens}
+    metadata = metadata or {}
+    metadata.setdefault("model", model)
+    metadata.setdefault("max_tokens", max_tokens)
+    return text, metadata
+
+
+def _cast_attempt_stage(kind, attempt, model, prompt, text):
+    stage = "cast" if attempt == 1 else f"cast:{kind}{attempt - 1}"
+    return {
+        "stage": stage,
+        "model": model,
+        "input": _CAST_SYSTEM + prompt,
+        "output": text,
+    }
+
+
+def cast(idea, brief, scope, agents, critiques, latent_requirements=None,
+         return_attempts=False):
     """Run the premium CAST compile. Returns (parsed partial BuildOrder dict, model,
     raw_text) -- everything but buildability/debate/meta; the raw text is kept for
     internal cost metering. Raises on no-model or parse failure."""
@@ -478,22 +571,42 @@ def cast(idea, brief, scope, agents, critiques, latent_requirements=None):
     # work orders + spec) is large, and a cap that truncates mid-JSON yields an
     # unbalanced, unparseable object. The cap is env-tunable for paid canaries.
     prompt = _cast_prompt(idea, brief, scope, agents, critiques, latent_requirements)
-    result = rehearse._call(
-        _CAST_SYSTEM, prompt, model, temperature=None,
-        max_tokens=CAST_MAX_TOKENS, return_metadata=True)
-    if isinstance(result, tuple) and len(result) == 2:
-        text, metadata = result
-    else:
-        text, metadata = result, {"model": model, "max_tokens": CAST_MAX_TOKENS}
-    metadata = metadata or {}
-    metadata.setdefault("model", model)
-    metadata.setdefault("max_tokens", CAST_MAX_TOKENS)
-    try:
-        return _parse_json_object(text), model, text
-    except JsonObjectParseError as exc:
-        err = CastParseError(_cast_failure_code(exc, metadata), exc, metadata)
-        _record_cast_failure(err, prompt, text)
-        raise err from exc
+    attempts = []
+    max_attempts = 1 + CAST_RECOVERY_RETRIES
+    attempt_specs = [("initial", prompt, CAST_MAX_TOKENS)]
+    for _ in range(CAST_RECOVERY_RETRIES):
+        attempt_specs.append((
+            "recovery",
+            _cast_recovery_prompt(idea, brief, scope, agents, critiques,
+                                  latent_requirements),
+            CAST_RECOVERY_MAX_TOKENS,
+        ))
+
+    for idx, (kind, attempt_prompt, max_tokens) in enumerate(attempt_specs, start=1):
+        text, metadata = _call_cast_attempt(attempt_prompt, model, max_tokens)
+        attempt_model = metadata.get("model") or model
+        attempts.append(_cast_attempt_stage(
+            kind, idx, attempt_model, attempt_prompt, text))
+        try:
+            parsed = _parse_json_object(text)
+            if return_attempts:
+                return parsed, attempt_model, text, attempts
+            return parsed, attempt_model, text
+        except JsonObjectParseError as exc:
+            code = _cast_failure_code(exc, metadata)
+            retryable = code == "cast_truncated" and idx < max_attempts
+            reported_max_attempts = max_attempts if code == "cast_truncated" else idx
+            err = CastParseError(
+                code, exc, metadata, attempt=idx, attempt_kind=kind,
+                max_attempts=reported_max_attempts, recovery_attempted=idx > 1,
+                retries_exhausted=(code == "cast_truncated" and not retryable),
+            )
+            _record_cast_failure(
+                err, attempt_prompt, text, final=not retryable,
+                will_retry=retryable)
+            if retryable:
+                continue
+            raise err from exc
 
 
 # ---------------------------------------------------------------------------
@@ -994,9 +1107,10 @@ def _record_cost(order, stages, compile_ms):
         COSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with COSTS_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        cast = next((s for s in by_stage if s["stage"] == "cast"), None)
-        share = (f", cast {cast['cost_usd'] / total * 100:.0f}%"
-                 if cast and total else "")
+        cast_cost = sum(s["cost_usd"] for s in by_stage
+                        if str(s["stage"]).startswith("cast"))
+        share = (f", cast {cast_cost / total * 100:.0f}%" if cast_cost and total
+                 else "")
         log.info("seasar cost: %s $%.4f (%d in / %d out tok%s)", order.get("id"),
                  total, record["total_input_tokens"],
                  record["total_output_tokens"], share)
@@ -1103,8 +1217,9 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
 
         # ---- CAST ----
         yield _sse({"stage": "cast", "status": "running"})
-        partial, cast_model, cast_raw = cast(idea, brief, scope, agents, critiques,
-                                             precast_requirements)
+        partial, cast_model, cast_raw, cast_attempts = cast(
+            idea, brief, scope, agents, critiques, precast_requirements,
+            return_attempts=True)
         yield _sse({"stage": "cast", "status": "done"})
 
         # ---- assemble the order, then STAMP it (stamp normalizes it) ----
@@ -1156,12 +1271,15 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
                     rehearse.ADVERSARIES[role], brief["normalized_idea"]),
                 "output": critiques.get(role, ""),
             })
-        stages.append({
-            "stage": "cast", "model": cast_model,
-            "input": _CAST_SYSTEM + _cast_prompt(idea, brief, scope, agents,
-                                                 critiques, precast_requirements),
-            "output": cast_raw,
-        })
+        if cast_attempts:
+            stages.extend(cast_attempts)
+        else:
+            stages.append({
+                "stage": "cast", "model": cast_model,
+                "input": _CAST_SYSTEM + _cast_prompt(idea, brief, scope, agents,
+                                                     critiques, precast_requirements),
+                "output": cast_raw,
+            })
         _record_cost(order, stages, compile_ms)
 
         yield _sse({"stage": "complete", "order": order})
