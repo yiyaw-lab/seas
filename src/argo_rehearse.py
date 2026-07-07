@@ -224,7 +224,7 @@ def _assign_adversary_models(roles):
     return assigned
 
 
-def _call(system, prompt, model, temperature, max_tokens=1024):
+def _call(system, prompt, model, temperature, max_tokens=1024, return_metadata=False):
     """Send one prompt to `model`, routing to its provider. Anthropic models use
     chat_with_mcp (no tools here, just the guarded messages call); others use
     generate_observations. Mirrors the branch in _scaffold_plan.
@@ -241,9 +241,21 @@ def _call(system, prompt, model, temperature, max_tokens=1024):
         return observe.chat_with_mcp(
             system, [{"role": "user", "content": prompt}], model,
             max_tokens=max_tokens, temperature=temperature,
+            return_metadata=return_metadata,
         )
-    return observe.generate_observations(
+    text = observe.generate_observations(
         prompt, model, temperature=0.2 if temperature is None else temperature)
+    if return_metadata:
+        return text, {
+            "provider": provider["name"],
+            "model": model,
+            "stop_reason": None,
+            "status": None,
+            "max_tokens": max_tokens,
+            "input_tokens": None,
+            "output_tokens": None,
+        }
+    return text
 
 
 # ---------------------------------------------------------------------------
