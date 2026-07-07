@@ -37,8 +37,18 @@ non-obvious cloud-VM caveats.
 - **`ARGO_MCP_TOKEN` must reach the server process.** It is not always inherited by
   detached tmux panes; start the webhook from a shell/pane where the env var is
   set, or the `/mcp` mount serves 503.
-- **Keys.** No LLM/Telegram/Firecrawl keys are configured here. Tests need none.
-  SEAS runs but emits `premature`/dry-run probes without `ANTHROPIC_API_KEY`/
-  `OPENAI_API_KEY` (+ `FIRECRAWL_API_KEY`). The scheduler writes to gitignored
-  `data/*.json` and logs a benign "ARGO_SEEN_PATH is not pointed at a volume"
-  warning locally.
+- **Keys.** When LLM/Telegram/Firecrawl keys are absent, tests still run (they
+  need none), SEAS emits `premature`/dry-run probes, and Argo chat can't deliver.
+  The scheduler writes `data/*.json` and logs a benign "ARGO_SEEN_PATH is not
+  pointed at a volume" warning locally.
+- **Tool-augmented Argo chat needs a PUBLIC `WEBHOOK_URL`.** Anthropic's MCP
+  connector (not the VM) connects to `<WEBHOOK_URL>/mcp/mcp`, so tools only wire
+  up when `WEBHOOK_URL` is a public https URL — e.g. a `cloudflared tunnel --url
+  http://localhost:8080` quick tunnel. Setting `WEBHOOK_URL` also self-registers
+  the Telegram webhook on boot. Without it you get plain chat only ("tools wired:
+  False"); outbound Telegram replies work regardless.
+- **A real `src/seas.py` run mutates committed knowledge.** With an LLM key +
+  `FIRECRAWL_API_KEY` it writes `data/world_model.json`, `data/probes.json`, and
+  new `findings/F-*.json` + `runs/F-*/` (committed durable state, not gitignored).
+  Revert these after ad-hoc/verification runs; committing findings is a product
+  action (the `seas-findings.yml` workflow), not a dev-loop side effect.
