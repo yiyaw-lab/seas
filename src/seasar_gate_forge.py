@@ -119,6 +119,11 @@ def fixture_refs(forge):
     return out
 
 
+def _same_ref(left, right):
+    left, right = _text(left), _text(right)
+    return bool(left and right and left == right)
+
+
 def discrimination_problems(forge, materialized_paths=None):
     """Return reasons a forge record does not prove gate discrimination."""
     f = normalize_gate_forge(forge)
@@ -133,6 +138,10 @@ def discrimination_problems(forge, materialized_paths=None):
         problems.append("golden_fixture_ref is empty")
     if not f.get("broken_fixture_ref"):
         problems.append("broken_fixture_ref is empty")
+    same_top_level_refs = _same_ref(f.get("golden_fixture_ref"),
+                                    f.get("broken_fixture_ref"))
+    if same_top_level_refs:
+        problems.append("golden and broken fixture refs must differ")
     if materialized_paths is not None:
         missing = [r for r in fixture_refs(f) if r not in materialized_paths]
         if missing:
@@ -142,6 +151,10 @@ def discrimination_problems(forge, materialized_paths=None):
         problems.append("no golden/broken run attempt recorded")
     else:
         latest = attempts[-1]
+        if not same_top_level_refs and _same_ref(
+                latest.get("golden_fixture_ref") or f.get("golden_fixture_ref"),
+                latest.get("broken_fixture_ref") or f.get("broken_fixture_ref")):
+            problems.append("latest attempt golden and broken fixture refs must differ")
         if latest.get("golden_exit_code") != 0:
             problems.append("golden fixture did not pass")
         b = latest.get("broken_exit_code")

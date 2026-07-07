@@ -47,7 +47,6 @@ _AFFORDANCES = {
         "patterns": (
             r"\bcach(?:e|ed|es|ing)\b",
             r"\bmemoiz(?:e|ed|es|ing|ation)\b",
-            r"\bstale\b",
             r"\bttl\b",
             r"\btime[- ]to[- ]live\b",
         ),

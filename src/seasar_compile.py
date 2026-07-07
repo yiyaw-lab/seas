@@ -2209,6 +2209,10 @@ def _fixture_materialized(root, rel):
     return os.path.exists(os.path.join(root, rel))
 
 
+def _same_ref(left, right):
+    return _nonempty(left) and _nonempty(right) and str(left) == str(right)
+
+
 def _forge_problems(root, gate, req):
     forge = gate.get("gate_forge") if isinstance(gate, dict) else {}
     if not isinstance(forge, dict) or not forge:
@@ -2220,6 +2224,9 @@ def _forge_problems(root, gate, req):
         problems.append("run_command is empty")
     golden = forge.get("golden_fixture_ref")
     broken = forge.get("broken_fixture_ref")
+    same_top_level_refs = _same_ref(golden, broken)
+    if same_top_level_refs:
+        problems.append("golden and broken fixture refs must differ")
     if not _fixture_materialized(root, golden):
         problems.append("golden fixture not materialized")
     if not _fixture_materialized(root, broken):
@@ -2228,6 +2235,10 @@ def _forge_problems(root, gate, req):
     if not latest:
         problems.append("no golden/broken run attempt recorded")
     else:
+        if not same_top_level_refs and _same_ref(
+                latest.get("golden_fixture_ref") or golden,
+                latest.get("broken_fixture_ref") or broken):
+            problems.append("latest attempt golden and broken fixture refs must differ")
         if _int(latest.get("golden_exit_code")) != 0:
             problems.append("golden fixture did not pass")
         broken_exit = _int(latest.get("broken_exit_code"))

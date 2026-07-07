@@ -102,6 +102,12 @@ class ScannerTest(unittest.TestCase):
         self.assertIn("asynchronous event boundary", first[2]["counter_cue"])
         self.assertIn("serialization", first[3]["counter_cue"])
 
+    def test_stale_read_wording_does_not_imply_caching(self):
+        reqs = sr.scan_sources({
+            "idea": "The dashboard may show stale reads because replicas lag behind writes."
+        })
+        self.assertEqual([r["affordance"] for r in reqs], ["stale_reads"])
+
     def test_normalize_clamps_and_fills_counter_cue(self):
         req = sr.normalize_requirement({
             "id": "REQ 1!",

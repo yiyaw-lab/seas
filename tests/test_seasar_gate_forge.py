@@ -43,6 +43,14 @@ def _forge(status="discriminates", broken_exit=1):
     }
 
 
+def _forge_same_fixture_refs():
+    forge = _forge()
+    same = "tests/fixtures/pagination-golden.json"
+    forge["broken_fixture_ref"] = same
+    forge["attempts"][0]["broken_fixture_ref"] = same
+    return forge
+
+
 def _order(forge=None, include_broken=True):
     req = _req()
     fixtures = [{
@@ -152,6 +160,13 @@ class GateForgeVerifyTest(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertIn("fixture(s) not materialized", check["detail"])
 
+    def test_golden_and_broken_fixture_refs_must_differ(self):
+        order = _order(_forge_same_fixture_refs())
+        sc._normalize_order(order)
+        check = _check(order, "gate_forge_discriminates")
+        self.assertFalse(check["ok"])
+        self.assertIn("fixture refs must differ", check["detail"])
+
 
 class GateForgeBundleTest(unittest.TestCase):
     def test_forge_evidence_survives_bundle_outputs(self):
@@ -203,6 +218,19 @@ class GateForgeBundleTest(unittest.TestCase):
         self.assertEqual(good_run.returncode, 0, good_run.stdout + good_run.stderr)
         self.assertNotEqual(bad_run.returncode, 0)
         self.assertIn("missing gate_forge evidence", bad_run.stdout + bad_run.stderr)
+
+    def test_generated_gate_forge_script_rejects_same_fixture_refs(self):
+        bad = _order(_forge_same_fixture_refs())
+        sc._normalize_order(bad)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_root = _bundle_root(bad, os.path.join(tmp, "bad"))
+            script = os.path.join(bad_root, "scripts", "check-gate-forge.py")
+            run = subprocess.run([sys.executable, script, bad_root],
+                                 capture_output=True, text=True)
+
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("fixture refs must differ", run.stdout + run.stderr)
 
 
 if __name__ == "__main__":
