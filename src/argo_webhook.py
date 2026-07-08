@@ -100,6 +100,566 @@ ARGO_MCP_TOKEN = os.environ.get("ARGO_MCP_TOKEN")
 PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 
 
+_SEASAR_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seasar Foundry</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8f5;
+      --ink: #171918;
+      --muted: #626862;
+      --line: #d9ded5;
+      --panel: #ffffff;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --good: #15803d;
+      --soft: #eef2ea;
+      --code: #111827;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcf9;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px 24px 24px;
+    }
+    section, aside {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .controls {
+      padding: 18px;
+    }
+    .output {
+      min-width: 0;
+    }
+    .output-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 720;
+    }
+    label {
+      display: block;
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+      text-transform: uppercase;
+    }
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      padding: 10px 11px;
+      outline: none;
+    }
+    textarea {
+      min-height: 210px;
+      resize: vertical;
+    }
+    textarea:focus, input:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.13);
+    }
+    .field {
+      margin-bottom: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 92px;
+      gap: 10px;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    button, .button {
+      appearance: none;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font: inherit;
+      font-weight: 720;
+      min-height: 38px;
+      padding: 0 14px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    button.secondary, .button.secondary {
+      background: #fff;
+      color: var(--accent-strong);
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.66;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 720;
+    }
+    .pill.good { color: var(--good); border-color: rgba(21, 128, 61, 0.24); background: #ecfdf3; }
+    .pill.bad { color: var(--bad); border-color: rgba(185, 28, 28, 0.24); background: #fef2f2; }
+    .pill.warn { color: var(--warn); border-color: rgba(180, 83, 9, 0.26); background: #fff7ed; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(100px, 1fr));
+      border-bottom: 1px solid var(--line);
+    }
+    .metric {
+      min-height: 78px;
+      padding: 14px 16px;
+      border-right: 1px solid var(--line);
+    }
+    .metric:last-child { border-right: 0; }
+    .metric b {
+      display: block;
+      font-size: 22px;
+      line-height: 1.1;
+    }
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+      text-transform: uppercase;
+    }
+    .stage-list {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(110px, 1fr));
+      gap: 8px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .stage {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      min-height: 44px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .stage.running { border-color: rgba(15, 118, 110, 0.35); color: var(--accent-strong); background: #f0fdfa; }
+    .stage.done { border-color: rgba(21, 128, 61, 0.25); color: var(--good); background: #f0fdf4; }
+    .stage.error { border-color: rgba(185, 28, 28, 0.25); color: var(--bad); background: #fef2f2; }
+    .columns {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .pane {
+      min-width: 0;
+      padding: 14px 16px;
+    }
+    .pane + .pane {
+      border-left: 1px solid var(--line);
+    }
+    ul {
+      list-style: none;
+      margin: 10px 0 0;
+      padding: 0;
+    }
+    li {
+      border-top: 1px solid var(--line);
+      padding: 9px 0;
+    }
+    li:first-child { border-top: 0; }
+    .item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .item-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .muted { color: var(--muted); }
+    .error-box {
+      display: none;
+      margin-top: 14px;
+      border: 1px solid rgba(185, 28, 28, 0.26);
+      border-radius: 6px;
+      background: #fef2f2;
+      color: var(--bad);
+      padding: 10px 11px;
+      white-space: pre-wrap;
+    }
+    pre {
+      margin: 0;
+      padding: 14px 16px;
+      max-height: 420px;
+      overflow: auto;
+      background: var(--code);
+      color: #e5e7eb;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (max-width: 900px) {
+      header { align-items: flex-start; flex-direction: column; padding: 14px 16px; }
+      main { grid-template-columns: 1fr; padding: 14px 16px 18px; }
+      .metrics, .stage-list, .columns { grid-template-columns: 1fr; }
+      .metric { border-right: 0; border-bottom: 1px solid var(--line); }
+      .metric:last-child { border-bottom: 0; }
+      .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Seasar Foundry</h1>
+    <span id="runStatus" class="pill">Idle</span>
+  </header>
+  <main>
+    <aside class="controls">
+      <form id="compileForm">
+        <div class="field">
+          <label for="idea">Project Idea</label>
+          <textarea id="idea" name="idea" required spellcheck="true">A habit tracker with calendar pagination, offline caching, retrying sync, and debounced search.</textarea>
+        </div>
+        <div class="field">
+          <label for="stack">Stack</label>
+          <input id="stack" name="stack" placeholder="Python, TypeScript, SQLite, React">
+        </div>
+        <div class="field">
+          <label for="accessToken">Access Token</label>
+          <input id="accessToken" name="accessToken" type="password" autocomplete="off">
+        </div>
+        <div class="grid">
+          <div class="field">
+            <label for="scope">Scope</label>
+            <select id="scope" name="scope">
+              <option value="weekend">Weekend</option>
+              <option value="mvp" selected>MVP</option>
+              <option value="product">Product</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="agents">Agents</label>
+            <input id="agents" name="agents" type="number" min="1" max="20" value="4">
+          </div>
+        </div>
+        <div class="actions">
+          <button id="compileButton" type="submit">Compile</button>
+          <a id="bundleLink" class="button secondary" hidden>Bundle</a>
+        </div>
+        <div id="errorBox" class="error-box"></div>
+      </form>
+    </aside>
+    <section class="output">
+      <div class="output-head">
+        <p id="orderTitle" class="title">No order yet</p>
+        <span id="orderId" class="pill">No id</span>
+      </div>
+      <div class="metrics">
+        <div class="metric"><b id="scoreMetric">-</b><span>Score</span></div>
+        <div class="metric"><b id="gradeMetric">-</b><span>Grade</span></div>
+        <div class="metric"><b id="reqMetric">-</b><span>Requirements</span></div>
+        <div class="metric"><b id="gateMetric">-</b><span>Gates</span></div>
+      </div>
+      <div class="stage-list">
+        <div id="stage-smelt" class="stage">SMELT</div>
+        <div id="stage-debate" class="stage">DEBATE</div>
+        <div id="stage-cast" class="stage">CAST</div>
+        <div id="stage-stamp" class="stage">STAMP</div>
+      </div>
+      <div class="columns">
+        <div class="pane">
+          <p class="title">Requirements</p>
+          <ul id="requirementsList"><li class="muted">Waiting for run</li></ul>
+        </div>
+        <div class="pane">
+          <p class="title">Quality Gates</p>
+          <ul id="gatesList"><li class="muted">Waiting for run</li></ul>
+        </div>
+      </div>
+      <pre id="jsonPreview">{}</pre>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById("compileForm");
+    const button = document.getElementById("compileButton");
+    const runStatus = document.getElementById("runStatus");
+    const errorBox = document.getElementById("errorBox");
+    const bundleLink = document.getElementById("bundleLink");
+    const stages = ["smelt", "debate", "cast", "stamp"];
+    let currentBundleUrl = "";
+
+    function authHeaders(json) {
+      const headers = json ? {"Content-Type": "application/json"} : {};
+      const token = document.getElementById("accessToken").value.trim();
+      if (token) headers.Authorization = "Bearer " + token;
+      return headers;
+    }
+
+    function setStatus(text, mode) {
+      runStatus.textContent = text;
+      runStatus.className = "pill" + (mode ? " " + mode : "");
+    }
+
+    function resetRun() {
+      errorBox.style.display = "none";
+      errorBox.textContent = "";
+      bundleLink.hidden = true;
+      bundleLink.removeAttribute("href");
+      document.getElementById("orderTitle").textContent = "Compiling";
+      document.getElementById("orderId").textContent = "No id";
+      document.getElementById("scoreMetric").textContent = "-";
+      document.getElementById("gradeMetric").textContent = "-";
+      document.getElementById("reqMetric").textContent = "-";
+      document.getElementById("gateMetric").textContent = "-";
+      document.getElementById("requirementsList").innerHTML = '<li class="muted">Waiting for run</li>';
+      document.getElementById("gatesList").innerHTML = '<li class="muted">Waiting for run</li>';
+      document.getElementById("jsonPreview").textContent = "{}";
+      stages.forEach((name) => {
+        document.getElementById("stage-" + name).className = "stage";
+      });
+    }
+
+    function badge(text, mode) {
+      return '<span class="pill ' + (mode || "") + '">' + escapeHtml(text || "") + "</span>";
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function renderList(id, rows, render) {
+      const target = document.getElementById(id);
+      if (!rows || !rows.length) {
+        target.innerHTML = '<li class="muted">None</li>';
+        return;
+      }
+      target.innerHTML = rows.map(render).join("");
+    }
+
+    function renderOrder(order) {
+      const buildability = order.buildability || {};
+      const requirements = order.latent_requirements || order.requirements || [];
+      const gates = order.quality_gates || [];
+      document.getElementById("orderTitle").textContent = order.title || "Build Order";
+      document.getElementById("orderId").textContent = order.id || "No id";
+      document.getElementById("scoreMetric").textContent = buildability.score ?? "-";
+      document.getElementById("gradeMetric").textContent = buildability.grade || "-";
+      document.getElementById("reqMetric").textContent = requirements.length;
+      document.getElementById("gateMetric").textContent = gates.length;
+      renderList("requirementsList", requirements.slice(0, 8), (req) => {
+        const status = req.status || "open";
+        const mode = status === "accepted" || status === "satisfied" ? "good" : (status === "waived" ? "warn" : "");
+        return '<li><div class="item-head"><span class="item-id">' +
+          escapeHtml(req.requirement_id || req.id || "requirement") + "</span>" +
+          badge(status, mode) + "</div><div>" +
+          escapeHtml(req.counter_cue || req.description || "") + "</div></li>";
+      });
+      renderList("gatesList", gates.slice(0, 8), (gate) => {
+        const blocking = gate.blocking === false ? "non-blocking" : "blocking";
+        return '<li><div class="item-head"><span>' +
+          escapeHtml(gate.name || "gate") + "</span>" +
+          badge(blocking, blocking === "blocking" ? "good" : "warn") +
+          '</div><div class="item-id">' + escapeHtml(gate.test_path || gate.run_command || "") +
+          "</div></li>";
+      });
+      document.getElementById("jsonPreview").textContent = JSON.stringify(order, null, 2);
+      if (order.id) {
+        currentBundleUrl = "/seasar/orders/" + encodeURIComponent(order.id) + "/bundle.zip";
+        bundleLink.href = currentBundleUrl;
+        bundleLink.hidden = false;
+      }
+    }
+
+    function handleEvent(event) {
+      if (!event || !event.stage) return;
+      if (event.stage === "error") {
+        setStatus("Error", "bad");
+        errorBox.textContent = event.code ? event.code + ": " + event.message : event.message;
+        errorBox.style.display = "block";
+        stages.forEach((name) => {
+          const el = document.getElementById("stage-" + name);
+          if (el.classList.contains("running")) el.className = "stage error";
+        });
+        return;
+      }
+      if (event.stage === "complete") {
+        setStatus("Complete", "good");
+        renderOrder(event.order || {});
+        return;
+      }
+      const stage = document.getElementById("stage-" + event.stage);
+      if (stage) stage.className = "stage " + (event.status || "");
+      if (event.stage === "smelt" && event.status === "done" && event.data) {
+        document.getElementById("orderTitle").textContent = event.data.normalized_idea || "Build Order";
+      }
+    }
+
+    function parseSse(buffer, onEvent) {
+      let index;
+      while ((index = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        const data = frame.split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (data) onEvent(JSON.parse(data));
+      }
+      return buffer;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      resetRun();
+      setStatus("Running", "warn");
+      button.disabled = true;
+      try {
+        const payload = Object.fromEntries(new FormData(form).entries());
+        payload.agents = Number(payload.agents || 4);
+        delete payload.accessToken;
+        const response = await fetch("/seasar/compile", {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok || !response.body) {
+          throw new Error("HTTP " + response.status);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, {stream: true});
+          buffer = parseSse(buffer, handleEvent);
+        }
+        buffer += decoder.decode();
+        parseSse(buffer + "\n\n", handleEvent);
+      } catch (err) {
+        setStatus("Error", "bad");
+        errorBox.textContent = err && err.message ? err.message : String(err);
+        errorBox.style.display = "block";
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    bundleLink.addEventListener("click", async (event) => {
+      const token = document.getElementById("accessToken").value.trim();
+      if (!token || !currentBundleUrl) return;
+      event.preventDefault();
+      try {
+        const response = await fetch(currentBundleUrl, {headers: authHeaders(false)});
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = (document.getElementById("orderId").textContent || "order") + "-build-order.zip";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        errorBox.textContent = err && err.message ? err.message : String(err);
+        errorBox.style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+def _seasar_compile_module():
+    import seasar_compile
+
+    return seasar_compile
+
+
+def _safe_seasar_order_id(order_id):
+    order_id = (order_id or "").strip()
+    if re.fullmatch(r"order-[A-Za-z0-9]{6,32}", order_id):
+        return order_id
+    return ""
+
+
+def _seasar_access_error(req):
+    expected = os.environ.get("SEASAR_UI_TOKEN") or ARGO_MCP_TOKEN
+    if expected:
+        header = req.headers.get("Authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if token == expected:
+            return None
+        return "forbidden", 403
+    host_header = (req.host or "").lower()
+    host = (host_header.split("]", 1)[0].lstrip("[")
+            if host_header.startswith("[") else host_header.split(":", 1)[0])
+    if host in ("127.0.0.1", "localhost", "::1") or req.remote_addr in (
+        "127.0.0.1", "::1",
+    ):
+        return None
+    return "seasar ui token required", 503
+
+
 def _build_mcp_servers():
     base = os.environ.get("WEBHOOK_URL")
     if not base or not ARGO_MCP_TOKEN:
@@ -1547,13 +2107,63 @@ def _health_payload():
 
 
 def create_app():
-    from flask import Flask, jsonify, request
+    from flask import Flask, Response, jsonify, request, stream_with_context
 
     app = Flask(__name__)
 
     @app.get("/")
     def health():
         return jsonify(_health_payload()), 200
+
+    @app.get("/seasar")
+    def seasar_foundry():
+        return Response(_SEASAR_HTML, mimetype="text/html")
+
+    @app.post("/seasar/compile")
+    def seasar_compile_stream():
+        auth_error = _seasar_access_error(request)
+        if auth_error:
+            return auth_error
+        payload = request.get_json(force=True, silent=True)
+        if not isinstance(payload, dict):
+            payload = request.form.to_dict()
+        idea = payload.get("idea", "")
+        stack = payload.get("stack", "")
+        scope = payload.get("scope", "mvp")
+        agents = payload.get("agents", 4)
+        seasar_compile = _seasar_compile_module()
+        return Response(
+            stream_with_context(seasar_compile.compile_stream(
+                idea, stack=stack, scope=scope, agents=agents)),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/seasar/orders/<order_id>/bundle.zip")
+    def seasar_bundle(order_id):
+        auth_error = _seasar_access_error(request)
+        if auth_error:
+            return auth_error
+        order_id = _safe_seasar_order_id(order_id)
+        if not order_id:
+            return "not found", 404
+        seasar_compile = _seasar_compile_module()
+        order = seasar_compile.load_order(order_id)
+        if not order:
+            return "not found", 404
+        bundle = seasar_compile.build_bundle(order)
+        return Response(
+            bundle,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{order_id}-build-order.zip"'
+                )
+            },
+        )
 
     @app.post("/push")
     def push():
