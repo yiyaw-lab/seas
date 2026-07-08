@@ -1,10 +1,13 @@
 """Seasar Foundry web-surface tests.
 
-These keep the UI wiring honest without making paid model calls: the Flask routes
-are exercised against a fake seasar_compile module.
+Foundry itself is currently a local, untracked build artifact. These tests cover
+the Flask bridge that serves that build when present and exposes the API shape
+the existing bundle already calls.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import argo_webhook as wh
@@ -50,22 +53,36 @@ class _FakeSeasar:
 
 class SeasarWebUiTest(unittest.TestCase):
     def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        dist = self.tmp / "foundry-dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text(
+            '<div id="root"></div><script src="/assets/app.js"></script>',
+            encoding="utf-8")
+        (dist / "assets" / "app.js").write_text(
+            'fetch("/api/compile"); fetch("/api/order/order-abc123");',
+            encoding="utf-8")
+        (dist / "favicon.svg").write_text("<svg />", encoding="utf-8")
+        self.enterContext(mock.patch.dict(
+            wh.os.environ, {"SEASAR_FOUNDRY_DIST": str(dist)}))
+
         self.fake = _FakeSeasar()
         self.enterContext(mock.patch.object(
             wh, "_seasar_compile_module", lambda: self.fake))
         self.client = wh.create_app().test_client()
 
-    def test_foundry_page_is_served(self):
-        res = self.client.get("/seasar")
+    def test_foundry_dist_is_served_without_rebuilding_ui(self):
+        res = self.client.get("/seasar", buffered=True)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.mimetype, "text/html")
-        body = res.get_data(as_text=True)
-        self.assertIn("Seasar Foundry", body)
-        self.assertIn('/seasar/compile', body)
-        self.assertIn('/seasar/orders/', body)
+        self.assertIn('/assets/app.js', res.get_data(as_text=True))
 
-    def test_compile_endpoint_streams_real_compiler_events(self):
-        res = self.client.post("/seasar/compile", json={
+        asset = self.client.get("/assets/app.js", buffered=True)
+        self.assertEqual(asset.status_code, 200)
+        self.assertIn("/api/compile", asset.get_data(as_text=True))
+
+    def test_compile_api_streams_real_compiler_events(self):
+        res = self.client.post("/api/compile", json={
             "idea": "Build a pager",
             "stack": "Python",
             "scope": "weekend",
@@ -83,22 +100,28 @@ class SeasarWebUiTest(unittest.TestCase):
         self.assertIn('"stage":"smelt"', body)
         self.assertIn('"stage":"complete"', body)
 
-    def test_compile_endpoint_requires_configured_token(self):
+    def test_compile_api_requires_configured_token(self):
         with mock.patch.object(wh, "ARGO_MCP_TOKEN", "secret"):
-            denied = self.client.post("/seasar/compile", json={
+            denied = self.client.post("/api/compile", json={
                 "idea": "Build a pager",
             }, buffered=True)
             self.assertEqual(denied.status_code, 403)
             self.assertEqual(self.fake.compile_calls, [])
 
-            allowed = self.client.post("/seasar/compile", json={
+            allowed = self.client.post("/api/compile", json={
                 "idea": "Build a pager",
             }, headers={"Authorization": "Bearer secret"}, buffered=True)
             self.assertEqual(allowed.status_code, 200)
             self.assertEqual(len(self.fake.compile_calls), 1)
 
-    def test_bundle_endpoint_downloads_persisted_order_bundle(self):
-        res = self.client.get("/seasar/orders/order-abc123/bundle.zip")
+    def test_order_api_returns_persisted_order(self):
+        res = self.client.get("/api/order/order-abc123")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["id"], "order-abc123")
+        self.assertEqual(self.fake.load_calls, ["order-abc123"])
+
+    def test_bundle_api_downloads_persisted_order_bundle(self):
+        res = self.client.get("/api/order/order-abc123/bundle.zip")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.mimetype, "application/zip")
         self.assertEqual(res.get_data(), b"zip-bytes")
@@ -107,19 +130,21 @@ class SeasarWebUiTest(unittest.TestCase):
         self.assertEqual(self.fake.load_calls, ["order-abc123"])
         self.assertEqual(self.fake.build_calls, [self.fake.order])
 
-    def test_bundle_endpoint_rejects_non_order_ids(self):
-        res = self.client.get("/seasar/orders/not-an-order/bundle.zip")
-        self.assertEqual(res.status_code, 404)
+    def test_order_and_bundle_reject_non_order_ids(self):
+        order = self.client.get("/api/order/not-an-order")
+        bundle = self.client.get("/api/order/not-an-order/bundle.zip")
+        self.assertEqual(order.status_code, 404)
+        self.assertEqual(bundle.status_code, 404)
         self.assertEqual(self.fake.load_calls, [])
 
-    def test_bundle_endpoint_requires_configured_token(self):
+    def test_bundle_api_requires_configured_token(self):
         with mock.patch.object(wh, "ARGO_MCP_TOKEN", "secret"):
-            denied = self.client.get("/seasar/orders/order-abc123/bundle.zip")
+            denied = self.client.get("/api/order/order-abc123/bundle.zip")
             self.assertEqual(denied.status_code, 403)
             self.assertEqual(self.fake.load_calls, [])
 
             allowed = self.client.get(
-                "/seasar/orders/order-abc123/bundle.zip",
+                "/api/order/order-abc123/bundle.zip",
                 headers={"Authorization": "Bearer secret"})
             self.assertEqual(allowed.status_code, 200)
             self.assertEqual(self.fake.load_calls, ["order-abc123"])
