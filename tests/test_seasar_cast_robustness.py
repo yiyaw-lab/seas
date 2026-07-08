@@ -14,6 +14,8 @@ from pathlib import Path
 import argo_observe
 import argo_rehearse
 import seasar_compile as sc
+import seasar_dispatch
+import seasar_verify
 
 
 def _brief():
@@ -96,6 +98,12 @@ def _structurally_broken_partial():
     })
     order["orchestration"]["waves"] = [["T1", "T2"]]
     order["work_orders"][0]["task_ids"] = ["T1", "T2"]
+    return order
+
+
+def _cyclic_partial():
+    order = _structurally_broken_partial()
+    order["tasks"][0]["depends_on"] = ["T2"]
     return order
 
 
@@ -424,7 +432,35 @@ class CompileStreamCastFailureTest(unittest.TestCase):
         self.assertNotIn("prompt", record)
         self.assertNotIn("response", record)
 
-    def test_recovered_structural_error_fails_even_without_score_floor(self):
+    def test_recovered_unrepairable_structural_error_fails_even_without_score_floor(self):
+        attempts = [
+            {"stage": "cast", "model": "claude-opus-4-8",
+             "input": "initial prompt", "output": "truncated"},
+            {"stage": "cast:recovery1", "model": "claude-opus-4-8",
+             "input": "recovery prompt", "output": json.dumps(_cyclic_partial())},
+        ]
+
+        def recovered_cast(*args, **kwargs):
+            self.assertTrue(kwargs.get("return_attempts"))
+            return _cyclic_partial(), "claude-opus-4-8", attempts[-1]["output"], attempts
+
+        sc.RECOVERED_CAST_MIN_SCORE = 0
+        sc.cast = recovered_cast
+
+        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
+        err = events[-1]
+        self.assertEqual(err["code"], "cast_recovery_low_quality")
+        self.assertIn("structural_verification_failed", err["reasons"])
+        self.assertFalse(err["verification_ok"])
+        failed = {c["name"] for c in err["failed_checks"]}
+        self.assertIn("deps_point_backward", failed)
+        self.assertFalse(os.path.exists(sc.ORDERS_DIR))
+
+    def test_recovered_order_repairs_schedule_and_requirement_gates(self):
+        idea = (
+            "Sync paginated issues with caching, retries, debounced label writes, "
+            "idempotent side effects, and async event completion."
+        )
         attempts = [
             {"stage": "cast", "model": "claude-opus-4-8",
              "input": "initial prompt", "output": "truncated"},
@@ -438,15 +474,19 @@ class CompileStreamCastFailureTest(unittest.TestCase):
 
         sc.RECOVERED_CAST_MIN_SCORE = 0
         sc.cast = recovered_cast
+        sc._record_cost = lambda *a, **k: None
 
-        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream("idea")]
-        err = events[-1]
-        self.assertEqual(err["code"], "cast_recovery_low_quality")
-        self.assertIn("structural_verification_failed", err["reasons"])
-        self.assertFalse(err["verification_ok"])
-        failed = {c["name"] for c in err["failed_checks"]}
-        self.assertIn("deps_point_backward", failed)
-        self.assertFalse(os.path.exists(sc.ORDERS_DIR))
+        events = [json.loads(chunk[len("data: "):]) for chunk in sc.compile_stream(idea)]
+        self.assertEqual(events[-1]["stage"], "complete")
+        order = events[-1]["order"]
+        self.assertTrue(seasar_verify.verify_order(order)["ok"])
+        self.assertTrue(seasar_dispatch.readiness_rows(order))
+        self.assertFalse([
+            r for r in seasar_dispatch.readiness_rows(order)
+            if not r.get("ready")
+        ])
+        self.assertGreaterEqual(order["tasks"][1]["wave"], 2)
+        self.assertTrue(os.path.exists(sc.ORDERS_DIR))
 
     def test_quality_floor_does_not_apply_to_initial_cast(self):
         attempts = [

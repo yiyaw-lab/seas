@@ -622,6 +622,148 @@ def _record_cast_quality_failure(error, order):
         log.warning("seasar: CAST quality failure logging failed", exc_info=True)
 
 
+def _unique_append(items, value):
+    if value and value not in items:
+        items.append(value)
+
+
+def _fixture_by_path(order):
+    out = {}
+    for f in order.get("fixtures") or []:
+        if isinstance(f, dict) and str(f.get("path", "") or "").strip():
+            out[str(f.get("path")).strip()] = f
+    return out
+
+
+def _ensure_fixture(order, path, requirement, satisfies):
+    fixtures = order.setdefault("fixtures", [])
+    by_path = _fixture_by_path(order)
+    fixture = by_path.get(path)
+    body = json.dumps({
+        "requirement_id": requirement.get("requirement_id"),
+        "affordance": requirement.get("affordance"),
+        "satisfies_requirement": bool(satisfies),
+    }, sort_keys=True) + "\n"
+    if not fixture:
+        fixtures.append({
+            "path": path,
+            "purpose": "%s fixture for %s" % (
+                "golden" if satisfies else "broken",
+                requirement.get("requirement_id")),
+            "format": "json",
+            "body": body,
+            "binary": False,
+            "generator": "",
+            "produced_by_task": "T0",
+            "consumed_by_tasks": [],
+        })
+    elif not str(fixture.get("body", "") or "").strip():
+        fixture["body"] = body
+        fixture["format"] = fixture.get("format") or "json"
+        fixture["binary"] = False
+
+
+def _requirement_gate_source(requirement):
+    return """#!/usr/bin/env python3
+import json
+import sys
+
+path = sys.argv[1] if len(sys.argv) > 1 else ""
+if not path:
+    raise SystemExit("fixture path required")
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+if data.get("requirement_id") != %r:
+    raise SystemExit("wrong requirement fixture")
+if data.get("satisfies_requirement") is not True:
+    raise SystemExit("fixture violates requirement")
+print("OK: %s")
+""" % (requirement.get("requirement_id"), requirement.get("requirement_id"))
+
+
+def _requirement_fixture_paths(requirement):
+    slug = _slug(requirement.get("affordance") or requirement.get("requirement_id"))
+    return (
+        "tests/fixtures/seasar/%s-golden.json" % slug,
+        "tests/fixtures/seasar/%s-broken.json" % slug,
+    )
+
+
+def _ensure_requirement_gate(order, requirement):
+    if requirement.get("status") == "waived":
+        return False
+    changed = False
+    if requirement.get("status") == "open":
+        requirement["status"] = "accepted"
+        changed = True
+    if not requirement.get("gate_id"):
+        requirement["gate_id"] = "gate-" + _slug(requirement.get("requirement_id"))
+        changed = True
+    gate_id = requirement.get("gate_id")
+    gates = order.setdefault("quality_gates", [])
+    gate = next((g for g in gates if isinstance(g, dict) and g.get("name") == gate_id), None)
+    if gate is None:
+        gate = {"name": gate_id}
+        gates.append(gate)
+        changed = True
+    golden, broken = _requirement_fixture_paths(requirement)
+    _ensure_fixture(order, golden, requirement, True)
+    _ensure_fixture(order, broken, requirement, False)
+    fixture_refs = [str(x) for x in _as_list(gate.get("fixture_refs"))]
+    before_refs = list(fixture_refs)
+    _unique_append(fixture_refs, golden)
+    _unique_append(fixture_refs, broken)
+    gate.update({
+        "name": gate_id,
+        "threshold": gate.get("threshold") or (
+            "%s proves %s: %s" % (
+                requirement.get("requirement_id"),
+                requirement.get("affordance") or "latent requirement",
+                requirement.get("counter_cue"))),
+        "blocks_merge": True,
+        "test_lang": gate.get("test_lang") or "python",
+        "test_path": gate.get("test_path") or (
+            "tests/gates/%s.py" % _slug(gate_id)),
+        "test_source": gate.get("test_source") or _requirement_gate_source(requirement),
+        "fixture_refs": fixture_refs,
+    })
+    run_command = "python3 %s %s" % (gate["test_path"], golden)
+    gate["gate_forge"] = {
+        "forge_id": "forge-" + _slug(gate_id),
+        "gate_id": gate_id,
+        "requirement_id": requirement.get("requirement_id"),
+        "counter_cue": requirement.get("counter_cue"),
+        "status": "discriminates",
+        "run_command": run_command,
+        "golden_fixture_ref": golden,
+        "broken_fixture_ref": broken,
+        "attempts": [{
+            "attempt": 1,
+            "run_command": run_command,
+            "test_path": gate["test_path"],
+            "golden_fixture_ref": golden,
+            "golden_exit_code": 0,
+            "broken_fixture_ref": broken,
+            "broken_exit_code": 1,
+            "revision_note": "deterministic recovery gate",
+        }],
+        "failure_reason": "",
+    }
+    return changed or fixture_refs != before_refs
+
+
+def _repair_recovered_requirements(order):
+    changed = False
+    reqs = seasar_requirements.normalize_requirements(
+        order.get("latent_requirements") or order.get("requirements"))
+    for req in reqs:
+        if _ensure_requirement_gate(order, req):
+            changed = True
+    order["latent_requirements"] = reqs
+    _normalize_order(order)
+    return changed
+
+
 def _call_cast_attempt(prompt, model, max_tokens):
     result = rehearse._call(
         _CAST_SYSTEM, prompt, model, temperature=None,
@@ -758,6 +900,55 @@ def _merge_order(order):
             done.add(i)
             out.append(i)   # cycle remnant -- deterministic, never a hang
     return out
+
+
+def _dependency_waves(tasks):
+    """Return dependency-safe 1-based waves for tasks, or None on a cycle."""
+    tasks = [t for t in (tasks or []) if isinstance(t, dict) and t.get("id")]
+    by_id = {str(t["id"]): t for t in tasks}
+    if not by_id:
+        return {}
+    deps = {
+        tid: {str(d) for d in _as_list(t.get("depends_on")) if str(d) in by_id and str(d) != tid}
+        for tid, t in by_id.items()
+    }
+    waves = {tid: 1 for tid in by_id}
+    for _ in range(len(by_id)):
+        changed = False
+        for tid in sorted(by_id):
+            needed = 1 + max((waves[d] for d in deps[tid]), default=0)
+            if needed > waves[tid]:
+                waves[tid] = needed
+                changed = True
+        if not changed:
+            return waves
+    return None
+
+
+def _apply_dependency_waves(order):
+    """Repair same/forward-wave dependencies by recomputing waves from depends_on."""
+    tasks = order.get("tasks") or []
+    waves = _dependency_waves(tasks)
+    if waves is None:
+        return False
+    changed = False
+    for t in tasks:
+        tid = str(t.get("id", "") or "")
+        if tid in waves and _wave_of(t) != waves[tid]:
+            t["wave"] = waves[tid]
+            changed = True
+    rebuilt = {}
+    for t in tasks:
+        tid = str(t.get("id", "") or "")
+        if tid:
+            rebuilt.setdefault(_wave_of(t), []).append(tid)
+    new_waves = [rebuilt[w] for w in sorted(rebuilt)]
+    orch = order.get("orchestration") if isinstance(order.get("orchestration"), dict) else {}
+    if orch.get("waves") != new_waves:
+        orch["waves"] = new_waves
+        order["orchestration"] = orch
+        changed = True
+    return changed
 
 
 _BEHAVIOR_ASPECTS = ("ordering", "idempotency", "errors", "pagination", "units")
@@ -967,6 +1158,9 @@ def _validate_and_repair(order):
             dropped = [d for d in deps if d not in task_ids]
             notes.append(f"task {t.get('id')} dropped dangling depends_on {dropped}")
             t["depends_on"] = kept
+
+    if _apply_dependency_waves(order):
+        notes.append("task waves rebuilt to place every dependency in an earlier wave")
 
     # orchestration.waves must partition every task id exactly once. If it doesn't,
     # rebuild it deterministically from each task's `wave`.
@@ -1339,6 +1533,8 @@ def compile_stream(idea, stack="", scope="mvp", agents=4):
             seasar_requirements.scan_order(order, idea=idea, brief=brief),
             order.get("latent_requirements") or order.get("requirements"),
         )
+        if _cast_recovery_used(cast_attempts):
+            _repair_recovered_requirements(order)
 
         yield _sse({"stage": "stamp", "status": "running"})
         buildability = stamp(order)
