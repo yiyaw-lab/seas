@@ -100,6 +100,58 @@ ARGO_MCP_TOKEN = os.environ.get("ARGO_MCP_TOKEN")
 PROPOSE_REPO = os.environ.get("ARGO_PROPOSE_REPO", "your-org/your-repo")
 
 
+def _seasar_compile_module():
+    import seasar_compile
+
+    return seasar_compile
+
+
+def _safe_seasar_order_id(order_id):
+    order_id = (order_id or "").strip()
+    if re.fullmatch(r"order-[A-Za-z0-9]{6,32}", order_id):
+        return order_id
+    return ""
+
+
+def _seasar_foundry_dist():
+    """Return the built Foundry app directory, if present.
+
+    The Foundry UI is currently a local-only artifact in `foundry/dist`, not a
+    tracked package. Worktrees do not inherit that untracked directory, so local
+    dev can point this server at it with SEASAR_FOUNDRY_DIST.
+    """
+    candidates = []
+    configured = os.environ.get("SEASAR_FOUNDRY_DIST", "").strip()
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend([
+        ROOT / "foundry" / "dist",
+        Path.home() / "code" / "seas" / "foundry" / "dist",
+    ])
+    for path in candidates:
+        if (path / "index.html").is_file():
+            return path
+    return None
+
+
+def _seasar_access_error(req):
+    expected = os.environ.get("SEASAR_UI_TOKEN") or ARGO_MCP_TOKEN
+    if expected:
+        header = req.headers.get("Authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else ""
+        if token == expected:
+            return None
+        return "forbidden", 403
+    host_header = (req.host or "").lower()
+    host = (host_header.split("]", 1)[0].lstrip("[")
+            if host_header.startswith("[") else host_header.split(":", 1)[0])
+    if host in ("127.0.0.1", "localhost", "::1") or req.remote_addr in (
+        "127.0.0.1", "::1",
+    ):
+        return None
+    return "seasar ui token required", 503
+
+
 def _build_mcp_servers():
     base = os.environ.get("WEBHOOK_URL")
     if not base or not ARGO_MCP_TOKEN:
@@ -1547,13 +1599,98 @@ def _health_payload():
 
 
 def create_app():
-    from flask import Flask, jsonify, request
+    from flask import Flask, Response, jsonify, request, send_from_directory
+    from flask import stream_with_context
 
     app = Flask(__name__)
 
     @app.get("/")
     def health():
         return jsonify(_health_payload()), 200
+
+    @app.get("/seasar")
+    @app.get("/seasar/")
+    def seasar_foundry():
+        dist = _seasar_foundry_dist()
+        if not dist:
+            return "foundry dist not found; set SEASAR_FOUNDRY_DIST", 503
+        return send_from_directory(dist, "index.html")
+
+    @app.get("/assets/<path:asset_path>")
+    def seasar_foundry_asset(asset_path):
+        dist = _seasar_foundry_dist()
+        if not dist:
+            return "foundry dist not found", 404
+        return send_from_directory(dist / "assets", asset_path)
+
+    @app.get("/favicon.svg")
+    @app.get("/icons.svg")
+    def seasar_foundry_root_asset():
+        dist = _seasar_foundry_dist()
+        if not dist:
+            return "foundry dist not found", 404
+        return send_from_directory(dist, request.path.lstrip("/"))
+
+    @app.post("/api/compile")
+    @app.post("/seasar/compile")
+    def seasar_compile_stream():
+        auth_error = _seasar_access_error(request)
+        if auth_error:
+            return auth_error
+        payload = request.get_json(force=True, silent=True)
+        if not isinstance(payload, dict):
+            payload = request.form.to_dict()
+        idea = payload.get("idea", "")
+        stack = payload.get("stack", "")
+        scope = payload.get("scope", "mvp")
+        agents = payload.get("agents", 4)
+        seasar_compile = _seasar_compile_module()
+        return Response(
+            stream_with_context(seasar_compile.compile_stream(
+                idea, stack=stack, scope=scope, agents=agents)),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/order/<order_id>")
+    def seasar_order(order_id):
+        auth_error = _seasar_access_error(request)
+        if auth_error:
+            return auth_error
+        order_id = _safe_seasar_order_id(order_id)
+        if not order_id:
+            return "not found", 404
+        order = _seasar_compile_module().load_order(order_id)
+        if not order:
+            return "not found", 404
+        return jsonify(order), 200
+
+    @app.get("/api/order/<order_id>/bundle.zip")
+    @app.get("/seasar/orders/<order_id>/bundle.zip")
+    def seasar_bundle(order_id):
+        auth_error = _seasar_access_error(request)
+        if auth_error:
+            return auth_error
+        order_id = _safe_seasar_order_id(order_id)
+        if not order_id:
+            return "not found", 404
+        seasar_compile = _seasar_compile_module()
+        order = seasar_compile.load_order(order_id)
+        if not order:
+            return "not found", 404
+        bundle = seasar_compile.build_bundle(order)
+        return Response(
+            bundle,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{order_id}-build-order.zip"'
+                )
+            },
+        )
 
     @app.post("/push")
     def push():
