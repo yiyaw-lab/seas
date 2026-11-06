@@ -17,7 +17,7 @@ flask           # WSGI app receiving Telegram webhook POSTs
 # Used for SEAS topical related-source search and as a web_fetch JS/403 fallback.
 
 # Agentic MCP server + ASGI hosting (src/argo_mcp_server.py, create_asgi_app)
-mcp             # FastMCP streamable-HTTP server (Argo's tools)
+mcp>=1.27,<2    # FastMCP server + SEAS Streamable-HTTP client (v2 removes FastMCP)
 uvicorn         # ASGI server running webhook + MCP in one process
 asgiref         # WsgiToAsgi: serve the Flask webhook under ASGI
 starlette       # ASGI routing/mounting + bearer-auth middleware

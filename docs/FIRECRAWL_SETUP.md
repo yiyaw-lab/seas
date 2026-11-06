@@ -1,30 +1,48 @@
-# Firecrawl setup (optional, recommended for SEAS)
+# SEAS source search (Parallel and optional Firecrawl)
 
 SEAS's emission gate needs **cross-source convergence**: a finding is only earned
 when ≥2 *independent* sources on the same topic corroborate a claim. Finding those
 related sources requires web *search*, not just fetching a URL you already have.
-That's what Firecrawl provides.
+An unconfigured installation uses [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+at `https://search.parallel.ai/mcp`. Search uses Fast mode and requires no account
+or API key. It returns relevant excerpts, which SEAS passes to synthesis with
+their source URLs. The existing emission gate still checks every cited quote.
 
 ## Do you need it?
 
 | You have… | SEAS behavior |
 |---|---|
-| no `FIRECRAWL_API_KEY` | Each investigation sees only the signal's own source → can't reach 2 sources → honest `premature` probe. The pipeline runs, but rarely emits findings. |
-| `FIRECRAWL_API_KEY` set | `_gather_sources` adds topical related sources → the gate can test convergence → real findings get emitted. |
+| no search configuration | Parallel adds topical excerpts from approved hosts. |
+| `FIRECRAWL_API_KEY` set | Retains Firecrawl search categories and scraped page content. |
+| `SEAS_SEARCH_PROVIDER=parallel` | Explicitly selects anonymous Parallel, even with a Firecrawl key. |
+| `SEAS_SEARCH_PROVIDER=firecrawl` | Explicitly selects Firecrawl; requires `FIRECRAWL_API_KEY`. |
+| `SEAS_SEARCH_PROVIDER=none` | Disables topical search; the signal's own source is still fetched. |
 
-So Firecrawl is **optional but effectively required to demonstrate the finding
-path.** Without it you'll mostly see probes (which is the system being honest, not
-broken).
+Set these variables in your environment or `.env`, then use the usual
+`PYTHONPATH=src python3 src/seas.py` pipeline. There is no extra service to run;
+the existing Python MCP dependency supplies the Streamable HTTP client.
 
-## Setup
+Parallel results are filtered against Argo's approved-host allowlist before they
+reach the model. Search returns at most five related sources, each capped at
+6,000 characters. Parallel excerpts are not full-page scrapes and do not support
+Firecrawl's research/GitHub/PDF categories; select Firecrawl when you need them.
+Alternate arXiv formats and versions count as one paper when gathering sources.
+
+Free anonymous access has service limits. A failed or rate-limited search keeps
+the original source and may yield an honest `premature` probe. Discovery and
+search share a 25-second deadline. Errors never switch to another provider.
+Unknown provider values skip topical search with an operator warning.
+
+## Firecrawl setup
 
 1. Get a key at <https://firecrawl.dev> (`fc-...`).
 2. Add it to your environment / `.env`:
    ```
    FIRECRAWL_API_KEY=fc-...
    ```
-3. That's it. `src/firecrawl_client.py` detects the key (`is_enabled()`) and the
-   pipeline starts using `/v2/search` for topical source-gathering automatically.
+3. With `SEAS_SEARCH_PROVIDER` unset, the pipeline detects the key and retains
+   `/v2/search` for topical source-gathering automatically. Explicit selections
+   take precedence over credentials.
 
 ## Why a thin stdlib client, not the official MCP server
 

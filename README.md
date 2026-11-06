@@ -141,9 +141,10 @@ fetched sources (no fabricated evidence).
 Run the full pipeline: `PYTHONPATH=src python3 src/seas.py` (fetch → score → rank
 → synthesize), or the `SEAS Findings` workflow. Findings persist as JSON in
 `findings/` with a `runs/<id>/` source bundle; beliefs in `data/world_model.json`;
-dead ends in `data/probes.json`. Needs `FIRECRAWL_API_KEY` for topical
-related-source search (else it honestly probes `premature` — see
-[docs/FIRECRAWL_SETUP.md](docs/FIRECRAWL_SETUP.md)).
+dead ends in `data/probes.json`. Topical related-source search uses free anonymous
+Parallel Search MCP when no Firecrawl key is configured. Existing Firecrawl keys
+retain Firecrawl; `SEAS_SEARCH_PROVIDER=parallel|firecrawl|none` selects or disables
+search explicitly. See [search setup](docs/FIRECRAWL_SETUP.md).
 
 **Demonstrable, committed evidence** (not a claim — these are real pipeline runs):
 [`findings/`](findings/README.md) holds gate-passed findings F-002…F-004, each
@@ -425,8 +426,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests   # 885 tests, no keys need
 | You have… | What runs |
 |---|---|
 | **no keys** | the full test suite + all pure logic (the gate, ranking, world model) |
-| **+ an LLM key** (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) | `python3 src/seas.py` scores and synthesizes, but usually emits `premature` probes (no related-source search) |
-| **+ `FIRECRAWL_API_KEY`** | the full finding path — cross-source convergence, real findings (see [docs/FIRECRAWL_SETUP.md](docs/FIRECRAWL_SETUP.md)) |
+| **+ an LLM key** (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) | `python3 src/seas.py` scores and synthesizes with keyless Parallel topical search; findings still require corroborating sources and a passing gate |
+| **+ `FIRECRAWL_API_KEY`** | retains Firecrawl topical search, including category filtering and scraped page content (see [search setup](docs/FIRECRAWL_SETUP.md)) |
 
 Argo (the live Telegram bot) additionally needs `TELEGRAM_BOT_TOKEN` +
 `TELEGRAM_CHAT_ID`; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).

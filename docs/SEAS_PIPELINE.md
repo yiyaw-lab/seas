@@ -22,8 +22,10 @@ signal → score → rank → topical sources → synthesis → EMISSION GATE �
    (durability / leverage / alignment / accessibility / novelty).
 3. **opportunities.build** — rank by weighted score; surface qualifying signals.
 4. **seas_finding.investigate** — gather a *topical* source pool (the signal's own
-   source + Firecrawl-searched related sources on the same topic), ask the model
+   source + related sources on the same topic), ask the model
    to propose a finding grounded only in those sources, then run the gate.
+   [Source search](FIRECRAWL_SETUP.md) defaults to anonymous Parallel MCP when no
+   Firecrawl key is configured; existing Firecrawl credentials retain Firecrawl.
 
 ## The emission gate (src/seas_schema.py `validate_finding`)
 

@@ -76,8 +76,8 @@ def main():
         print("  no signal with a source link — nothing to investigate")
         return
 
-    import firecrawl_client
-    mode = "firecrawl" if firecrawl_client.is_enabled() else "stdlib"
+    import seas_search
+    mode = seas_search.selected_provider()
     print(f"  investigating [{mode}]: {signal['title'][:70]}")
     result = seas_finding.investigate(signal, dry_run=dry)
     print(f"\n  {result}")

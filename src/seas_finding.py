@@ -45,7 +45,7 @@ import argo_paths
 import argo_predictions
 import argo_store
 import fetch_signals
-import firecrawl_client
+import seas_search
 import probes
 import seas_schema
 import world_model
@@ -195,10 +195,10 @@ def _gather_sources(signal, dry_run=False):
     """Build a TOPICAL pool of sources to synthesize over. This is the fix for
     the clustering gap: instead of reusing random sibling signals (which share
     no topic), we (1) read the signal's own source, then (2) SEARCH for sources
-    about the same topic via Firecrawl. Convergence needs sources about one
-    thing; a stratified-diverse signal batch never had that.
+    about the same topic via the selected search provider. Convergence needs
+    sources about one thing; a stratified-diverse signal batch never had that.
 
-    Falls back to stdlib when Firecrawl is unavailable: at minimum we still get
+    When search is unavailable, at minimum we still get
     the signal's own source, and the synthesis floor will honestly probe
     'premature' (one source, no convergence) rather than fake a finding.
     Returns a list of {"url","title","text"}.
@@ -212,23 +212,24 @@ def _gather_sources(signal, dry_run=False):
         sources.append({"url": signal["link"],
                         "title": signal.get("title", ""), "text": own})
 
-    # (2) topically-related sources via Firecrawl search (the keystone).
-    related = firecrawl_client.search_related(
+    # (2) topically-related sources, filtered against the same host allowlist.
+    related = seas_search.search_related(
         _search_terms(signal),
         category=_search_category(signal),
         limit=5,
         allowed_hosts=argo_mcp_server.ALLOWED_HOSTS,
     )
     if related:
-        have = {s["url"] for s in sources}
+        have = {seas_search.source_key(s["url"]) for s in sources}
         for r in related:
-            if r["url"] not in have:
+            key = seas_search.source_key(r["url"])
+            if key not in have:
                 sources.append(r)
-                have.add(r["url"])
+                have.add(key)
     elif related is None and not dry_run:
-        # Firecrawl unavailable. We proceed with whatever we have (often just the
+        # Search unavailable. We proceed with whatever we have (often just the
         # signal's own source) — the gate will honestly probe premature.
-        print("  (firecrawl unavailable — synthesizing on the signal's source "
+        print("  (topical search unavailable — synthesizing on the signal's source "
               "alone; expect a 'premature' probe)")
     return sources
 
@@ -243,7 +244,7 @@ def investigate(signal, dry_run=False):
     if not ok and not dry_run:
         return f"Skipped {sig_ref}: {why}"
 
-    # Gather a TOPICAL pool: the signal's own source + Firecrawl-searched related
+    # Gather a TOPICAL pool: the signal's own source + searched related
     # sources on the same topic. This is the clustering-gap fix (see
     # _gather_sources): convergence needs sources about ONE thing.
     sources = _gather_sources(signal, dry_run=dry_run)

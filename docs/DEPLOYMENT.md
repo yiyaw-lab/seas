@@ -44,7 +44,8 @@ for the full list. The ones that gate behavior:
 | Variable | Effect if unset |
 |---|---|
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | No model → SEAS can't synthesize, Argo can't chat. At least one required. |
-| `FIRECRAWL_API_KEY` | SEAS mostly probes `premature` (see [FIRECRAWL_SETUP.md](FIRECRAWL_SETUP.md)). |
+| `FIRECRAWL_API_KEY` | SEAS uses anonymous Parallel topical search unless explicitly overridden (see [search setup](FIRECRAWL_SETUP.md)). |
+| `SEAS_SEARCH_PROVIDER` | Uses Firecrawl if its key is set, otherwise Parallel. Set `parallel`, `firecrawl`, or `none` to override. |
 | `WEBHOOK_URL` | Webhook self-registration is skipped (register manually). |
 | `ARGO_MCP_TOKEN` | The `/mcp` endpoint has no bearer auth — set it. |
 | `ARGO_PROPOSE_REPO` | Defaults to a non-real placeholder so a fork can't PR upstream. Set to your `owner/repo` for self-create. |
